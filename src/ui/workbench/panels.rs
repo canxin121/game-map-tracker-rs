@@ -397,6 +397,8 @@ fn paginated_list(
     id_prefix: &'static str,
     cx: &mut Context<TrackerWorkbench>,
     tokens: WorkbenchThemeTokens,
+    title: Option<SharedString>,
+    header_content: Vec<AnyElement>,
     search_input: &gpui::Entity<gpui_component::input::InputState>,
     search_actions: Vec<AnyElement>,
     page_input: &gpui::Entity<gpui_component::input::InputState>,
@@ -408,6 +410,7 @@ fn paginated_list(
     let first_page = 0usize;
     let last_page = metrics.page_count.saturating_sub(1);
     let has_results = !rows.is_empty();
+    let has_header_content = !header_content.is_empty();
     let has_search_actions = !search_actions.is_empty();
 
     let mut controls = Vec::new();
@@ -474,6 +477,7 @@ fn paginated_list(
     );
 
     div()
+        .w_full()
         .rounded_lg()
         .bg(tokens.panel_sunken_bg)
         .border_1()
@@ -481,11 +485,15 @@ fn paginated_list(
         .p_3()
         .child(
             div()
+                .w_full()
                 .flex()
                 .flex_col()
                 .gap_3()
+                .when_some(title, |panel, title| panel.child(section_title(title)))
+                .when(has_header_content, |panel| panel.children(header_content))
                 .child(
                     div()
+                        .w_full()
                         .flex()
                         .items_center()
                         .gap_2()
@@ -1583,18 +1591,13 @@ fn map_sidebar(
         .min_h(px(0.0))
         .flex()
         .flex_col()
-        .gap_4()
         .overflow_y_scrollbar()
-        .rounded_xl()
-        .bg(tokens.panel_bg)
-        .border_1()
-        .border_color(tokens.border)
-        .p_4()
-        .child(section_title("标记组"))
         .child(paginated_list(
             "map-groups",
             cx,
             tokens,
+            Some("标记组".into()),
+            Vec::new(),
             &this.map_group_list.search,
             Vec::new(),
             &this.map_group_list.page_input,
@@ -1710,16 +1713,12 @@ fn group_manager(
         .flex_col()
         .gap_4()
         .overflow_y_scrollbar()
-        .rounded_xl()
-        .bg(tokens.panel_bg)
-        .border_1()
-        .border_color(tokens.border)
-        .p_4()
-        .child(section_title("标记组"))
         .child(paginated_list(
             "marker-groups",
             cx,
             tokens,
+            Some("标记组".into()),
+            Vec::new(),
             &this.marker_group_list.search,
             vec![
                 toolbar_icon_button(
@@ -1961,28 +1960,29 @@ fn point_sidebar_panel(
         .min_h(px(0.0))
         .flex()
         .flex_col()
-        .gap_4()
         .overflow_y_scrollbar()
-        .rounded_xl()
-        .bg(tokens.panel_bg)
-        .border_1()
-        .border_color(tokens.border)
-        .p_4()
-        .child(section_title("标记点"))
-        .child(field_label(tokens, "标记组"))
-        .child(
-            Select::new(&this.marker_group_picker)
-                .w_full()
-                .menu_width(px(360.0))
-                .icon(IconName::Search)
-                .placeholder("搜索并选择标记组")
-                .disabled(this.route_groups.is_empty())
-                .empty(empty_list_state(tokens, "当前还没有标记组。")),
-        )
         .child(paginated_list(
             "group-points",
             cx,
             tokens,
+            Some("标记点".into()),
+            vec![
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(field_label(tokens, "标记组"))
+                    .child(
+                        Select::new(&this.marker_group_picker)
+                            .w_full()
+                            .menu_width(px(360.0))
+                            .icon(IconName::Search)
+                            .placeholder("搜索并选择标记组")
+                            .disabled(this.route_groups.is_empty())
+                            .empty(empty_list_state(tokens, "当前还没有标记组。")),
+                    )
+                    .into_any_element(),
+            ],
             &this.point_list.search,
             vec![
                 toolbar_icon_button(
