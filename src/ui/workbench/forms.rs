@@ -69,6 +69,23 @@ impl MarkerFormInputs {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct RoutePlannerFormInputs {
+    pub(super) name: gpui::Entity<InputState>,
+    pub(super) description: gpui::Entity<InputState>,
+    pub(super) color_hex: gpui::Entity<InputState>,
+}
+
+impl RoutePlannerFormInputs {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<TrackerWorkbench>) -> Self {
+        Self {
+            name: cx.new(|cx| InputState::new(window, cx).placeholder("新路线名称")),
+            description: cx.new(|cx| InputState::new(window, cx).placeholder("路线说明")),
+            color_hex: cx.new(|cx| InputState::new(window, cx).default_value("#FF6B6B")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MarkerGroupPickerItem {
     pub(super) id: RouteId,
@@ -365,6 +382,39 @@ impl MarkerDraft {
                     cx,
                 )),
                 size_px,
+            }
+            .normalized(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PlannerRouteDraft {
+    pub(super) name: String,
+    pub(super) description: String,
+    pub(super) style: MarkerStyle,
+}
+
+impl PlannerRouteDraft {
+    pub(super) fn read(
+        workbench: &TrackerWorkbench,
+        cx: &mut Context<TrackerWorkbench>,
+    ) -> Result<Self, String> {
+        let name = read_input_value(&workbench.bwiki_planner_form.name, cx);
+        if name.trim().is_empty() {
+            return Err("路线名称不能为空。".to_owned());
+        }
+
+        Ok(Self {
+            name,
+            description: read_input_value(&workbench.bwiki_planner_form.description, cx),
+            style: MarkerStyle {
+                icon: workbench.bwiki_planner_icon.clone(),
+                color_hex: normalize_hex_color(&read_input_value(
+                    &workbench.bwiki_planner_form.color_hex,
+                    cx,
+                )),
+                size_px: 24.0,
             }
             .normalized(),
         })

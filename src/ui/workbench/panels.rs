@@ -2196,9 +2196,12 @@ fn bwiki_types_sidebar(
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
     let dataset = this.bwiki_resources.dataset_snapshot();
+    let bwiki_dataset_ready = dataset.is_some();
     let category_query = normalized_query(&this.bwiki_category_search, cx);
     let type_query = normalized_query(&this.bwiki_type_search, cx);
     let bwiki_resources = this.bwiki_resources.clone();
+    let planner_selected_count = this.bwiki_planner_selected_count();
+    let planner_total_cost = this.bwiki_planner_preview_total_cost();
     let mut grouped = BTreeMap::<String, Vec<(u32, String, String, usize)>>::new();
     if let Some(dataset) = dataset.as_ref() {
         for definition in &dataset.types {
@@ -2384,7 +2387,15 @@ fn bwiki_types_sidebar(
         .border_1()
         .border_color(tokens.border)
         .p_4()
-        .child(section_title("节点图鉴过滤"))
+        .child(section_title("节点图鉴"))
+        .child(bwiki_route_planner_card(
+            this,
+            cx,
+            tokens,
+            bwiki_dataset_ready,
+            planner_selected_count,
+            planner_total_cost,
+        ))
         .child(
             div()
                 .rounded_lg()
@@ -2395,6 +2406,7 @@ fn bwiki_types_sidebar(
                 .flex()
                 .flex_col()
                 .gap_3()
+                .child(field_label(tokens, "节点过滤"))
                 .child(
                     div()
                         .flex()
@@ -2483,6 +2495,162 @@ fn bwiki_types_sidebar(
             panel.child(empty_list_state(tokens, "没有匹配的分类或节点。"))
         })
         .when(!category_cards.is_empty(), |panel| panel.children(category_cards))
+}
+
+fn bwiki_route_planner_card(
+    this: &TrackerWorkbench,
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+    bwiki_dataset_ready: bool,
+    planner_selected_count: usize,
+    planner_total_cost: Option<f32>,
+) -> impl IntoElement {
+    let preview_summary = planner_total_cost
+        .map(|total_cost| format!("已选 {} 个点 · 预计长度 {:.0}", planner_selected_count, total_cost))
+        .unwrap_or_else(|| format!("已选 {} 个点", planner_selected_count));
+    let create_disabled = planner_selected_count == 0;
+
+    div()
+        .rounded_lg()
+        .bg(tokens.panel_sunken_bg)
+        .border_1()
+        .border_color(tokens.border)
+        .p_3()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(field_label(tokens, "路线规划"))
+                .child(
+                    toolbar_button_with_tooltip(
+                        "bwiki-planner-toggle",
+                        tokens,
+                        "P",
+                        if this.is_bwiki_planner_active() {
+                            "退出规划"
+                        } else {
+                            "进入规划模式"
+                        },
+                        if bwiki_dataset_ready {
+                            None
+                        } else {
+                            Some(this.bwiki_status_tooltip())
+                        },
+                        if this.is_bwiki_planner_active() {
+                            ToolbarButtonTone::Primary
+                        } else {
+                            ToolbarButtonTone::Neutral
+                        },
+                        !bwiki_dataset_ready,
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.toggle_bwiki_planner_mode(window, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                ),
+        )
+        .when(this.is_bwiki_planner_active(), |card| {
+            card.child(
+                div()
+                    .text_xs()
+                    .text_color(tokens.text_muted)
+                    .child("左键点选，Ctrl 拖动画圈反选。"),
+            )
+            .child(
+                div()
+                    .rounded_lg()
+                    .bg(tokens.panel_alt_bg)
+                    .border_1()
+                    .border_color(tokens.border)
+                    .px_3()
+                    .py_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(tokens.app_fg)
+                            .child(preview_summary),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .children([
+                        labeled_input(tokens, "名称", &this.bwiki_planner_form.name).into_any_element(),
+                        labeled_input(tokens, "说明", &this.bwiki_planner_form.description)
+                            .into_any_element(),
+                    ]),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .children([
+                        labeled_input(tokens, "颜色", &this.bwiki_planner_form.color_hex)
+                            .into_any_element(),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(field_label(tokens, "图标"))
+                            .child(
+                                Select::new(&this.bwiki_planner_icon_picker)
+                                    .w_full()
+                                    .menu_width(px(360.0))
+                                    .placeholder("选择路线默认图标")
+                                    .search_placeholder("按名称、分类或编号搜索")
+                                    .empty_message("当前没有可用的 BWiki 图标。"),
+                            )
+                            .into_any_element(),
+                    ]),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .children([
+                        toolbar_button_with_tooltip(
+                            "bwiki-planner-clear",
+                            tokens,
+                            "C",
+                            "清空已选",
+                            None,
+                            ToolbarButtonTone::Neutral,
+                            planner_selected_count == 0,
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.clear_bwiki_planner_selection();
+                                this.status_text = "已清空当前规划点。".into();
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element(),
+                        toolbar_button_with_tooltip(
+                            "bwiki-planner-create",
+                            tokens,
+                            "+",
+                            "创建路线",
+                            None,
+                            ToolbarButtonTone::Primary,
+                            create_disabled,
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.create_route_from_bwiki_planner(window, cx);
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element(),
+                    ]),
+            )
+        })
 }
 
 fn bwiki_type_toggle_button(
@@ -3322,18 +3490,32 @@ fn paint_bwiki_map_overlay(
     camera: crate::domain::geometry::MapCamera,
     tokens: WorkbenchThemeTokens,
 ) {
-    let (dataset, bwiki_resources, visible_mark_types) = {
+    let (
+        dataset,
+        bwiki_resources,
+        visible_mark_types,
+        selected_keys,
+        planner_preview_worlds,
+        planner_color_hex,
+        planner_circle_selection,
+    ) = {
         let this = entity.read(cx);
         (
             this.bwiki_resources.dataset_snapshot(),
             this.bwiki_resources.clone(),
             this.bwiki_visible_mark_types.clone(),
+            this.bwiki_planner_selected_points.clone(),
+            this.bwiki_planner_preview_worlds(),
+            this.bwiki_planner_route_color_hex(cx),
+            this.bwiki_planner_circle_selection.clone(),
         )
     };
 
     window.paint_layer(bounds, |window| {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(dataset) = dataset.as_ref() {
+                let preview_color =
+                    gpui::rgb(parse_hex_color(&planner_color_hex, 0xff6b6b));
                 let visible_definitions = dataset
                     .types
                     .iter()
@@ -3356,6 +3538,62 @@ fn paint_bwiki_map_overlay(
                     })
                     .collect::<BTreeMap<_, _>>();
 
+                if planner_preview_worlds.len() > 1 {
+                    let preview_screen = screen_points(camera, &planner_preview_worlds);
+                    let mut builder = PathBuilder::stroke(px(3.0));
+                    let first = preview_screen[0];
+                    builder.move_to(point(
+                        bounds.origin.x + px(first.x),
+                        bounds.origin.y + px(first.y),
+                    ));
+                    for screen_point in preview_screen.iter().skip(1) {
+                        builder.line_to(point(
+                            bounds.origin.x + px(screen_point.x),
+                            bounds.origin.y + px(screen_point.y),
+                        ));
+                    }
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, preview_color);
+                    }
+
+                    for segment in preview_screen.windows(2) {
+                        paint_route_arrow(
+                            window,
+                            point(
+                                bounds.origin.x + px(segment[0].x),
+                                bounds.origin.y + px(segment[0].y),
+                            ),
+                            point(
+                                bounds.origin.x + px(segment[1].x),
+                                bounds.origin.y + px(segment[1].y),
+                            ),
+                            preview_color.into(),
+                        );
+                    }
+                }
+
+                if let Some(selection) = planner_circle_selection.as_ref() {
+                    let radius = selection.radius();
+                    if radius >= 1.0 {
+                        let circle_bounds = Bounds {
+                            origin: point(
+                                bounds.origin.x + px(selection.center_screen.x - radius),
+                                bounds.origin.y + px(selection.center_screen.y - radius),
+                            ),
+                            size: size(px(radius * 2.0), px(radius * 2.0)),
+                        };
+                        window.paint_quad(
+                            fill(
+                                circle_bounds,
+                                gpui::rgba(
+                                    (parse_hex_color(&planner_color_hex, 0xff6b6b) << 8) | 0x22,
+                                ),
+                            )
+                            .corner_radii(px(radius)),
+                        );
+                    }
+                }
+
                 for definition in visible_definitions {
                     let Some(points) = dataset.points_by_type.get(&definition.mark_type) else {
                         continue;
@@ -3375,19 +3613,32 @@ fn paint_bwiki_map_overlay(
                             bounds.origin.x + px(screen.x),
                             bounds.origin.y + px(screen.y),
                         );
-                        paint_bwiki_style_marker(window, anchor, false, tokens, |window, bounds| {
-                            if let Some(Some(image)) = icon_images.get(&definition.mark_type) {
-                                let _ =
-                                    window.paint_image(bounds, 0.0.into(), image.clone(), 0, false);
-                            } else {
-                                paint_bwiki_placeholder_marker(
-                                    window,
-                                    anchor,
-                                    definition.mark_type,
-                                    tokens,
-                                );
-                            }
-                        });
+                        let highlighted =
+                            selected_keys.contains(&super::BwikiPointKey::from_record(point_record));
+                        paint_bwiki_style_marker(
+                            window,
+                            anchor,
+                            highlighted,
+                            tokens,
+                            |window, bounds| {
+                                if let Some(Some(image)) = icon_images.get(&definition.mark_type) {
+                                    let _ = window.paint_image(
+                                        bounds,
+                                        0.0.into(),
+                                        image.clone(),
+                                        0,
+                                        false,
+                                    );
+                                } else {
+                                    paint_bwiki_placeholder_marker(
+                                        window,
+                                        anchor,
+                                        definition.mark_type,
+                                        tokens,
+                                    );
+                                }
+                            },
+                        );
                     }
                 }
             }
@@ -3541,6 +3792,9 @@ fn install_map_canvas_navigation_handlers(
             } else {
                 false
             };
+            let bwiki_circle_mode = map_kind == MapCanvasKind::Bwiki
+                && event.modifiers.control
+                && entity.read(cx).is_bwiki_planner_active();
 
             _ = entity.update(cx, |this, _| {
                 let local_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
@@ -3552,6 +3806,10 @@ fn install_map_canvas_navigation_handlers(
                     return;
                 }
                 if map_kind == MapCanvasKind::RouteEditor && this.is_selected_point_move_armed() {
+                    return;
+                }
+                if bwiki_circle_mode {
+                    this.begin_bwiki_planner_circle_selection(local_x, local_y);
                     return;
                 }
                 this.begin_map_drag(
@@ -3574,9 +3832,18 @@ fn install_map_canvas_navigation_handlers(
             } else {
                 false
             };
+            let bwiki_circle_active = map_kind == MapCanvasKind::Bwiki
+                && event.pressed_button == Some(MouseButton::Left)
+                && entity.read(cx).bwiki_planner_circle_selection.is_some();
             _ = entity.update(cx, |this, cx| {
                 let local_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
                 let local_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
+                if bwiki_circle_active
+                    && this.update_bwiki_planner_circle_selection(local_x, local_y)
+                {
+                    cx.notify();
+                    return;
+                }
                 if route_point_map
                     && bounds.contains(&event.position)
                     && (this.tracker_popup_hit_test(local_x, local_y) || reorder_menu_open)
@@ -3617,7 +3884,17 @@ fn install_map_canvas_navigation_handlers(
             } else {
                 false
             };
+            let bwiki_circle_active = map_kind == MapCanvasKind::Bwiki
+                && event.button == MouseButton::Left
+                && entity.read(cx).bwiki_planner_circle_selection.is_some();
             _ = entity.update(cx, |this, cx| {
+                if bwiki_circle_active {
+                    if this.finish_bwiki_planner_circle_selection(local_x, local_y) {
+                        cx.notify();
+                    }
+                    return;
+                }
+
                 let popup_hit = route_point_map
                     && released_inside
                     && (this.tracker_popup_hit_test(local_x, local_y) || reorder_menu_open);
@@ -3652,6 +3929,12 @@ fn install_map_canvas_navigation_handlers(
                 }
                 if outcome.clicked && released_inside && route_point_map {
                     this.handle_route_map_click(map_kind, local_x, local_y, window, cx);
+                    cx.notify();
+                } else if outcome.clicked
+                    && released_inside
+                    && map_kind == MapCanvasKind::Bwiki
+                    && this.handle_bwiki_planner_click(local_x, local_y)
+                {
                     cx.notify();
                 }
             });
