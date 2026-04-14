@@ -2718,6 +2718,7 @@ fn map_panel(
                                             f32::from(event.position.x),
                                             f32::from(event.position.y),
                                         ));
+                                    this.tracker_map_view.reset_interaction_redraw();
                                 });
                             }
                         });
@@ -2738,15 +2739,25 @@ fn map_panel(
                                             f32::from(event.position.x),
                                             f32::from(event.position.y),
                                         ));
-                                    cx.notify();
+                                    if this
+                                        .tracker_map_view
+                                        .should_redraw_interaction(MAP_INTERACTION_FRAME_INTERVAL)
+                                    {
+                                        cx.notify();
+                                    }
                                 });
                             }
                         });
                         window.on_mouse_event({
                             let entity = entity.clone();
                             move |_: &MouseUpEvent, _, _, cx| {
-                                _ = entity.update(cx, |this, _| {
-                                    this.tracker_map_view.dragging_from = None;
+                                _ = entity.update(cx, |this, cx| {
+                                    let dragged =
+                                        this.tracker_map_view.dragging_from.take().is_some();
+                                    this.tracker_map_view.reset_interaction_redraw();
+                                    if dragged {
+                                        cx.notify();
+                                    }
                                 });
                             }
                         });
@@ -2768,6 +2779,7 @@ fn map_panel(
                                 let anchor_y =
                                     f32::from(event.position.y) - f32::from(bounds.origin.y);
                                 _ = entity.update(cx, |this, cx| {
+                                    this.tracker_map_view.reset_interaction_redraw();
                                     this.tracker_map_view
                                         .camera
                                         .zoom_at(anchor_x, anchor_y, delta);
@@ -3017,11 +3029,12 @@ fn bwiki_map_panel(
                             }
                         });
 
-                        let (camera, dataset, visible_mark_types, last_error) = {
+                        let (camera, dataset, bwiki_resources, visible_mark_types, last_error) = {
                             let this = entity.read(cx);
                             (
                                 this.bwiki_map_view.camera,
                                 this.bwiki_resources.dataset_snapshot(),
+                                this.bwiki_resources.clone(),
                                 this.bwiki_visible_mark_types.clone(),
                                 this.bwiki_resources.last_error(),
                             )
@@ -3101,9 +3114,7 @@ fn bwiki_map_panel(
                                                         10.0,
                                                     )),
                                             );
-                                            if let Some(path) = entity
-                                                .read(cx)
-                                                .bwiki_resources
+                                            if let Some(path) = bwiki_resources
                                                 .ensure_tile_path(tile_zoom, tile_x, tile_y)
                                             {
                                                 let resource = gpui::Resource::from(path);
@@ -3128,26 +3139,34 @@ fn bwiki_map_panel(
                         window.paint_layer(bounds, |window| {
                             window.with_content_mask(Some(ContentMask { bounds }), |window| {
                                 if let Some(dataset) = dataset.as_ref() {
-                                    let icon_paths = dataset
+                                    let visible_definitions = dataset
                                         .types
                                         .iter()
                                         .filter(|item| visible_mark_types.contains(&item.mark_type))
-                                        .map(|item| {
+                                        .collect::<Vec<_>>();
+                                    let icon_images = visible_definitions
+                                        .iter()
+                                        .map(|definition| {
                                             (
-                                                item.mark_type,
-                                                entity.read(cx).bwiki_resources.ensure_icon_path(
-                                                    item.mark_type,
-                                                    &item.icon_url,
-                                                ),
+                                                definition.mark_type,
+                                                bwiki_resources
+                                                    .ensure_icon_path(
+                                                        definition.mark_type,
+                                                        &definition.icon_url,
+                                                    )
+                                                    .and_then(|path| {
+                                                        let resource = gpui::Resource::from(path);
+                                                        window
+                                                            .use_asset::<ImgResourceLoader>(
+                                                                &resource, cx,
+                                                            )
+                                                            .and_then(|result| result.ok())
+                                                    }),
                                             )
                                         })
                                         .collect::<BTreeMap<_, _>>();
 
-                                    for definition in dataset
-                                        .types
-                                        .iter()
-                                        .filter(|item| visible_mark_types.contains(&item.mark_type))
-                                    {
+                                    for definition in visible_definitions {
                                         let Some(points) =
                                             dataset.points_by_type.get(&definition.mark_type)
                                         else {
@@ -3170,24 +3189,19 @@ fn bwiki_map_panel(
                                                 bounds.origin.x + px(screen.x),
                                                 bounds.origin.y + px(screen.y),
                                             );
-                                            if let Some(Some(path)) =
-                                                icon_paths.get(&definition.mark_type)
+                                            if let Some(Some(image)) =
+                                                icon_images.get(&definition.mark_type)
                                             {
-                                                let resource = gpui::Resource::from(path.clone());
-                                                let image_result = window
-                                                    .use_asset::<ImgResourceLoader>(&resource, cx);
-                                                if let Some(Ok(image)) = image_result.as_ref() {
-                                                    let image_bounds =
-                                                        bwiki_marker_image_bounds(anchor);
-                                                    let _ = window.paint_image(
-                                                        image_bounds,
-                                                        0.0.into(),
-                                                        image.clone(),
-                                                        0,
-                                                        false,
-                                                    );
-                                                    continue;
-                                                }
+                                                let image_bounds =
+                                                    bwiki_marker_image_bounds(anchor);
+                                                let _ = window.paint_image(
+                                                    image_bounds,
+                                                    0.0.into(),
+                                                    image.clone(),
+                                                    0,
+                                                    false,
+                                                );
+                                                continue;
                                             }
 
                                             paint_bwiki_placeholder_marker(
@@ -3217,6 +3231,7 @@ fn bwiki_map_panel(
                                             f32::from(event.position.x),
                                             f32::from(event.position.y),
                                         ));
+                                    this.bwiki_map_view.reset_interaction_redraw();
                                 });
                             }
                         });
@@ -3236,15 +3251,25 @@ fn bwiki_map_panel(
                                             f32::from(event.position.x),
                                             f32::from(event.position.y),
                                         ));
-                                    cx.notify();
+                                    if this
+                                        .bwiki_map_view
+                                        .should_redraw_interaction(MAP_INTERACTION_FRAME_INTERVAL)
+                                    {
+                                        cx.notify();
+                                    }
                                 });
                             }
                         });
                         window.on_mouse_event({
                             let entity = entity.clone();
                             move |_: &MouseUpEvent, _, _, cx| {
-                                _ = entity.update(cx, |this, _| {
-                                    this.bwiki_map_view.dragging_from = None;
+                                _ = entity.update(cx, |this, cx| {
+                                    let dragged =
+                                        this.bwiki_map_view.dragging_from.take().is_some();
+                                    this.bwiki_map_view.reset_interaction_redraw();
+                                    if dragged {
+                                        cx.notify();
+                                    }
                                 });
                             }
                         });
@@ -3266,6 +3291,7 @@ fn bwiki_map_panel(
                                 let anchor_y =
                                     f32::from(event.position.y) - f32::from(bounds.origin.y);
                                 _ = entity.update(cx, |this, cx| {
+                                    this.bwiki_map_view.reset_interaction_redraw();
                                     this.bwiki_map_view
                                         .camera
                                         .zoom_at(anchor_x, anchor_y, delta);
@@ -3456,6 +3482,7 @@ fn preferred_bwiki_tile_zoom(camera_zoom: f32) -> u8 {
     }
 }
 
+const MAP_INTERACTION_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 const BWIKI_MARKER_ICON_WIDTH: f32 = 40.0;
 const BWIKI_MARKER_ICON_HEIGHT: f32 = 50.0;
 const BWIKI_MARKER_ICON_ANCHOR_X: f32 = 15.0;

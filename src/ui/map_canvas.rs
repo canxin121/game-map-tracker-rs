@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use gpui::{Bounds, Pixels, Point, point, px, size};
 
 use crate::domain::{
@@ -12,6 +14,7 @@ pub struct MapViewportState {
     pub needs_fit: bool,
     pub dragging_from: Option<WorldPoint>,
     pub pending_center: Option<WorldPoint>,
+    pub last_interaction_redraw_at: Option<Instant>,
 }
 
 impl MapViewportState {
@@ -58,6 +61,22 @@ impl MapViewportState {
         };
         self.camera.center_on(point, self.viewport);
         true
+    }
+
+    pub fn should_redraw_interaction(&mut self, min_interval: Duration) -> bool {
+        let now = Instant::now();
+        if self
+            .last_interaction_redraw_at
+            .is_some_and(|last| now.duration_since(last) < min_interval)
+        {
+            return false;
+        }
+        self.last_interaction_redraw_at = Some(now);
+        true
+    }
+
+    pub fn reset_interaction_redraw(&mut self) {
+        self.last_interaction_redraw_at = None;
     }
 }
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -214,6 +214,9 @@ struct BwikiManagerInner {
 struct BwikiManagerState {
     dataset: Option<Arc<BwikiDataset>>,
     queued_jobs: HashSet<BwikiJobKey>,
+    ready_tiles: HashSet<(u8, i32, i32)>,
+    ready_icons: HashMap<u32, PathBuf>,
+    ready_stitched: HashMap<u8, PathBuf>,
     last_error: Option<String>,
 }
 
@@ -371,8 +374,13 @@ impl BwikiResourceManager {
 
     #[must_use]
     pub fn ensure_tile_path(&self, zoom: u8, x: i32, y: i32) -> Option<PathBuf> {
+        if self.inner.state.lock().ready_tiles.contains(&(zoom, x, y)) {
+            return Some(tile_cache_path(&self.inner.cache, zoom, x, y));
+        }
+
         let path = tile_cache_path(&self.inner.cache, zoom, x, y);
         if path.is_file() {
+            self.inner.state.lock().ready_tiles.insert((zoom, x, y));
             return Some(path);
         }
         self.enqueue(BwikiJob::DownloadTile { zoom, x, y });
@@ -385,8 +393,17 @@ impl BwikiResourceManager {
             return None;
         }
 
+        if let Some(path) = self.inner.state.lock().ready_icons.get(&mark_type).cloned() {
+            return Some(path);
+        }
+
         let path = icon_cache_path(&self.inner.cache, mark_type, icon_url);
         if path.is_file() {
+            self.inner
+                .state
+                .lock()
+                .ready_icons
+                .insert(mark_type, path.clone());
             return Some(path);
         }
         self.enqueue(BwikiJob::DownloadIcon {
@@ -398,8 +415,17 @@ impl BwikiResourceManager {
 
     #[must_use]
     pub fn ensure_stitched_map_path(&self, zoom: u8) -> Option<PathBuf> {
+        if let Some(path) = self.inner.state.lock().ready_stitched.get(&zoom).cloned() {
+            return Some(path);
+        }
+
         let path = stitched_map_path(&self.inner.cache, zoom);
         if path.is_file() {
+            self.inner
+                .state
+                .lock()
+                .ready_stitched
+                .insert(zoom, path.clone());
             return Some(path);
         }
         self.enqueue(BwikiJob::StitchMap { zoom });
