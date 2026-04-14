@@ -2545,37 +2545,15 @@ fn map_panel(
                             )
                         };
 
-                        window.paint_layer(bounds, |window| {
-                            window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                                window.paint_quad(fill(bounds, tokens.map_canvas_backdrop));
-
-                                if let Some(path) = logic_map_path {
-                                    let resource = gpui::Resource::from(path);
-                                    let image_result =
-                                        window.use_asset::<ImgResourceLoader>(&resource, cx);
-                                    if let Some(Ok(image)) = image_result.as_ref() {
-                                        let image_bounds = Bounds {
-                                            origin: point(
-                                                bounds.origin.x + px(camera.offset_x),
-                                                bounds.origin.y + px(camera.offset_y),
-                                            ),
-                                            size: size(
-                                                px(map_dimensions.width as f32 * camera.zoom),
-                                                px(map_dimensions.height as f32 * camera.zoom),
-                                            ),
-                                        };
-
-                                        let _ = window.paint_image(
-                                            image_bounds,
-                                            0.0.into(),
-                                            image.clone(),
-                                            0,
-                                            false,
-                                        );
-                                    }
-                                }
-                            });
-                        });
+                        paint_stitched_map_layer(
+                            window,
+                            bounds,
+                            cx,
+                            camera,
+                            map_dimensions,
+                            logic_map_path.as_ref(),
+                            tokens.map_canvas_backdrop,
+                        );
 
                         window.paint_layer(bounds, |window| {
                             window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -3036,36 +3014,15 @@ fn bwiki_map_panel(
                         let stitched_map_path =
                             bwiki_resources.ensure_stitched_map_path(BWIKI_WORLD_ZOOM);
 
-                        window.paint_layer(bounds, |window| {
-                            window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                                window.paint_quad(fill(bounds, tokens.map_canvas_backdrop));
-
-                                if let Some(path) = stitched_map_path.as_ref() {
-                                    let resource = gpui::Resource::from(path.clone());
-                                    let image_result =
-                                        window.use_asset::<ImgResourceLoader>(&resource, cx);
-                                    if let Some(Ok(image)) = image_result.as_ref() {
-                                        let image_bounds = Bounds {
-                                            origin: point(
-                                                bounds.origin.x + px(camera.offset_x),
-                                                bounds.origin.y + px(camera.offset_y),
-                                            ),
-                                            size: size(
-                                                px(map_dimensions.width as f32 * camera.zoom),
-                                                px(map_dimensions.height as f32 * camera.zoom),
-                                            ),
-                                        };
-                                        let _ = window.paint_image(
-                                            image_bounds,
-                                            0.0.into(),
-                                            image.clone(),
-                                            0,
-                                            false,
-                                        );
-                                    }
-                                }
-                            });
-                        });
+                        paint_stitched_map_layer(
+                            window,
+                            bounds,
+                            cx,
+                            camera,
+                            map_dimensions,
+                            stitched_map_path.as_ref(),
+                            tokens.map_canvas_backdrop,
+                        );
 
                         window.paint_layer(bounds, |window| {
                             window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -3358,6 +3315,40 @@ fn debug_field_card(
                 )
                 .child(div().text_sm().text_color(tokens.app_fg).child(field.value)),
         )
+}
+
+fn paint_stitched_map_layer(
+    window: &mut gpui::Window,
+    bounds: Bounds<gpui::Pixels>,
+    cx: &mut gpui::App,
+    camera: crate::domain::geometry::MapCamera,
+    map_dimensions: crate::domain::geometry::MapDimensions,
+    map_path: Option<&std::path::PathBuf>,
+    backdrop: gpui::Hsla,
+) {
+    window.paint_layer(bounds, |window| {
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            window.paint_quad(fill(bounds, backdrop));
+
+            if let Some(path) = map_path {
+                let resource = gpui::Resource::from(path.clone());
+                let image_result = window.use_asset::<ImgResourceLoader>(&resource, cx);
+                if let Some(Ok(image)) = image_result.as_ref() {
+                    let image_bounds = Bounds {
+                        origin: point(
+                            bounds.origin.x + px(camera.offset_x),
+                            bounds.origin.y + px(camera.offset_y),
+                        ),
+                        size: size(
+                            px(map_dimensions.width as f32 * camera.zoom),
+                            px(map_dimensions.height as f32 * camera.zoom),
+                        ),
+                    };
+                    let _ = window.paint_image(image_bounds, 0.0.into(), image.clone(), 0, false);
+                }
+            }
+        });
+    });
 }
 
 fn paint_route_arrow(
