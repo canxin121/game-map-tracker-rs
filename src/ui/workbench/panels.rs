@@ -1422,69 +1422,7 @@ fn page_header(
             .into_any_element(),
         ],
         (WorkbenchPage::Map, MapPage::Bwiki) => {
-            let (total_types, total_points) = this
-                .bwiki_resources
-                .dataset_snapshot()
-                .map(|dataset| (dataset.types.len(), dataset.total_point_count()))
-                .unwrap_or_default();
-            vec![
-                toolbar_cluster(vec![
-                    status_chip(tokens, "T", format!("类型 {}", total_types)).into_any_element(),
-                    status_chip(
-                        tokens,
-                        "V",
-                        format!("显示 {} 类", this.bwiki_visible_type_count()),
-                    )
-                    .into_any_element(),
-                    status_chip(
-                        tokens,
-                        "P",
-                        format!("点位 {}/{}", this.bwiki_visible_point_count(), total_points),
-                    )
-                    .into_any_element(),
-                ])
-                .into_any_element(),
-                toolbar_cluster(vec![
-                    toolbar_button(
-                        "bwiki-show-all",
-                        tokens,
-                        "A",
-                        "显示全部",
-                        ToolbarButtonTone::Primary,
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.show_all_bwiki_types();
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element(),
-                    toolbar_button(
-                        "bwiki-hide-all",
-                        tokens,
-                        "H",
-                        "全部隐藏",
-                        ToolbarButtonTone::Danger,
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.hide_all_bwiki_types();
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element(),
-                    toolbar_button(
-                        "bwiki-refresh",
-                        tokens,
-                        "R",
-                        "刷新数据",
-                        ToolbarButtonTone::Neutral,
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.refresh_bwiki_dataset();
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element(),
-                    theme_button,
-                ])
-                .into_any_element(),
-            ]
+            vec![toolbar_cluster(vec![theme_button]).into_any_element()]
         }
         _ => vec![toolbar_cluster(vec![theme_button]).into_any_element()],
     };
@@ -2668,6 +2606,54 @@ fn bwiki_types_sidebar(
             tokens,
             "默认全部隐藏、默认全部收起。展开分类后可直接按下类型按钮切换显示；图标会在侧栏或地图首次需要时懒下载并缓存。",
         ))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    toolbar_button(
+                        "bwiki-sidebar-show-all",
+                        tokens,
+                        "A",
+                        "显示全部",
+                        ToolbarButtonTone::Primary,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.show_all_bwiki_types();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                )
+                .child(
+                    toolbar_button(
+                        "bwiki-sidebar-hide-all",
+                        tokens,
+                        "H",
+                        "全部隐藏",
+                        ToolbarButtonTone::Danger,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.hide_all_bwiki_types();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                )
+                .child(
+                    toolbar_button(
+                        "bwiki-sidebar-refresh",
+                        tokens,
+                        "R",
+                        "刷新数据",
+                        ToolbarButtonTone::Neutral,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.refresh_bwiki_dataset();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                ),
+        )
         .when_some(last_error, |panel, error| {
             panel.child(config_section("最近一次缓存错误", vec![error], tokens))
         })

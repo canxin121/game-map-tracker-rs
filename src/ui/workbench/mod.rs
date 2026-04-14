@@ -855,22 +855,6 @@ impl TrackerWorkbench {
         }
     }
 
-    pub(super) fn bwiki_visible_point_count(&self) -> usize {
-        let Some(dataset) = self.bwiki_resources.dataset_snapshot() else {
-            return 0;
-        };
-        dataset
-            .points_by_type
-            .iter()
-            .filter(|(mark_type, _)| self.bwiki_visible_mark_types.contains(mark_type))
-            .map(|(_, points)| points.len())
-            .sum()
-    }
-
-    pub(super) fn bwiki_visible_type_count(&self) -> usize {
-        self.bwiki_visible_mark_types.len()
-    }
-
     fn paged_list_state(&self, kind: PagedListKind) -> &PagedListState {
         match kind {
             PagedListKind::MapGroups => &self.map_group_list,
