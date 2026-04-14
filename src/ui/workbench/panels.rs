@@ -3172,7 +3172,7 @@ fn paint_bwiki_map_overlay(
     bounds_width: f32,
     bounds_height: f32,
     camera: crate::domain::geometry::MapCamera,
-    tokens: WorkbenchThemeTokens,
+    _tokens: WorkbenchThemeTokens,
 ) {
     let (dataset, bwiki_resources, visible_mark_types) = {
         let this = entity.read(cx);
@@ -3186,30 +3186,27 @@ fn paint_bwiki_map_overlay(
     window.paint_layer(bounds, |window| {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(dataset) = dataset.as_ref() {
-                let render_full_icons = camera.zoom >= BWIKI_ICON_RENDER_MIN_ZOOM;
                 let visible_definitions = dataset
                     .types
                     .iter()
                     .filter(|item| visible_mark_types.contains(&item.mark_type))
                     .collect::<Vec<_>>();
-                let icon_images = render_full_icons.then(|| {
-                    visible_definitions
-                        .iter()
-                        .map(|definition| {
-                            (
-                                definition.mark_type,
-                                bwiki_resources
-                                    .ensure_icon_path(definition.mark_type, &definition.icon_url)
-                                    .and_then(|path| {
-                                        let resource = gpui::Resource::from(path);
-                                        window
-                                            .use_asset::<ImgResourceLoader>(&resource, cx)
-                                            .and_then(|result| result.ok())
-                                    }),
-                            )
-                        })
-                        .collect::<BTreeMap<_, _>>()
-                });
+                let icon_images = visible_definitions
+                    .iter()
+                    .map(|definition| {
+                        (
+                            definition.mark_type,
+                            bwiki_resources
+                                .ensure_icon_path(definition.mark_type, &definition.icon_url)
+                                .and_then(|path| {
+                                    let resource = gpui::Resource::from(path);
+                                    window
+                                        .use_asset::<ImgResourceLoader>(&resource, cx)
+                                        .and_then(|result| result.ok())
+                                }),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
 
                 for definition in visible_definitions {
                     let Some(points) = dataset.points_by_type.get(&definition.mark_type) else {
@@ -3230,10 +3227,7 @@ fn paint_bwiki_map_overlay(
                             bounds.origin.x + px(screen.x),
                             bounds.origin.y + px(screen.y),
                         );
-                        if let Some(Some(image)) = icon_images
-                            .as_ref()
-                            .and_then(|images| images.get(&definition.mark_type))
-                        {
+                        if let Some(Some(image)) = icon_images.get(&definition.mark_type) {
                             let image_bounds = bwiki_marker_image_bounds(anchor);
                             let _ = window.paint_image(
                                 image_bounds,
@@ -3242,15 +3236,7 @@ fn paint_bwiki_map_overlay(
                                 0,
                                 false,
                             );
-                            continue;
                         }
-
-                        paint_bwiki_placeholder_marker(
-                            window,
-                            anchor,
-                            definition.mark_type,
-                            tokens,
-                        );
                     }
                 }
             }
@@ -3422,7 +3408,6 @@ fn paint_route_arrow(
 }
 
 const MAP_INTERACTION_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
-const BWIKI_ICON_RENDER_MIN_ZOOM: f32 = 0.18;
 const BWIKI_TYPE_BUTTON_WIDTH: f32 = 168.0;
 const BWIKI_TYPE_BUTTON_HEIGHT: f32 = 44.0;
 const BWIKI_TYPE_ICON_BOX_SIZE: f32 = 28.0;
