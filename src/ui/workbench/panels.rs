@@ -2632,6 +2632,7 @@ fn bwiki_types_sidebar(
                             .mt_3()
                             .flex()
                             .flex_wrap()
+                            .justify_between()
                             .gap_2()
                             .children(type_buttons),
                     )
@@ -2708,15 +2709,14 @@ fn bwiki_type_toggle_button(
 
     div()
         .id(("bwiki-type-toggle", mark_type))
-        .w(px(118.0))
-        .min_h(px(86.0))
+        .w(px(178.0))
+        .min_h(px(58.0))
         .px_2()
         .py_2()
         .flex()
-        .flex_col()
+        .flex_row()
         .items_center()
-        .justify_center()
-        .gap_1()
+        .gap_2()
         .rounded_lg()
         .bg(background)
         .border_1()
@@ -2740,19 +2740,27 @@ fn bwiki_type_toggle_button(
         ))
         .child(
             div()
-                .w_full()
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(tokens.app_fg)
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(name),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(tokens.text_muted)
-                .child(count_label),
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .w_full()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(tokens.app_fg)
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(tokens.text_muted)
+                        .child(count_label),
+                ),
         )
 }
 
@@ -2788,8 +2796,8 @@ fn bwiki_type_icon_preview(
             );
         },
     )
-    .w(px(34.0))
-    .h(px(34.0))
+    .w(px(30.0))
+    .h(px(30.0))
 }
 
 fn bwiki_map_panel(
