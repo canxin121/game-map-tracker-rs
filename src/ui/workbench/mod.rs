@@ -21,8 +21,9 @@ use crate::{
         tracker::{PositionEstimate, TrackerEngineKind, TrackerLifecycle, TrackingSource},
     },
     resources::{
-        AssetManifest, BwikiResourceManager, RouteImportReport, RouteRepository, UiPreferences,
-        UiPreferencesRepository, WorkspaceLoadReport, WorkspaceSnapshot, default_map_dimensions,
+        AssetManifest, BWIKI_WORLD_ZOOM, BwikiResourceManager, RouteImportReport, RouteRepository,
+        UiPreferences, UiPreferencesRepository, WorkspaceLoadReport, WorkspaceSnapshot,
+        default_map_dimensions,
     },
     tracking::{
         TrackerSession, TrackingEvent, debug::TrackingDebugSnapshot, spawn_tracker_session,
@@ -446,7 +447,11 @@ impl TrackerWorkbench {
         match BwikiResourceManager::new(cache_dir.clone()) {
             Ok(manager) => {
                 manager.ensure_dataset_loaded();
-                (manager, None)
+                let startup_error = manager
+                    .ensure_stitched_map_ready_blocking(BWIKI_WORLD_ZOOM)
+                    .err()
+                    .map(|error| format!("启动时预构建 BWiki 整图失败：{error:#}"));
+                (manager, startup_error)
             }
             Err(error) => {
                 let fallback = env::temp_dir()
@@ -461,13 +466,24 @@ impl TrackerWorkbench {
                         )
                     });
                 manager.ensure_dataset_loaded();
+                let startup_error = manager
+                    .ensure_stitched_map_ready_blocking(BWIKI_WORLD_ZOOM)
+                    .err()
+                    .map(|map_error| format!("启动时预构建 BWiki 整图失败：{map_error:#}"));
                 (
                     manager,
-                    Some(format!(
-                        "BWiki 缓存目录 {} 初始化失败，已临时改用 {}：{error:#}",
-                        cache_dir.display(),
-                        fallback.display()
-                    )),
+                    Some(match startup_error {
+                        Some(startup_error) => format!(
+                            "BWiki 缓存目录 {} 初始化失败，已临时改用 {}：{error:#} {startup_error}",
+                            cache_dir.display(),
+                            fallback.display()
+                        ),
+                        None => format!(
+                            "BWiki 缓存目录 {} 初始化失败，已临时改用 {}：{error:#}",
+                            cache_dir.display(),
+                            fallback.display()
+                        ),
+                    }),
                 )
             }
         }

@@ -163,7 +163,6 @@ impl BwikiDataset {
 pub struct BwikiCachePaths {
     pub root: PathBuf,
     pub data_dir: PathBuf,
-    pub tiles_dir: PathBuf,
     pub icons_dir: PathBuf,
     pub stitched_dir: PathBuf,
 }
@@ -174,7 +173,6 @@ impl BwikiCachePaths {
         let root = root.into();
         Self {
             data_dir: root.join("data"),
-            tiles_dir: root.join("tiles"),
             icons_dir: root.join("icons"),
             stitched_dir: root.join("stitched"),
             root,
@@ -182,10 +180,19 @@ impl BwikiCachePaths {
     }
 
     pub fn ensure_directories(&self) -> Result<()> {
+        let legacy_tiles_dir = self.root.join("tiles");
+        if legacy_tiles_dir.is_dir() {
+            fs::remove_dir_all(&legacy_tiles_dir).with_context(|| {
+                format!(
+                    "failed to remove legacy BWiki tile cache directory {}",
+                    legacy_tiles_dir.display()
+                )
+            })?;
+        }
+
         for path in [
             &self.root,
             &self.data_dir,
-            &self.tiles_dir,
             &self.icons_dir,
             &self.stitched_dir,
         ] {
@@ -214,7 +221,6 @@ struct BwikiManagerInner {
 struct BwikiManagerState {
     dataset: Option<Arc<BwikiDataset>>,
     queued_jobs: HashSet<BwikiJobKey>,
-    ready_tiles: HashSet<(u8, i32, i32)>,
     ready_icons: HashMap<u32, PathBuf>,
     ready_stitched: HashMap<u8, PathBuf>,
     last_error: Option<String>,
@@ -223,7 +229,6 @@ struct BwikiManagerState {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum BwikiJobKey {
     RefreshDataset,
-    DownloadTile { zoom: u8, x: i32, y: i32 },
     DownloadIcon { mark_type: u32 },
     StitchMap { zoom: u8 },
 }
@@ -231,7 +236,6 @@ enum BwikiJobKey {
 #[derive(Debug, Clone)]
 enum BwikiJob {
     RefreshDataset,
-    DownloadTile { zoom: u8, x: i32, y: i32 },
     DownloadIcon { mark_type: u32, icon_url: String },
     StitchMap { zoom: u8 },
 }
@@ -240,11 +244,6 @@ impl BwikiJob {
     fn key(&self) -> BwikiJobKey {
         match self {
             Self::RefreshDataset => BwikiJobKey::RefreshDataset,
-            Self::DownloadTile { zoom, x, y } => BwikiJobKey::DownloadTile {
-                zoom: *zoom,
-                x: *x,
-                y: *y,
-            },
             Self::DownloadIcon { mark_type, .. } => BwikiJobKey::DownloadIcon {
                 mark_type: *mark_type,
             },
@@ -373,21 +372,6 @@ impl BwikiResourceManager {
     }
 
     #[must_use]
-    pub fn ensure_tile_path(&self, zoom: u8, x: i32, y: i32) -> Option<PathBuf> {
-        if self.inner.state.lock().ready_tiles.contains(&(zoom, x, y)) {
-            return Some(tile_cache_path(&self.inner.cache, zoom, x, y));
-        }
-
-        let path = tile_cache_path(&self.inner.cache, zoom, x, y);
-        if path.is_file() {
-            self.inner.state.lock().ready_tiles.insert((zoom, x, y));
-            return Some(path);
-        }
-        self.enqueue(BwikiJob::DownloadTile { zoom, x, y });
-        None
-    }
-
-    #[must_use]
     pub fn ensure_icon_path(&self, mark_type: u32, icon_url: &str) -> Option<PathBuf> {
         if icon_url.trim().is_empty() {
             return None;
@@ -430,6 +414,16 @@ impl BwikiResourceManager {
         }
         self.enqueue(BwikiJob::StitchMap { zoom });
         None
+    }
+
+    pub fn ensure_stitched_map_ready_blocking(&self, zoom: u8) -> Result<PathBuf> {
+        let path = ensure_stitched_map_blocking(&self.inner.cache.root, zoom)?;
+        self.inner
+            .state
+            .lock()
+            .ready_stitched
+            .insert(zoom, path.clone());
+        Ok(path)
     }
 
     fn enqueue(&self, job: BwikiJob) {
@@ -510,7 +504,6 @@ fn run_bwiki_worker(inner: Arc<BwikiManagerInner>, job_rx: Receiver<BwikiJob>) {
         let key = job.key();
         let result = match job {
             BwikiJob::RefreshDataset => refresh_dataset_job(&inner),
-            BwikiJob::DownloadTile { zoom, x, y } => download_tile_job(&inner.cache, zoom, x, y),
             BwikiJob::DownloadIcon {
                 mark_type,
                 icon_url,
@@ -556,16 +549,6 @@ fn refresh_dataset_job(inner: &BwikiManagerInner) -> Result<Option<BwikiDataset>
         )
     })?;
     Ok(Some(dataset))
-}
-
-fn download_tile_job(
-    cache: &BwikiCachePaths,
-    zoom: u8,
-    x: i32,
-    y: i32,
-) -> Result<Option<BwikiDataset>> {
-    download_tile(cache, zoom, x, y)?;
-    Ok(None)
 }
 
 fn download_icon_job(
@@ -702,13 +685,6 @@ fn dataset_cache_path(cache: &BwikiCachePaths) -> PathBuf {
     cache.data_dir.join("dataset.json")
 }
 
-fn tile_cache_path(cache: &BwikiCachePaths, zoom: u8, x: i32, y: i32) -> PathBuf {
-    cache
-        .tiles_dir
-        .join(format!("z{zoom}"))
-        .join(format!("tile-{x}_{y}.png"))
-}
-
 fn stitched_map_path(cache: &BwikiCachePaths, zoom: u8) -> PathBuf {
     let suffix = zoom_world_bounds(zoom)
         .map(|range| {
@@ -730,22 +706,11 @@ fn icon_cache_path(cache: &BwikiCachePaths, mark_type: u32, icon_url: &str) -> P
     cache.icons_dir.join(format!("{mark_type}.{extension}"))
 }
 
-fn download_tile(cache: &BwikiCachePaths, zoom: u8, x: i32, y: i32) -> Result<PathBuf> {
+fn download_tile_image(zoom: u8, x: i32, y: i32) -> Result<image::RgbaImage> {
     let range =
         zoom_world_bounds(zoom).ok_or_else(|| anyhow!("unsupported BWiki tile zoom {zoom}"))?;
     if x < range.min_x || x > range.max_x || y < range.min_y || y > range.max_y {
         bail!("requested tile z={zoom} x={x} y={y} is outside configured bounds");
-    }
-
-    let target = tile_cache_path(cache, zoom, x, y);
-    if target.is_file() {
-        return Ok(target);
-    }
-
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!("failed to create tile cache directory {}", parent.display())
-        })?;
     }
 
     let url = TILE_URL_TEMPLATE
@@ -753,9 +718,9 @@ fn download_tile(cache: &BwikiCachePaths, zoom: u8, x: i32, y: i32) -> Result<Pa
         .replace("{x}", &x.to_string())
         .replace("{y}", &y.to_string());
     let bytes = download_binary(&url)?;
-    fs::write(&target, bytes)
-        .with_context(|| format!("failed to write tile cache {}", target.display()))?;
-    Ok(target)
+    image::load_from_memory(&bytes)
+        .with_context(|| format!("failed to decode remote tile image {url}"))
+        .map(|image| image.into_rgba8())
 }
 
 fn download_icon(cache: &BwikiCachePaths, mark_type: u32, icon_url: &str) -> Result<PathBuf> {
@@ -809,10 +774,7 @@ fn build_stitched_map(cache: &BwikiCachePaths, zoom: u8) -> Result<Option<BwikiD
 
     for tile_y in world.min_y..=world.max_y {
         for tile_x in world.min_x..=world.max_x {
-            let source = download_tile(cache, zoom, tile_x, tile_y)?;
-            let tile = image::open(&source)
-                .with_context(|| format!("failed to open cached tile {}", source.display()))?
-                .into_rgba8();
+            let tile = download_tile_image(zoom, tile_x, tile_y)?;
             let dx = (tile_x - world.min_x) as i64 * TILE_SIZE as i64;
             let dy = (tile_y - world.min_y) as i64 * TILE_SIZE as i64;
             replace(&mut canvas, &tile, dx, dy);

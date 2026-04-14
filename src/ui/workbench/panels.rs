@@ -18,15 +18,9 @@ use gpui_component::{
 use strum::IntoEnumIterator;
 
 use crate::{
-    domain::{
-        geometry::WorldPoint, marker::MarkerIconStyle, theme::ThemePreference,
-        tracker::TrackingSource,
-    },
-    resources::{
-        BWIKI_WORLD_ZOOM, raw_coordinate_to_world, tile_coordinate_to_world_origin,
-        zoom_world_bounds,
-    },
-    ui::map_canvas::{bounds_corner_radius, parse_hex_color, route_points, screen_points},
+    domain::{marker::MarkerIconStyle, theme::ThemePreference, tracker::TrackingSource},
+    resources::BWIKI_WORLD_ZOOM,
+    ui::map_canvas::{parse_hex_color, route_points, screen_points},
 };
 
 use super::{
@@ -2399,7 +2393,7 @@ fn settings_resources_page(
         .child(section_title("本地数据路径"))
         .child(body_text(
             tokens,
-            "路线文件、配置和 BWiki 运行时缓存都会真实落盘。地图瓦片、拼接底图和点位图标只会在首次需要时下载到缓存目录。",
+            "路线文件、配置和 BWiki 运行时缓存都会真实落盘。BWiki 只会缓存整张拼接地图、点位目录和点位图标，不再保留分块瓦片。",
         ))
         .child(resource_path(
             "resource-data-dir",
@@ -3007,7 +3001,7 @@ fn bwiki_map_panel(
                     div()
                         .text_xs()
                         .text_color(tokens.text_muted)
-                        .child("按视野懒加载瓦片与图标；滚轮缩放，左键拖拽"),
+                        .child("滚轮缩放，左键拖拽；启动时会确保整张 BWiki 拼接地图已缓存"),
                 ),
         )
         .child(
@@ -3046,7 +3040,6 @@ fn bwiki_map_panel(
                             window.with_content_mask(Some(ContentMask { bounds }), |window| {
                                 window.paint_quad(fill(bounds, tokens.map_canvas_backdrop));
 
-                                let mut drew_stitched_map = false;
                                 if let Some(path) = stitched_map_path.as_ref() {
                                     let resource = gpui::Resource::from(path.clone());
                                     let image_result =
@@ -3069,99 +3062,6 @@ fn bwiki_map_panel(
                                             0,
                                             false,
                                         );
-                                        drew_stitched_map = true;
-                                    }
-                                }
-
-                                let tile_zoom = preferred_bwiki_tile_zoom(camera.zoom);
-                                if !drew_stitched_map
-                                    && let Some(range) = zoom_world_bounds(tile_zoom)
-                                {
-                                    // BWiki/Leaflet keeps every zoom level anchored to the same
-                                    // z8 tile grid. Coarser tiles extend past the visible content
-                                    // bounds, so both tile lookup and placement must use that
-                                    // shared world origin instead of a per-zoom local origin.
-                                    let world_origin = raw_coordinate_to_world(0, 0);
-                                    let world_tile_size = range.world_tile_size() as f32;
-                                    let top_left =
-                                        camera.screen_to_world(WorldPoint::new(0.0, 0.0));
-                                    let bottom_right = camera.screen_to_world(WorldPoint::new(
-                                        bounds_width,
-                                        bounds_height,
-                                    ));
-                                    let min_world_x = top_left.x.min(bottom_right.x).max(0.0);
-                                    let min_world_y = top_left.y.min(bottom_right.y).max(0.0);
-                                    let max_world_x = top_left
-                                        .x
-                                        .max(bottom_right.x)
-                                        .min(map_dimensions.width as f32);
-                                    let max_world_y = top_left
-                                        .y
-                                        .max(bottom_right.y)
-                                        .min(map_dimensions.height as f32);
-
-                                    let start_col =
-                                        (((min_world_x - world_origin.x) / world_tile_size).floor()
-                                            as i32
-                                            - 1)
-                                        .clamp(range.min_x, range.max_x);
-                                    let end_col =
-                                        (((max_world_x - world_origin.x) / world_tile_size).ceil()
-                                            as i32
-                                            + 1)
-                                        .clamp(range.min_x, range.max_x);
-                                    let start_row =
-                                        (((min_world_y - world_origin.y) / world_tile_size).floor()
-                                            as i32
-                                            - 1)
-                                        .clamp(range.min_y, range.max_y);
-                                    let end_row =
-                                        (((max_world_y - world_origin.y) / world_tile_size).ceil()
-                                            as i32
-                                            + 1)
-                                        .clamp(range.min_y, range.max_y);
-
-                                    for tile_y in start_row..=end_row {
-                                        for tile_x in start_col..=end_col {
-                                            let tile_world = tile_coordinate_to_world_origin(
-                                                tile_zoom, tile_x, tile_y,
-                                            )
-                                            .expect("validated BWiki tile origin");
-                                            let tile_screen = camera.world_to_screen(tile_world);
-                                            let tile_bounds = Bounds {
-                                                origin: point(
-                                                    bounds.origin.x + px(tile_screen.x),
-                                                    bounds.origin.y + px(tile_screen.y),
-                                                ),
-                                                size: size(
-                                                    px(world_tile_size * camera.zoom),
-                                                    px(world_tile_size * camera.zoom),
-                                                ),
-                                            };
-                                            window.paint_quad(
-                                                fill(tile_bounds, tokens.panel_alt_bg)
-                                                    .corner_radii(bounds_corner_radius(
-                                                        tile_bounds,
-                                                        10.0,
-                                                    )),
-                                            );
-                                            if let Some(path) = bwiki_resources
-                                                .ensure_tile_path(tile_zoom, tile_x, tile_y)
-                                            {
-                                                let resource = gpui::Resource::from(path);
-                                                let image_result = window
-                                                    .use_asset::<ImgResourceLoader>(&resource, cx);
-                                                if let Some(Ok(image)) = image_result.as_ref() {
-                                                    let _ = window.paint_image(
-                                                        tile_bounds,
-                                                        0.0.into(),
-                                                        image.clone(),
-                                                        0,
-                                                        false,
-                                                    );
-                                                }
-                                            }
-                                        }
                                     }
                                 }
                             });
@@ -3503,20 +3403,6 @@ fn paint_route_arrow(
     builder.add_polygon(&points, false);
     if let Ok(path) = builder.build() {
         window.paint_path(path, color);
-    }
-}
-
-fn preferred_bwiki_tile_zoom(camera_zoom: f32) -> u8 {
-    if camera_zoom <= 0.10 {
-        4
-    } else if camera_zoom <= 0.18 {
-        5
-    } else if camera_zoom <= 0.35 {
-        6
-    } else if camera_zoom <= 0.75 {
-        7
-    } else {
-        BWIKI_WORLD_ZOOM
     }
 }
 
