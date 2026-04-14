@@ -4,6 +4,7 @@ mod page;
 mod panels;
 mod select;
 mod theme;
+mod tracker_pip;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -51,6 +52,7 @@ use self::{
     panels::render_workbench,
     select::{SelectEvent, SelectState},
     theme::apply_theme_preference,
+    tracker_pip::{TrackerPipWindow, apply_window_topmost},
 };
 
 #[derive(Debug, Clone)]
@@ -328,6 +330,9 @@ pub struct TrackerWorkbench {
     point_reorder_target_id: Option<RoutePointId>,
     point_reorder_picker: gpui::Entity<SelectState<PointReorderTargetItem>>,
     minimap_region_picker_window: Option<AnyWindowHandle>,
+    tracker_pip_window: Option<AnyWindowHandle>,
+    tracker_pip_window_bounds: Option<WindowBounds>,
+    tracker_pip_always_on_top: bool,
     pub(super) ui_preferences_path: PathBuf,
     pub(super) bwiki_resources: BwikiResourceManager,
     pub(super) bwiki_tile_cache: gpui::Entity<TileImageCache>,
@@ -466,6 +471,9 @@ impl TrackerWorkbench {
                     point_reorder_target_id: None,
                     point_reorder_picker: point_reorder_picker.clone(),
                     minimap_region_picker_window: None,
+                    tracker_pip_window: None,
+                    tracker_pip_window_bounds: None,
+                    tracker_pip_always_on_top: false,
                     ui_preferences_path: ui_preferences_path.clone(),
                     bwiki_resources,
                     bwiki_tile_cache: bwiki_tile_cache.clone(),
@@ -556,6 +564,9 @@ impl TrackerWorkbench {
                     point_reorder_target_id: None,
                     point_reorder_picker,
                     minimap_region_picker_window: None,
+                    tracker_pip_window: None,
+                    tracker_pip_window_bounds: None,
+                    tracker_pip_always_on_top: false,
                     ui_preferences_path: ui_preferences_path.clone(),
                     bwiki_resources,
                     bwiki_tile_cache,
@@ -875,6 +886,7 @@ impl TrackerWorkbench {
                     {
                         cx.notify();
                     }
+                    this.refresh_tracker_pip_window(cx);
                 });
                 if updated.is_err() {
                     break;
@@ -999,6 +1011,42 @@ impl TrackerWorkbench {
             None if self.is_tracking_active() => "停止追踪".into(),
             None if self.tracker_lifecycle == TrackerLifecycle::Failed => "重新启动".into(),
             _ => "启动追踪".into(),
+        }
+    }
+
+    pub(super) fn is_tracker_pip_open(&self) -> bool {
+        self.tracker_pip_window.is_some()
+    }
+
+    pub(super) const fn is_tracker_pip_always_on_top(&self) -> bool {
+        self.tracker_pip_always_on_top
+    }
+
+    pub(super) fn tracker_pip_toggle_label(&self) -> SharedString {
+        if self.is_tracker_pip_open() {
+            "关闭画中画".into()
+        } else {
+            "打开画中画".into()
+        }
+    }
+
+    pub(super) fn tracker_pip_topmost_label(&self) -> SharedString {
+        if self.tracker_pip_always_on_top {
+            "取消置顶".into()
+        } else {
+            "置顶".into()
+        }
+    }
+
+    pub(super) fn tracker_pip_topmost_tooltip(&self) -> SharedString {
+        if self.is_tracker_pip_open() {
+            if self.tracker_pip_always_on_top {
+                "追踪画中画当前会浮于其他窗口上方，点击可取消。".into()
+            } else {
+                "让追踪画中画浮于其他窗口上方。".into()
+            }
+        } else {
+            "请先打开追踪画中画窗口。".into()
         }
     }
 
@@ -4174,6 +4222,177 @@ impl TrackerWorkbench {
             Err(error) => {
                 self.status_text = format!("保存配置失败：{error:#}").into();
             }
+        }
+    }
+
+    pub(super) fn toggle_tracker_pip_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_tracker_pip_open() {
+            self.close_tracker_pip_window(cx);
+        } else {
+            self.open_tracker_pip_window(window, cx);
+        }
+    }
+
+    pub(super) fn toggle_tracker_pip_always_on_top(&mut self, cx: &mut Context<Self>) {
+        self.tracker_pip_always_on_top = !self.tracker_pip_always_on_top;
+        let always_on_top = self.tracker_pip_always_on_top;
+
+        if let Some(handle) = self.tracker_pip_window {
+            match handle.update(cx, |_, pip_window, _| {
+                apply_window_topmost(pip_window, always_on_top)
+            }) {
+                Ok(Ok(())) => {
+                    self.status_text = if always_on_top {
+                        "追踪画中画已置顶。".into()
+                    } else {
+                        "追踪画中画已取消置顶。".into()
+                    };
+                }
+                Ok(Err(error)) => {
+                    self.status_text = format!("切换追踪画中画置顶失败：{error:#}").into();
+                }
+                Err(_) => {
+                    self.tracker_pip_window = None;
+                    self.status_text = "追踪画中画窗口已经关闭。".into();
+                }
+            }
+        } else {
+            self.status_text = if always_on_top {
+                "已记住追踪画中画置顶设置，下次打开时生效。".into()
+            } else {
+                "已关闭追踪画中画置顶设置。".into()
+            };
+        }
+    }
+
+    fn open_tracker_pip_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let workbench = cx.entity().downgrade();
+        let workbench_for_close = workbench.clone();
+        let initial_camera = self.tracker_map_view.camera;
+        let initial_focus = self
+            .preview_position
+            .as_ref()
+            .map(|position| position.world);
+        let initial_bounds = self
+            .tracker_pip_window_bounds
+            .unwrap_or_else(|| self.default_tracker_pip_window_bounds(window));
+        let open_result = cx.open_window(
+            WindowOptions {
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("追踪画中画".into()),
+                    appears_transparent: false,
+                    ..Default::default()
+                }),
+                window_bounds: Some(initial_bounds),
+                kind: WindowKind::Normal,
+                is_movable: true,
+                is_resizable: true,
+                is_minimizable: false,
+                window_min_size: Some(gpui::size(gpui::px(280.0), gpui::px(240.0))),
+                ..Default::default()
+            },
+            move |pip_window, cx| {
+                pip_window.on_window_should_close(cx, move |_, cx| {
+                    if let Some(workbench) = workbench_for_close.upgrade() {
+                        let _ = workbench.update(cx, |this, _| {
+                            this.handle_tracker_pip_window_closed();
+                        });
+                    }
+                    true
+                });
+
+                cx.new(|cx| {
+                    TrackerPipWindow::new(
+                        workbench.clone(),
+                        initial_camera,
+                        initial_focus,
+                        pip_window,
+                        cx,
+                    )
+                })
+            },
+        );
+
+        match open_result {
+            Ok(handle) => {
+                self.tracker_pip_window = Some(handle.into());
+                self.tracker_pip_window_bounds = Some(initial_bounds);
+                self.status_text = "追踪画中画已打开。".into();
+
+                if self.tracker_pip_always_on_top {
+                    if let Some(handle) = self.tracker_pip_window {
+                        match handle.update(cx, |_, pip_window, _| {
+                            apply_window_topmost(pip_window, true)
+                        }) {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                self.status_text =
+                                    format!("追踪画中画已打开，但置顶失败：{error:#}").into();
+                            }
+                            Err(_) => {
+                                self.tracker_pip_window = None;
+                                self.status_text = "追踪画中画窗口已经关闭。".into();
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                self.status_text = format!("打开追踪画中画失败：{error:#}").into();
+            }
+        }
+    }
+
+    fn close_tracker_pip_window(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.tracker_pip_window.take() {
+            let _ = handle.update(cx, |_, pip_window, _| {
+                pip_window.remove_window();
+            });
+            self.status_text = "追踪画中画已关闭。".into();
+        }
+    }
+
+    fn default_tracker_pip_window_bounds(&self, window: &Window) -> WindowBounds {
+        let main_bounds = window.window_bounds().get_bounds();
+        let width = gpui::px(420.0);
+        let height = gpui::px(320.0);
+        let margin = 24.0;
+        let left = (f32::from(main_bounds.right()) - 420.0 - margin)
+            .max(f32::from(main_bounds.origin.x) + margin);
+        let top = f32::from(main_bounds.origin.y) + margin + 32.0;
+
+        WindowBounds::Windowed(Bounds {
+            origin: gpui::point(gpui::px(left), gpui::px(top)),
+            size: gpui::size(width, height),
+        })
+    }
+
+    pub(super) fn update_tracker_pip_window_bounds(&mut self, bounds: WindowBounds) {
+        self.tracker_pip_window_bounds = Some(bounds);
+    }
+
+    pub(super) fn handle_tracker_pip_window_closed(&mut self) {
+        if self.tracker_pip_window.take().is_some() {
+            self.status_text = "追踪画中画已关闭。".into();
+        }
+    }
+
+    fn refresh_tracker_pip_window(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.tracker_pip_window else {
+            return;
+        };
+
+        if handle
+            .update(cx, |_, pip_window, _| {
+                pip_window.refresh();
+            })
+            .is_err()
+        {
+            self.tracker_pip_window = None;
         }
     }
 

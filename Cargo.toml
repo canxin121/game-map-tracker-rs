@@ -22,6 +22,7 @@ gpui-component = "0.5.1"
 image = "0.25"
 imageproc = "0.25"
 parking_lot = "0.12"
+raw-window-handle = "0.6"
 rayon = "1.10"
 regex = "1.11"
 rfd = "0.15"
@@ -36,3 +37,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ureq = "2.12"
 uuid = { version = "1.18", features = ["v4", "serde"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

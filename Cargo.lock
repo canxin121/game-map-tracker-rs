@@ -2210,6 +2210,7 @@ dependencies = [
  "image 0.25.10",
  "imageproc",
  "parking_lot",
+ "raw-window-handle",
  "rayon",
  "regex",
  "rfd",
@@ -2224,6 +2225,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

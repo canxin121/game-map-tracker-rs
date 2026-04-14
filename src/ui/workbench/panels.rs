@@ -1379,6 +1379,44 @@ fn page_header(
                     }),
                 )
                 .into_any_element(),
+                toolbar_button(
+                    "tracker-pip-toggle",
+                    tokens,
+                    "P",
+                    this.tracker_pip_toggle_label(),
+                    if this.is_tracker_pip_open() {
+                        ToolbarButtonTone::Primary
+                    } else {
+                        ToolbarButtonTone::Neutral
+                    },
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.toggle_tracker_pip_window(window, cx);
+                        cx.notify();
+                    }),
+                )
+                .into_any_element(),
+                toolbar_button_with_tooltip(
+                    "tracker-pip-topmost",
+                    tokens,
+                    if this.is_tracker_pip_always_on_top() {
+                        "T"
+                    } else {
+                        "^"
+                    },
+                    this.tracker_pip_topmost_label(),
+                    Some(this.tracker_pip_topmost_tooltip()),
+                    if this.is_tracker_pip_always_on_top() {
+                        ToolbarButtonTone::Primary
+                    } else {
+                        ToolbarButtonTone::Neutral
+                    },
+                    !this.is_tracker_pip_open(),
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.toggle_tracker_pip_always_on_top(cx);
+                        cx.notify();
+                    }),
+                )
+                .into_any_element(),
                 toolbar_button_with_tooltip(
                     "engine-cycle",
                     tokens,
@@ -3584,7 +3622,7 @@ fn selected_tracker_point_editor_popup(
     )
 }
 
-fn paint_tracker_map_overlay(
+pub(super) fn paint_tracker_map_overlay(
     entity: &gpui::Entity<TrackerWorkbench>,
     window: &mut gpui::Window,
     bounds: Bounds<gpui::Pixels>,
@@ -3913,7 +3951,7 @@ fn paint_bwiki_map_overlay(
     });
 }
 
-fn paint_bwiki_tile_layers(
+pub(super) fn paint_bwiki_tile_layers(
     window: &mut gpui::Window,
     bounds: Bounds<gpui::Pixels>,
     cx: &mut gpui::App,
