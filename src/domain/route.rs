@@ -137,7 +137,7 @@ impl RouteDocument {
         } else if !self.metadata.display_name.trim().is_empty() {
             &self.metadata.display_name
         } else {
-            "未命名标记组"
+            "未命名路线"
         }
     }
 

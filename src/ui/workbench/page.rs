@@ -6,7 +6,7 @@ pub(super) enum WorkbenchPage {
     #[default]
     #[display("地图")]
     Map,
-    #[display("标记")]
+    #[display("路线")]
     Markers,
     #[display("设置")]
     Settings,
@@ -24,9 +24,9 @@ pub(super) enum MapPage {
 #[derive(Debug, Clone, Copy, Default, Display, EnumIter, PartialEq, Eq, Hash)]
 pub(super) enum MarkersPage {
     #[default]
-    #[display("标记组")]
+    #[display("路线管理")]
     Groups,
-    #[display("标记点")]
+    #[display("路线节点管理")]
     Points,
 }
 

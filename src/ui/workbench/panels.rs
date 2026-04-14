@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use gpui::{
     AnyElement, Bounds, ClickEvent, ClipboardItem, ContentMask, Context, ImgResourceLoader,
@@ -18,7 +18,7 @@ use gpui_component::{
 use strum::IntoEnumIterator;
 
 use crate::{
-    domain::{marker::MarkerIconStyle, theme::ThemePreference, tracker::TrackingSource},
+    domain::{theme::ThemePreference, tracker::TrackingSource},
     resources::{
         BwikiResourceManager, tile_coordinate_to_world_origin, visible_tile_layers,
         zoom_world_bounds,
@@ -154,7 +154,7 @@ fn navigation_sidebar(
                 .child(sidebar_nav_item(
                     "sidebar-nav-markers",
                     tokens,
-                    "标记",
+                    "路线",
                     markers_is_active,
                     tokens.nav_item_active_bg,
                     Some(if markers_is_open { "v" } else { ">" }),
@@ -178,7 +178,7 @@ fn navigation_sidebar(
                             .child(sidebar_nav_item(
                                 "sidebar-nav-markers-groups",
                                 tokens,
-                                "标记组",
+                                "路线管理",
                                 markers_is_active && this.markers_page == MarkersPage::Groups,
                                 tokens.nav_subitem_active_bg,
                                 None,
@@ -190,7 +190,7 @@ fn navigation_sidebar(
                             .child(sidebar_nav_item(
                                 "sidebar-nav-markers-points",
                                 tokens,
-                                "标记点",
+                                "路线节点管理",
                                 markers_is_active && this.markers_page == MarkersPage::Points,
                                 tokens.nav_subitem_active_bg,
                                 None,
@@ -734,7 +734,7 @@ fn marker_group_list_row(
                 format!("{row_id}-confirm-delete"),
                 tokens,
                 "assets/icons/check.svg",
-                "确认删除标记组",
+                "确认删除路线",
                 ToolbarButtonTone::Danger,
                 on_confirm_delete,
             ))
@@ -778,7 +778,7 @@ fn marker_group_list_row(
                 format!("{row_id}-delete"),
                 tokens,
                 "assets/icons/trash.svg",
-                "删除标记组",
+                "删除路线",
                 ToolbarButtonTone::Danger,
                 on_request_delete,
             ))
@@ -1596,13 +1596,13 @@ fn map_sidebar(
             "map-groups",
             cx,
             tokens,
-            Some("标记组".into()),
+            Some("路线".into()),
             Vec::new(),
             &this.map_group_list.search,
             Vec::new(),
             &this.map_group_list.page_input,
             pagination,
-            "当前还没有可显示的标记组。",
+            "当前还没有可显示的路线。",
             group_rows,
             TrackerWorkbench::set_map_group_page,
         ))
@@ -1717,7 +1717,7 @@ fn group_manager(
             "marker-groups",
             cx,
             tokens,
-            Some("标记组".into()),
+            Some("路线管理".into()),
             Vec::new(),
             &this.marker_group_list.search,
             vec![
@@ -1725,7 +1725,7 @@ fn group_manager(
                     "group-inline-new",
                     tokens,
                     "+",
-                    "新建标记组",
+                    "新建路线",
                     ToolbarButtonTone::Neutral,
                     false,
                     cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -1737,7 +1737,7 @@ fn group_manager(
             ],
             &this.marker_group_list.page_input,
             pagination,
-            "当前还没有标记组，请先导入文件或新建分组。",
+            "当前还没有路线，请先导入文件或新建路线。",
             group_rows,
             TrackerWorkbench::set_marker_group_page,
         ))
@@ -1774,27 +1774,11 @@ fn group_detail_panel(
     cx: &mut Context<TrackerWorkbench>,
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
-    let group_icon_picker = ButtonGroup::new("group-icon-picker")
-        .children(
-            MarkerIconStyle::iter()
-                .enumerate()
-                .map(|(index, icon)| {
-                    Button::new(("group-icon", index))
-                        .label(icon.to_string())
-                        .selected(this.group_icon == icon)
-                })
-                .collect::<Vec<_>>(),
-        )
-        .compact()
-        .on_click(cx.listener(|this, indices: &Vec<usize>, _, cx| {
-            if let Some(index) = indices.first().copied() {
-                if let Some(icon) = MarkerIconStyle::iter().nth(index) {
-                    this.group_icon = icon;
-                    cx.notify();
-                }
-            }
-        }));
     let active_group = this.active_group().cloned();
+    let group_icon_definition = this
+        .bwiki_resources
+        .resolve_icon_definition(this.group_icon.as_str());
+    let bwiki_dataset_ready = this.bwiki_resources.dataset_snapshot().is_some();
 
     div()
         .rounded_xl()
@@ -1802,7 +1786,7 @@ fn group_detail_panel(
         .border_1()
         .border_color(tokens.border)
         .p_4()
-        .child(section_title("所选标记组"))
+        .child(section_title("所选路线"))
         .when_some(active_group, |panel, group| {
             panel
                 .child(
@@ -1818,9 +1802,9 @@ fn group_detail_panel(
                         tokens,
                         if group.visible { "V" } else { "H" },
                         if group.visible {
-                            "隐藏本组"
+                            "隐藏当前路线"
                         } else {
-                            "显示本组"
+                            "显示当前路线"
                         },
                         if group.visible {
                             ToolbarButtonTone::Neutral
@@ -1857,7 +1841,7 @@ fn group_detail_panel(
                         "group-save",
                         tokens,
                         "S",
-                        "保存其他配置",
+                        "保存路线",
                         ToolbarButtonTone::Primary,
                         cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.save_group(window, cx);
@@ -1869,7 +1853,7 @@ fn group_detail_panel(
                         "group-delete",
                         tokens,
                         "X",
-                        "删除当前组",
+                        "删除当前路线",
                         ToolbarButtonTone::Danger,
                         cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.delete_selected_group(window, cx);
@@ -1891,12 +1875,65 @@ fn group_detail_panel(
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(field_label(tokens, "默认图标"))
-                        .child(group_icon_picker),
+                        .child(field_label(tokens, "默认 BWiki 图标"))
+                        .child(
+                            Select::new(&this.group_icon_picker)
+                                .w_full()
+                                .menu_width(px(420.0))
+                                .icon(IconName::Search)
+                                .placeholder("搜索并选择 BWiki 图标名")
+                                .disabled(!bwiki_dataset_ready)
+                                .empty(empty_list_state(
+                                    tokens,
+                                    "BWiki 图标目录加载中，请稍后重试。",
+                                )),
+                        )
+                        .when_some(group_icon_definition.clone(), |column, definition| {
+                            column.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(bwiki_type_icon_preview(
+                                        definition.mark_type,
+                                        definition.icon_url.clone(),
+                                        this.bwiki_resources.clone(),
+                                        tokens,
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .text_color(tokens.app_fg)
+                                                    .child(definition.name),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(tokens.text_muted)
+                                                    .child(format!(
+                                                        "{} · {}",
+                                                        definition.category, definition.mark_type
+                                                    )),
+                                            ),
+                                    ),
+                            )
+                        })
+                        .when(group_icon_definition.is_none(), |column| {
+                            column.child(body_text(
+                                tokens,
+                                format!("当前图标名：{}", this.group_icon),
+                            ))
+                        }),
                 )
         })
         .when(this.active_group().is_none(), |panel| {
-            panel.child(empty_list_state(tokens, "请先从左侧创建或选择一个标记组。"))
+            panel.child(empty_list_state(tokens, "请先从左侧创建或选择一条路线。"))
         })
 }
 
@@ -1965,21 +2002,21 @@ fn point_sidebar_panel(
             "group-points",
             cx,
             tokens,
-            Some("标记点".into()),
+            Some("路线节点管理".into()),
             vec![
                 div()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(field_label(tokens, "标记组"))
+                    .child(field_label(tokens, "路线"))
                     .child(
                         Select::new(&this.marker_group_picker)
                             .w_full()
                             .menu_width(px(360.0))
                             .icon(IconName::Search)
-                            .placeholder("搜索并选择标记组")
+                            .placeholder("搜索并选择路线")
                             .disabled(this.route_groups.is_empty())
-                            .empty(empty_list_state(tokens, "当前还没有标记组。")),
+                            .empty(empty_list_state(tokens, "当前还没有路线。")),
                     )
                     .into_any_element(),
             ],
@@ -2002,9 +2039,9 @@ fn point_sidebar_panel(
             &this.point_list.page_input,
             pagination,
             if active_group.is_some() {
-                "当前分组没有匹配的节点。"
+                "当前路线没有匹配的节点。"
             } else {
-                "请先选择一个标记组。"
+                "请先选择一条路线。"
             },
             point_rows,
             TrackerWorkbench::set_point_page,
@@ -2016,26 +2053,10 @@ fn point_detail_panel(
     cx: &mut Context<TrackerWorkbench>,
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
-    let marker_icon_picker = ButtonGroup::new("marker-icon-picker")
-        .children(
-            MarkerIconStyle::iter()
-                .enumerate()
-                .map(|(index, icon)| {
-                    Button::new(("marker-icon", index))
-                        .label(icon.to_string())
-                        .selected(this.marker_icon == icon)
-                })
-                .collect::<Vec<_>>(),
-        )
-        .compact()
-        .on_click(cx.listener(|this, indices: &Vec<usize>, _, cx| {
-            if let Some(index) = indices.first().copied() {
-                if let Some(icon) = MarkerIconStyle::iter().nth(index) {
-                    this.marker_icon = icon;
-                    cx.notify();
-                }
-            }
-        }));
+    let marker_icon_definition = this
+        .bwiki_resources
+        .resolve_icon_definition(this.marker_icon.as_str());
+    let bwiki_dataset_ready = this.bwiki_resources.dataset_snapshot().is_some();
 
     div()
         .flex_1()
@@ -2055,15 +2076,19 @@ fn point_detail_panel(
                     .text_sm()
                     .text_color(tokens.text_muted)
                     .line_height(px(20.0))
-                    .child(format!("当前标记组 {}", group.display_name())),
+                    .child(format!("当前路线 {}", group.display_name())),
             )
         })
         .when(this.active_group().is_none(), |panel| {
-            panel.child(empty_list_state(tokens, "请先从左侧选择一个标记组。"))
+            panel.child(empty_list_state(tokens, "请先从左侧选择一条路线。"))
         })
         .when(this.active_group().is_some(), |panel| {
             panel
-                .child(labeled_input(tokens, "节点名称", &this.marker_form.label))
+                .child(labeled_input(
+                    tokens,
+                    "路线节点名称",
+                    &this.marker_form.label,
+                ))
                 .child(labeled_input(tokens, "备注", &this.marker_form.note))
                 .child(div().flex().gap_3().children([
                     labeled_input(tokens, "X 坐标", &this.marker_form.x).into_any_element(),
@@ -2078,8 +2103,61 @@ fn point_detail_panel(
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(field_label(tokens, "图标样式"))
-                        .child(marker_icon_picker),
+                        .child(field_label(tokens, "BWiki 图标"))
+                        .child(
+                            Select::new(&this.marker_icon_picker)
+                                .w_full()
+                                .menu_width(px(420.0))
+                                .icon(IconName::Search)
+                                .placeholder("搜索并选择 BWiki 图标名")
+                                .disabled(!bwiki_dataset_ready)
+                                .empty(empty_list_state(
+                                    tokens,
+                                    "BWiki 图标目录加载中，请稍后重试。",
+                                )),
+                        )
+                        .when_some(marker_icon_definition.clone(), |column, definition| {
+                            column.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(bwiki_type_icon_preview(
+                                        definition.mark_type,
+                                        definition.icon_url.clone(),
+                                        this.bwiki_resources.clone(),
+                                        tokens,
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .text_color(tokens.app_fg)
+                                                    .child(definition.name),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(tokens.text_muted)
+                                                    .child(format!(
+                                                        "{} · {}",
+                                                        definition.category, definition.mark_type
+                                                    )),
+                                            ),
+                                    ),
+                            )
+                        })
+                        .when(marker_icon_definition.is_none(), |column| {
+                            column.child(body_text(
+                                tokens,
+                                format!("当前图标名：{}", this.marker_icon),
+                            ))
+                        }),
                 )
                 .child(toolbar_cluster(vec![
                     toolbar_button(
@@ -2347,7 +2425,7 @@ fn settings_resources_page(
             "resource-routes-dir",
             cx,
             tokens,
-            "标记组目录",
+            "路线目录",
             &this.workspace.assets.routes_dir.display().to_string(),
         ))
         .child(resource_path(
@@ -3033,6 +3111,8 @@ fn paint_tracker_map_overlay(
         point_visuals,
         selected_group_id,
         selected_point_id,
+        bwiki_resources,
+        bwiki_dataset,
     ) = {
         let this = entity.read(cx);
         (
@@ -3042,11 +3122,35 @@ fn paint_tracker_map_overlay(
             this.active_group_points(),
             this.selected_group_id.clone(),
             this.selected_point_id.clone(),
+            this.bwiki_resources.clone(),
+            this.bwiki_resources.dataset_snapshot(),
         )
     };
 
     window.paint_layer(bounds, |window| {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            let route_icon_images = bwiki_dataset
+                .as_ref()
+                .map(|dataset| {
+                    point_visuals
+                        .iter()
+                        .filter_map(|marker| {
+                            let definition =
+                                dataset.type_by_icon_name(marker.style.icon.as_str())?;
+                            let image = bwiki_resources
+                                .ensure_icon_path(definition.mark_type, &definition.icon_url)
+                                .and_then(|path| {
+                                    let resource = gpui::Resource::from(path);
+                                    window
+                                        .use_asset::<ImgResourceLoader>(&resource, cx)
+                                        .and_then(|result| result.ok())
+                                });
+                            Some((marker.style.icon.clone(), image))
+                        })
+                        .collect::<HashMap<_, _>>()
+                })
+                .unwrap_or_default();
+
             if trail.len() > 1 {
                 let trail_points = screen_points(camera, &trail);
                 let mut builder = PathBuilder::stroke(px(2.0));
@@ -3114,14 +3218,22 @@ fn paint_tracker_map_overlay(
                     bounds.origin.y + px(screen.y),
                 );
                 let accent = parse_hex_color(&marker.style.color_hex, 0x4ecdc4);
+                let icon_image = route_icon_images
+                    .get(&marker.style.icon)
+                    .and_then(|image| image.as_ref());
                 paint_route_marker(
                     window,
                     anchor,
                     marker.style.size_px,
                     accent,
                     highlighted,
+                    icon_image.is_some(),
                     tokens,
                 );
+                if let Some(image) = icon_image {
+                    let image_bounds = route_marker_image_bounds(anchor, marker.style.size_px);
+                    let _ = window.paint_image(image_bounds, 0.0.into(), image.clone(), 0, false);
+                }
             }
 
             if let Some(position) = preview_position
@@ -3519,9 +3631,11 @@ fn paint_route_marker(
     size_px: f32,
     accent: u32,
     highlighted: bool,
+    has_icon: bool,
     tokens: WorkbenchThemeTokens,
 ) {
-    let radius = size_px.clamp(14.0, 64.0) * 0.34;
+    let size_px = size_px.clamp(14.0, 64.0);
+    let radius = size_px * 0.34;
     let outer_bounds = Bounds {
         origin: point(anchor.x - px(radius + 4.0), anchor.y - px(radius + 4.0)),
         size: size(px((radius + 4.0) * 2.0), px((radius + 4.0) * 2.0)),
@@ -3539,13 +3653,36 @@ fn paint_route_marker(
         window.paint_quad(
             fill(outer_bounds, tokens.selected_marker_border).corner_radii(px(radius + 4.0)),
         );
+    } else if has_icon {
+        window.paint_quad(
+            fill(outer_bounds, gpui::rgba((accent << 8) | 0x44)).corner_radii(px(radius + 4.0)),
+        );
     } else {
         window.paint_quad(
             fill(outer_bounds, gpui::rgba((accent << 8) | 0x55)).corner_radii(px(radius + 4.0)),
         );
     }
+    if has_icon {
+        return;
+    }
     window.paint_quad(fill(inner_bounds, gpui::rgb(accent)).corner_radii(px(radius)));
     window.paint_quad(fill(core_bounds, gpui::rgb(0xFFFFFF)).corner_radii(px(radius * 0.38)));
+}
+
+fn route_marker_image_bounds(
+    anchor: gpui::Point<gpui::Pixels>,
+    size_px: f32,
+) -> Bounds<gpui::Pixels> {
+    let scale = size_px.clamp(14.0, 64.0) / 24.0;
+    let width = BWIKI_MARKER_ICON_WIDTH * scale;
+    let height = BWIKI_MARKER_ICON_HEIGHT * scale;
+    let anchor_x = BWIKI_MARKER_ICON_ANCHOR_X * scale;
+    let anchor_y = BWIKI_MARKER_ICON_ANCHOR_Y * scale;
+
+    Bounds {
+        origin: point(anchor.x - px(anchor_x), anchor.y - px(anchor_y)),
+        size: size(px(width), px(height)),
+    }
 }
 
 fn paint_bwiki_placeholder_marker(

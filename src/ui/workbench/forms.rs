@@ -8,7 +8,7 @@ use gpui_component::{
 
 use crate::domain::{
     geometry::WorldPoint,
-    marker::{MarkerStyle, normalize_hex_color},
+    marker::{MarkerIconStyle, MarkerStyle, normalize_hex_color},
     route::RouteId,
 };
 
@@ -25,8 +25,8 @@ pub(super) struct GroupFormInputs {
 impl GroupFormInputs {
     pub(super) fn new(window: &mut Window, cx: &mut Context<TrackerWorkbench>) -> Self {
         Self {
-            name: cx.new(|cx| InputState::new(window, cx).placeholder("分组名称")),
-            description: cx.new(|cx| InputState::new(window, cx).placeholder("分组描述")),
+            name: cx.new(|cx| InputState::new(window, cx).placeholder("路线名称")),
+            description: cx.new(|cx| InputState::new(window, cx).placeholder("路线说明")),
             color_hex: cx.new(|cx| InputState::new(window, cx).default_value("#FF6B6B")),
             size_px: cx.new(|cx| InputState::new(window, cx).default_value("24")),
         }
@@ -61,7 +61,7 @@ pub(super) struct MarkerFormInputs {
 impl MarkerFormInputs {
     pub(super) fn new(window: &mut Window, cx: &mut Context<TrackerWorkbench>) -> Self {
         Self {
-            label: cx.new(|cx| InputState::new(window, cx).placeholder("标记点名称")),
+            label: cx.new(|cx| InputState::new(window, cx).placeholder("路线节点名称")),
             note: cx.new(|cx| InputState::new(window, cx).placeholder("备注")),
             x: cx.new(|cx| InputState::new(window, cx).placeholder("X")),
             y: cx.new(|cx| InputState::new(window, cx).placeholder("Y")),
@@ -127,6 +127,62 @@ impl SelectItem for MarkerGroupPickerItem {
 
 pub(super) type MarkerGroupPickerDelegate = SearchableVec<MarkerGroupPickerItem>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BwikiIconPickerItem {
+    pub(super) value: MarkerIconStyle,
+    pub(super) title: SharedString,
+    pub(super) subtitle: SharedString,
+    pub(super) searchable_text: SharedString,
+}
+
+impl BwikiIconPickerItem {
+    pub(super) fn new(
+        value: MarkerIconStyle,
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
+        searchable_text: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            value,
+            title: title.into(),
+            subtitle: subtitle.into(),
+            searchable_text: searchable_text.into(),
+        }
+    }
+}
+
+impl SelectItem for BwikiIconPickerItem {
+    type Value = MarkerIconStyle;
+
+    fn title(&self) -> SharedString {
+        self.searchable_text.clone()
+    }
+
+    fn display_title(&self) -> Option<AnyElement> {
+        let label = if self.subtitle.is_empty() {
+            self.title.to_string()
+        } else {
+            format!("{} · {}", self.title, self.subtitle)
+        };
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(label)
+                .into_any_element(),
+        )
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+}
+
+pub(super) type BwikiIconPickerDelegate = SearchableVec<BwikiIconPickerItem>;
+
 #[derive(Clone)]
 pub(super) struct PagedListState {
     pub(super) search: gpui::Entity<InputState>,
@@ -165,20 +221,20 @@ impl GroupDraft {
     ) -> Result<Self, String> {
         let name = read_input_value(&workbench.group_form.name, cx);
         if name.trim().is_empty() {
-            return Err("分组名称不能为空。".to_owned());
+            return Err("路线名称不能为空。".to_owned());
         }
 
         let description = read_input_value(&workbench.group_form.description, cx);
         let size_px = read_input_value(&workbench.group_form.size_px, cx)
             .trim()
             .parse::<f32>()
-            .map_err(|_| "分组默认尺寸必须是数字。".to_owned())?;
+            .map_err(|_| "路线默认图标尺寸必须是数字。".to_owned())?;
 
         Ok(Self {
             name,
             description,
             style: MarkerStyle {
-                icon: workbench.group_icon,
+                icon: workbench.group_icon.clone(),
                 color_hex: normalize_hex_color(&read_input_value(
                     &workbench.group_form.color_hex,
                     cx,
@@ -204,28 +260,28 @@ impl MarkerDraft {
         cx: &mut Context<TrackerWorkbench>,
     ) -> Result<Self, String> {
         if workbench.selected_group_id.is_none() {
-            return Err("请先选择一个分组，再保存标记点。".to_owned());
+            return Err("请先选择一条路线，再保存路线节点。".to_owned());
         }
 
         let x = read_input_value(&workbench.marker_form.x, cx)
             .trim()
             .parse::<f32>()
-            .map_err(|_| "标记点 X 坐标必须是数字。".to_owned())?;
+            .map_err(|_| "路线节点 X 坐标必须是数字。".to_owned())?;
         let y = read_input_value(&workbench.marker_form.y, cx)
             .trim()
             .parse::<f32>()
-            .map_err(|_| "标记点 Y 坐标必须是数字。".to_owned())?;
+            .map_err(|_| "路线节点 Y 坐标必须是数字。".to_owned())?;
         let size_px = read_input_value(&workbench.marker_form.size_px, cx)
             .trim()
             .parse::<f32>()
-            .map_err(|_| "标记点尺寸必须是数字。".to_owned())?;
+            .map_err(|_| "路线节点图标尺寸必须是数字。".to_owned())?;
 
         Ok(Self {
             label: read_input_value(&workbench.marker_form.label, cx),
             note: read_input_value(&workbench.marker_form.note, cx),
             world: WorldPoint::new(x, y),
             style: MarkerStyle {
-                icon: workbench.marker_icon,
+                icon: workbench.marker_icon.clone(),
                 color_hex: normalize_hex_color(&read_input_value(
                     &workbench.marker_form.color_hex,
                     cx,

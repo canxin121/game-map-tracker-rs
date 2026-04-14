@@ -1,7 +1,6 @@
 use derive_more::{Display, From};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use strum::{Display as StrumDisplay, EnumIter};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 use crate::domain::geometry::WorldPoint;
@@ -30,99 +29,47 @@ impl MarkerGroupId {
     }
 }
 
-macro_rules! marker_icon_presets {
-    ($($(#[$meta:meta])* $variant:ident => $code:literal),+ $(,)?) => {
-        #[derive(
-            Debug,
-            Clone,
-            Copy,
-            PartialEq,
-            Eq,
-            Serialize,
-            Deserialize,
-            JsonSchema,
-            StrumDisplay,
-            EnumIter,
-        )]
-        pub enum MarkerIconStyle {
-            $(
-                $(#[$meta])*
-                #[serde(rename = $code)]
-                #[strum(to_string = $code)]
-                $variant,
-            )+
-        }
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Display, From, Serialize, JsonSchema)]
+#[display("{_0}")]
+#[serde(transparent)]
+pub struct MarkerIconStyle(pub String);
 
-        impl MarkerIconStyle {
-            #[must_use]
-            pub const fn asset_code(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $code,)+
-                }
-            }
+impl MarkerIconStyle {
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(normalize_marker_icon_name(&name.into()))
+    }
 
-            #[must_use]
-            pub const fn asset_path(self) -> &'static str {
-                match self {
-                    $(Self::$variant => concat!("assets/points/", $code, ".png"),)+
-                }
-            }
-        }
-    };
-}
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 
-marker_icon_presets! {
-    #[serde(
-        alias = "Pin",
-        alias = "Circle",
-        alias = "Square",
-        alias = "Diamond",
-        alias = "Triangle",
-        alias = "Cross",
-        alias = "Star"
-    )]
-    Icon701 => "701",
-    Icon702 => "702",
-    Icon703 => "703",
-    Icon704 => "704",
-    Icon705 => "705",
-    Icon706 => "706",
-    Icon707 => "707",
-    Icon708 => "708",
-    Icon709 => "709",
-    Icon710 => "710",
-    Icon711 => "711",
-    Icon712 => "712",
-    Icon713 => "713",
-    Icon714 => "714",
-    Icon715 => "715",
-    Icon716 => "716",
-    Icon717 => "717",
-    Icon718 => "718",
-    Icon719 => "719",
-    Icon720 => "720",
-    Icon721 => "721",
-    Icon722 => "722",
-    Icon723 => "723",
-    Icon724 => "724",
-    Icon725 => "725",
-    Icon726 => "726",
-    Icon727 => "727",
-    Icon728 => "728",
-    Icon729 => "729",
-    Icon730 => "730",
-    Icon731 => "731",
-    Icon732 => "732",
-    Icon733 => "733",
-    Icon734 => "734",
-    Icon735 => "735",
-    Icon736 => "736",
-    Icon737 => "737",
+    #[must_use]
+    pub fn normalized(&self) -> Self {
+        Self::new(self.0.clone())
+    }
 }
 
 impl Default for MarkerIconStyle {
     fn default() -> Self {
-        Self::Icon701
+        Self::new(default_marker_icon_name())
+    }
+}
+
+impl From<&str> for MarkerIconStyle {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for MarkerIconStyle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::new(raw))
     }
 }
 
@@ -149,6 +96,7 @@ impl Default for MarkerStyle {
 impl MarkerStyle {
     #[must_use]
     pub fn normalized(mut self) -> Self {
+        self.icon = self.icon.normalized();
         self.color_hex = normalize_hex_color(&self.color_hex);
         self.size_px = self.size_px.clamp(14.0, 64.0);
         self
@@ -387,4 +335,63 @@ fn default_marker_color() -> String {
 
 fn default_marker_size() -> f32 {
     24.0
+}
+
+fn default_marker_icon_name() -> &'static str {
+    "黑晶琉璃"
+}
+
+fn normalize_marker_icon_name(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return default_marker_icon_name().to_owned();
+    }
+
+    legacy_marker_icon_name(trimmed)
+        .unwrap_or(trimmed)
+        .to_owned()
+}
+
+fn legacy_marker_icon_name(value: &str) -> Option<&'static str> {
+    match value {
+        "Pin" | "Circle" | "Square" | "Diamond" | "Triangle" | "Cross" | "Star" => Some("黑晶琉璃"),
+        "701" => Some("黑晶琉璃"),
+        "702" => Some("黄石榴石"),
+        "703" => Some("蓝晶碧玺"),
+        "704" => Some("紫莲刚玉"),
+        "705" => Some("向阳花"),
+        "706" => Some("喵喵草"),
+        "707" => Some("蓝掌"),
+        "708" => Some("睡铃"),
+        "709" => Some("天使草"),
+        "710" => Some("石耳"),
+        "711" => Some("伞伞菌"),
+        "712" => Some("蜜黄菌"),
+        "713" => Some("喷气菇"),
+        "714" => Some("凤眼莲"),
+        "715" => Some("蜂窝"),
+        "716" => Some("星霜花"),
+        "717" => Some("荧光兰"),
+        "718" => Some("大嘴花"),
+        "719" => Some("流星兰"),
+        "720" => Some("紫晶菇"),
+        "721" => Some("海桑花"),
+        "722" => Some("海星石"),
+        "723" => Some("彩玉花"),
+        "724" => Some("象牙花"),
+        "725" => Some("风卷草"),
+        "726" => Some("海珊瑚"),
+        "727" => Some("海神花"),
+        "728" => Some("紫雀花"),
+        "729" => Some("恶魔雪茄"),
+        "730" => Some("骨片"),
+        "731" => Some("花星角"),
+        "732" => Some("火焰花"),
+        "733" => Some("雪菇"),
+        "734" => Some("幽幽草"),
+        "735" => Some("幽幽鬼火"),
+        "736" => Some("藻羽花"),
+        "737" => Some("洋红珊瑚"),
+        _ => None,
+    }
 }

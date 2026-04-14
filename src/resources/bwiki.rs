@@ -150,6 +150,24 @@ impl BwikiDataset {
     }
 
     #[must_use]
+    pub fn type_by_icon_name(&self, icon_name: &str) -> Option<&BwikiTypeDefinition> {
+        let normalized = icon_name.trim();
+        if normalized.is_empty() {
+            return None;
+        }
+
+        self.types
+            .iter()
+            .find(|item| item.name == normalized)
+            .or_else(|| {
+                normalized
+                    .parse::<u32>()
+                    .ok()
+                    .and_then(|mark_type| self.type_by_mark_type(mark_type))
+            })
+    }
+
+    #[must_use]
     pub fn sorted_category_names(&self) -> Vec<String> {
         let mut names = self
             .types
@@ -378,6 +396,13 @@ impl BwikiResourceManager {
     }
 
     #[must_use]
+    pub fn resolve_icon_definition(&self, icon_name: &str) -> Option<BwikiTypeDefinition> {
+        self.ensure_dataset_loaded();
+        let dataset = self.dataset_snapshot()?;
+        dataset.type_by_icon_name(icon_name).cloned()
+    }
+
+    #[must_use]
     pub fn ensure_icon_path(&self, mark_type: u32, icon_url: &str) -> Option<PathBuf> {
         if icon_url.trim().is_empty() {
             return None;
@@ -401,6 +426,12 @@ impl BwikiResourceManager {
             icon_url: icon_url.to_owned(),
         });
         None
+    }
+
+    #[must_use]
+    pub fn ensure_icon_path_by_name(&self, icon_name: &str) -> Option<PathBuf> {
+        let definition = self.resolve_icon_definition(icon_name)?;
+        self.ensure_icon_path(definition.mark_type, &definition.icon_url)
     }
 
     #[must_use]

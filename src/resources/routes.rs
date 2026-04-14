@@ -267,7 +267,7 @@ fn sanitize_file_stem(name: &str) -> String {
         .to_owned();
 
     if stem.is_empty() {
-        stem = "marker-group".to_owned();
+        stem = "route".to_owned();
     }
 
     stem

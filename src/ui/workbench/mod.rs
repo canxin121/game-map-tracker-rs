@@ -32,9 +32,9 @@ use crate::{
 
 use self::{
     forms::{
-        GroupDraft, GroupFormInputs, GroupInlineEditInputs, MarkerDraft, MarkerFormInputs,
-        MarkerGroupPickerDelegate, MarkerGroupPickerItem, PagedListState, read_input_value,
-        set_input_value,
+        BwikiIconPickerDelegate, BwikiIconPickerItem, GroupDraft, GroupFormInputs,
+        GroupInlineEditInputs, MarkerDraft, MarkerFormInputs, MarkerGroupPickerDelegate,
+        MarkerGroupPickerItem, PagedListState, read_input_value, set_input_value,
     },
     page::{MapPage, MarkersPage, SettingsPage, WorkbenchPage},
     panels::render_workbench,
@@ -120,6 +120,8 @@ pub struct TrackerWorkbench {
     marker_group_list: PagedListState,
     point_list: PagedListState,
     marker_group_picker: gpui::Entity<SelectState<MarkerGroupPickerDelegate>>,
+    group_icon_picker: gpui::Entity<SelectState<BwikiIconPickerDelegate>>,
+    marker_icon_picker: gpui::Entity<SelectState<BwikiIconPickerDelegate>>,
     pub(super) ui_preferences_path: PathBuf,
     pub(super) bwiki_resources: BwikiResourceManager,
     pub(super) bwiki_tile_cache: gpui::Entity<TileImageCache>,
@@ -127,6 +129,7 @@ pub struct TrackerWorkbench {
     pub(super) bwiki_visible_mark_types: HashSet<u32>,
     pub(super) bwiki_expanded_categories: HashSet<String>,
     bwiki_visibility_initialized: bool,
+    bwiki_icon_picker_version: u64,
     group_form: GroupFormInputs,
     group_inline_edit: GroupInlineEditInputs,
     marker_form: MarkerFormInputs,
@@ -138,12 +141,16 @@ impl TrackerWorkbench {
         let group_form = GroupFormInputs::new(window, cx);
         let group_inline_edit = GroupInlineEditInputs::new(window, cx);
         let marker_form = MarkerFormInputs::new(window, cx);
-        let map_group_list = PagedListState::new(window, cx, "搜索地图中的标记组", 8);
-        let marker_group_list = PagedListState::new(window, cx, "搜索标记组", 8);
-        let point_list = PagedListState::new(window, cx, "搜索当前组节点", 10);
+        let map_group_list = PagedListState::new(window, cx, "搜索地图中的路线", 8);
+        let marker_group_list = PagedListState::new(window, cx, "搜索路线", 8);
+        let point_list = PagedListState::new(window, cx, "搜索当前路线节点", 10);
         let marker_group_picker = cx.new(|cx| {
             SelectState::new(MarkerGroupPickerDelegate::new(Vec::new()), None, window, cx)
         });
+        let group_icon_picker = cx
+            .new(|cx| SelectState::new(BwikiIconPickerDelegate::new(Vec::new()), None, window, cx));
+        let marker_icon_picker = cx
+            .new(|cx| SelectState::new(BwikiIconPickerDelegate::new(Vec::new()), None, window, cx));
         let bwiki_tile_cache =
             TileImageCache::new(BWIKI_TILE_CACHE_MAX_ITEMS, BWIKI_TILE_CACHE_MAX_BYTES, cx);
         let ui_preferences_path = UiPreferencesRepository::path_for(&project_root);
@@ -182,7 +189,7 @@ impl TrackerWorkbench {
                     tracker_session: None,
                     tracker_lifecycle: TrackerLifecycle::Idle,
                     selected_engine: TrackerEngineKind::RustTemplate,
-                    status_text: "数据目录已经完成解析。地图页只负责查看地图和运行 tracker，标记页负责管理 routes 目录下的标记组与节点。".into(),
+                    status_text: "数据目录已经完成解析。地图页只负责查看地图和运行 tracker，路线页负责管理 routes 目录下的路线与路线节点。".into(),
                     preview_position: preview_position.clone(),
                     preview_cursor: selected_group_id.as_ref().map(|_| 0),
                     trail: preview_position
@@ -222,6 +229,8 @@ impl TrackerWorkbench {
                     marker_group_list: marker_group_list.clone(),
                     point_list: point_list.clone(),
                     marker_group_picker: marker_group_picker.clone(),
+                    group_icon_picker: group_icon_picker.clone(),
+                    marker_icon_picker: marker_icon_picker.clone(),
                     ui_preferences_path: ui_preferences_path.clone(),
                     bwiki_resources,
                     bwiki_tile_cache: bwiki_tile_cache.clone(),
@@ -229,6 +238,7 @@ impl TrackerWorkbench {
                     bwiki_visible_mark_types: HashSet::new(),
                     bwiki_expanded_categories: HashSet::new(),
                     bwiki_visibility_initialized: false,
+                    bwiki_icon_picker_version: 0,
                     group_form,
                     group_inline_edit,
                     marker_form,
@@ -284,6 +294,8 @@ impl TrackerWorkbench {
                     marker_group_list,
                     point_list,
                     marker_group_picker,
+                    group_icon_picker,
+                    marker_icon_picker,
                     ui_preferences_path: ui_preferences_path.clone(),
                     bwiki_resources,
                     bwiki_tile_cache,
@@ -291,6 +303,7 @@ impl TrackerWorkbench {
                     bwiki_visible_mark_types: HashSet::new(),
                     bwiki_expanded_categories: HashSet::new(),
                     bwiki_visibility_initialized: false,
+                    bwiki_icon_picker_version: 0,
                     group_form,
                     group_inline_edit,
                     marker_form,
@@ -384,6 +397,30 @@ impl TrackerWorkbench {
                     return;
                 };
                 this.select_group(group_id.clone(), window, cx);
+                cx.notify();
+            },
+        ));
+        let group_icon_picker = workbench.group_icon_picker.clone();
+        workbench.subscriptions.push(cx.subscribe_in(
+            &group_icon_picker,
+            window,
+            |this, _, event: &SelectEvent<BwikiIconPickerDelegate>, _, cx| {
+                let SelectEvent::Confirm(Some(icon_name)) = event else {
+                    return;
+                };
+                this.group_icon = icon_name.clone();
+                cx.notify();
+            },
+        ));
+        let marker_icon_picker = workbench.marker_icon_picker.clone();
+        workbench.subscriptions.push(cx.subscribe_in(
+            &marker_icon_picker,
+            window,
+            |this, _, event: &SelectEvent<BwikiIconPickerDelegate>, _, cx| {
+                let SelectEvent::Confirm(Some(icon_name)) = event else {
+                    return;
+                };
+                this.marker_icon = icon_name.clone();
                 cx.notify();
             },
         ));
@@ -505,7 +542,7 @@ impl TrackerWorkbench {
 
     pub(super) fn active_group_name(&self) -> SharedString {
         self.active_group().map_or_else(
-            || "未选择标记组".into(),
+            || "未选择路线".into(),
             |group| group.display_name().to_owned().into(),
         )
     }
@@ -670,7 +707,7 @@ impl TrackerWorkbench {
         self.active_page = WorkbenchPage::Markers;
         self.markers_page = page;
         self.markers_nav_expanded = true;
-        self.status_text = format!("标记页面已切换到{}。", page).into();
+        self.status_text = format!("路线页面已切换到{}。", page).into();
     }
 
     fn select_settings_page(&mut self, page: SettingsPage) {
@@ -700,15 +737,15 @@ impl TrackerWorkbench {
         if self.active_page != WorkbenchPage::Markers {
             self.active_page = WorkbenchPage::Markers;
             self.markers_nav_expanded = true;
-            self.status_text = "已切换到标记页面。".into();
+            self.status_text = "已切换到路线页面。".into();
             return;
         }
 
         self.markers_nav_expanded = !self.markers_nav_expanded;
         self.status_text = if self.markers_nav_expanded {
-            "已展开标记导航。".into()
+            "已展开路线导航。".into()
         } else {
-            "已收起标记导航。".into()
+            "已收起路线导航。".into()
         };
     }
 
@@ -1084,7 +1121,7 @@ impl TrackerWorkbench {
         cx: &mut Context<Self>,
     ) {
         let Some(group) = self.route_groups.iter().find(|group| group.id == group_id) else {
-            self.status_text = "待编辑的标记组不存在。".into();
+            self.status_text = "待编辑的路线不存在。".into();
             return;
         };
 
@@ -1099,7 +1136,7 @@ impl TrackerWorkbench {
             cx,
         );
         self.sync_editor_from_selection(window, cx);
-        self.status_text = "已进入标记组行内编辑。".into();
+        self.status_text = "已进入路线行内编辑。".into();
     }
 
     pub(super) fn create_group_inline_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1132,7 +1169,7 @@ impl TrackerWorkbench {
             window,
             cx,
         );
-        self.status_text = "已创建新的空白标记组，请先填写标题和注释。".into();
+        self.status_text = "已创建新的空白路线，请先填写标题和说明。".into();
     }
 
     pub(super) fn commit_inline_group_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1142,7 +1179,7 @@ impl TrackerWorkbench {
 
         let name = read_input_value(&self.group_inline_edit.name, cx);
         if name.trim().is_empty() {
-            self.status_text = "标记组标题不能为空。".into();
+            self.status_text = "路线标题不能为空。".into();
             return;
         }
         let description = read_input_value(&self.group_inline_edit.description, cx);
@@ -1155,7 +1192,7 @@ impl TrackerWorkbench {
             else {
                 self.editing_group_id = None;
                 self.pending_new_group_id = None;
-                self.status_text = "待保存的标记组不存在。".into();
+                self.status_text = "待保存的路线不存在。".into();
                 return;
             };
 
@@ -1179,7 +1216,7 @@ impl TrackerWorkbench {
             }
         }
 
-        if self.persist_group(&group_id, "标记组已保存") {
+        if self.persist_group(&group_id, "路线已保存") {
             self.editing_group_id = None;
             if self.pending_new_group_id.as_ref() == Some(&group_id) {
                 self.pending_new_group_id = None;
@@ -1197,7 +1234,7 @@ impl TrackerWorkbench {
             self.editing_group_id = None;
             self.pending_new_group_id = None;
             self.delete_group_by_id(group_id, false, window, cx);
-            self.status_text = "已取消新建标记组。".into();
+            self.status_text = "已取消新建路线。".into();
             return;
         }
 
@@ -1211,7 +1248,7 @@ impl TrackerWorkbench {
                 cx,
             );
         }
-        self.status_text = "已取消标记组行内编辑。".into();
+        self.status_text = "已取消路线行内编辑。".into();
     }
 
     pub(super) fn begin_group_delete_confirmation(
@@ -1232,7 +1269,7 @@ impl TrackerWorkbench {
             })
         else {
             self.confirming_delete_group_id = None;
-            self.status_text = "待删除的标记组不存在。".into();
+            self.status_text = "待删除的路线不存在。".into();
             return;
         };
 
@@ -1259,13 +1296,13 @@ impl TrackerWorkbench {
             window,
             cx,
         );
-        self.status_text = format!("请确认是否删除标记组「{}」。", group_name).into();
+        self.status_text = format!("请确认是否删除路线「{}」。", group_name).into();
     }
 
     pub(super) fn cancel_group_delete_confirmation(&mut self, group_id: RouteId) {
         if self.confirming_delete_group_id.as_ref() == Some(&group_id) {
             self.confirming_delete_group_id = None;
-            self.status_text = "已取消删除标记组。".into();
+            self.status_text = "已取消删除路线。".into();
         }
     }
 
@@ -1291,7 +1328,7 @@ impl TrackerWorkbench {
             .iter()
             .position(|group| group.id == group_id)
         else {
-            self.status_text = "选中的标记组不存在。".into();
+            self.status_text = "选中的路线不存在。".into();
             return;
         };
 
@@ -1300,7 +1337,7 @@ impl TrackerWorkbench {
         let removed_file_exists = removed_path.exists();
         if delete_persisted_file {
             if removed_file_exists && let Err(error) = RouteRepository::delete(&removed_path) {
-                self.status_text = format!("删除标记组文件失败：{error:#}").into();
+                self.status_text = format!("删除路线文件失败：{error:#}").into();
                 return;
             }
         }
@@ -1331,9 +1368,9 @@ impl TrackerWorkbench {
 
         self.sync_editor_from_selection(window, cx);
         self.status_text = if delete_persisted_file && removed_file_exists {
-            format!("标记组「{}」已删除。", removed.display_name()).into()
+            format!("路线「{}」已删除。", removed.display_name()).into()
         } else {
-            format!("已移除未保存的标记组占位「{}」。", removed.display_name()).into()
+            format!("已移除未保存的路线占位「{}」。", removed.display_name()).into()
         };
     }
 
@@ -1343,7 +1380,7 @@ impl TrackerWorkbench {
         cx: &mut Context<Self>,
     ) {
         let Some(group_id) = self.selected_group_id.clone() else {
-            self.status_text = "请先选择一个标记组。".into();
+            self.status_text = "请先选择一条路线。".into();
             return;
         };
         let visible = {
@@ -1352,7 +1389,7 @@ impl TrackerWorkbench {
                 .iter_mut()
                 .find(|group| group.id == group_id)
             else {
-                self.status_text = "选中的标记组不存在。".into();
+                self.status_text = "选中的路线不存在。".into();
                 return;
             };
             group.visible = !group.visible;
@@ -1361,9 +1398,9 @@ impl TrackerWorkbench {
         if self.persist_group(
             &group_id,
             if visible {
-                "标记组已设为显示"
+                "路线已设为显示"
             } else {
-                "标记组已设为隐藏"
+                "路线已设为隐藏"
             },
         ) {
             self.sync_editor_from_selection(window, cx);
@@ -1376,7 +1413,7 @@ impl TrackerWorkbench {
         cx: &mut Context<Self>,
     ) {
         let Some(group_id) = self.selected_group_id.clone() else {
-            self.status_text = "请先选择一个标记组。".into();
+            self.status_text = "请先选择一条路线。".into();
             return;
         };
         let looped = {
@@ -1385,7 +1422,7 @@ impl TrackerWorkbench {
                 .iter_mut()
                 .find(|group| group.id == group_id)
             else {
-                self.status_text = "选中的标记组不存在。".into();
+                self.status_text = "选中的路线不存在。".into();
                 return;
             };
             group.looped = !group.looped;
@@ -1394,9 +1431,9 @@ impl TrackerWorkbench {
         if self.persist_group(
             &group_id,
             if looped {
-                "标记组已切换为闭环路径"
+                "路线已切换为闭环路径"
             } else {
-                "标记组已切换为非闭环路径"
+                "路线已切换为非闭环路径"
             },
         ) {
             self.sync_editor_from_selection(window, cx);
@@ -1426,6 +1463,40 @@ impl TrackerWorkbench {
         )
     }
 
+    fn bwiki_icon_picker_items(&self) -> BwikiIconPickerDelegate {
+        let items = self
+            .bwiki_resources
+            .dataset_snapshot()
+            .map(|dataset| {
+                dataset
+                    .types
+                    .iter()
+                    .filter(|definition| !definition.icon_url.trim().is_empty())
+                    .map(|definition| {
+                        let title = definition.name.clone();
+                        let subtitle = format!(
+                            "{} · {} · {} 个点位",
+                            definition.category, definition.mark_type, definition.point_count
+                        );
+                        BwikiIconPickerItem::new(
+                            MarkerIconStyle::new(title.clone()),
+                            title.clone(),
+                            subtitle.clone(),
+                            format!(
+                                "{} {} {} {}",
+                                title,
+                                definition.category,
+                                definition.mark_type,
+                                definition.point_count
+                            ),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        BwikiIconPickerDelegate::new(items)
+    }
+
     fn sync_marker_group_picker_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let items = self.marker_group_picker_items();
         let selected_group_id = self.selected_group_id.clone();
@@ -1437,6 +1508,27 @@ impl TrackerWorkbench {
                 picker.set_selected_index(None, window, cx);
             }
         });
+    }
+
+    pub(super) fn sync_bwiki_icon_picker_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let group_items = self.bwiki_icon_picker_items();
+        let marker_items = self.bwiki_icon_picker_items();
+        let group_icon = self.group_icon.clone();
+        let marker_icon = self.marker_icon.clone();
+
+        self.group_icon_picker.update(cx, |picker, cx| {
+            picker.set_items(group_items, window, cx);
+            picker.set_selected_value(&group_icon, window, cx);
+        });
+        self.marker_icon_picker.update(cx, |picker, cx| {
+            picker.set_items(marker_items, window, cx);
+            picker.set_selected_value(&marker_icon, window, cx);
+        });
+        self.bwiki_icon_picker_version = self.bwiki_version;
     }
 
     pub(super) fn set_theme_preference(
@@ -1485,7 +1577,7 @@ impl TrackerWorkbench {
         self.sync_editor_from_selection(window, cx);
         if let Some(group) = self.active_group() {
             self.status_text = format!(
-                "已选中标记组「{}」，共 {} 个节点。",
+                "已选中路线「{}」，共 {} 个节点。",
                 group.display_name(),
                 group.point_count()
             )
@@ -1559,16 +1651,16 @@ impl TrackerWorkbench {
 
     pub(super) fn step_preview(&mut self, delta: isize) {
         if self.is_tracking_active() {
-            self.status_text = "实时追踪运行中。请先停止追踪，再手动步进当前标记组节点。".into();
+            self.status_text = "实时追踪运行中。请先停止追踪，再手动步进当前路线节点。".into();
             return;
         }
 
         let Some(group) = self.active_group().cloned() else {
-            self.status_text = "请先选择一个标记组。".into();
+            self.status_text = "请先选择一条路线。".into();
             return;
         };
         if group.points.is_empty() {
-            self.status_text = "当前标记组没有节点。".into();
+            self.status_text = "当前路线没有节点。".into();
             return;
         }
 
@@ -1774,7 +1866,7 @@ impl TrackerWorkbench {
         let selected_group = self.active_group().cloned();
         self.group_icon = selected_group
             .as_ref()
-            .map(|group| group.default_style.icon)
+            .map(|group| group.default_style.icon.clone())
             .unwrap_or_default();
         set_input_value(
             &self.group_form.name,
@@ -1818,11 +1910,11 @@ impl TrackerWorkbench {
         let selected_point = self.selected_point().cloned();
         self.marker_icon = selected_point
             .as_ref()
-            .map(|point| point.style.icon)
+            .map(|point| point.style.icon.clone())
             .or_else(|| {
                 selected_group
                     .as_ref()
-                    .map(|group| group.default_style.icon)
+                    .map(|group| group.default_style.icon.clone())
             })
             .unwrap_or_default();
         let default_world = selected_point
@@ -1880,13 +1972,15 @@ impl TrackerWorkbench {
             cx,
         );
 
+        self.sync_bwiki_icon_picker_state(window, cx);
         self.sync_visible_list_pages(window, cx);
     }
+
     pub(super) fn new_point_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.selected_point_id = None;
         self.marker_icon = self
             .active_group()
-            .map(|group| group.default_style.icon)
+            .map(|group| group.default_style.icon.clone())
             .unwrap_or_default();
         set_input_value(&self.marker_form.label, "", window, cx);
         set_input_value(&self.marker_form.note, "", window, cx);
@@ -1895,6 +1989,7 @@ impl TrackerWorkbench {
         set_input_value(&self.marker_form.y, format!("{:.0}", world.y), window, cx);
         set_input_value(&self.marker_form.color_hex, "#4ECDC4", window, cx);
         set_input_value(&self.marker_form.size_px, "24", window, cx);
+        self.sync_bwiki_icon_picker_state(window, cx);
         self.status_text = "已切换到新建节点草稿。".into();
     }
 
@@ -1939,14 +2034,14 @@ impl TrackerWorkbench {
             group_id
         };
 
-        if self.persist_group(&target_group_id, "标记组已保存") {
+        if self.persist_group(&target_group_id, "路线已保存") {
             self.sync_editor_from_selection(window, cx);
         }
     }
 
     pub(super) fn delete_selected_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(group_id) = self.selected_group_id.clone() else {
-            self.status_text = "当前没有选中的标记组。".into();
+            self.status_text = "当前没有选中的路线。".into();
             return;
         };
         self.begin_group_delete_confirmation(group_id, window, cx);
@@ -1957,7 +2052,7 @@ impl TrackerWorkbench {
             files: true,
             directories: false,
             multiple: true,
-            prompt: Some("选择要导入的标记组文件".into()),
+            prompt: Some("选择要导入的路线文件".into()),
         });
 
         cx.spawn_in(window, async move |this, cx| {
@@ -1979,7 +2074,7 @@ impl TrackerWorkbench {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("选择包含标记组文件的文件夹".into()),
+            prompt: Some("选择包含路线文件的文件夹".into()),
         });
 
         cx.spawn_in(window, async move |this, cx| {
@@ -1999,8 +2094,7 @@ impl TrackerWorkbench {
             this.update_in(cx, |this, window, cx| match paths_result {
                 Ok(paths) if paths.is_empty() => {
                     this.status_text =
-                        format!("目录 {} 中没有可导入的 JSON 标记组文件。", folder.display())
-                            .into();
+                        format!("目录 {} 中没有可导入的 JSON 路线文件。", folder.display()).into();
                     cx.notify();
                 }
                 Ok(paths) => {
@@ -2024,14 +2118,14 @@ impl TrackerWorkbench {
         cx: &mut Context<Self>,
     ) {
         if paths.is_empty() {
-            self.status_text = "没有选择任何可导入的标记组文件。".into();
+            self.status_text = "没有选择任何可导入的路线文件。".into();
             return;
         }
 
         match RouteRepository::import_paths(paths, &self.workspace.assets.routes_dir) {
             Ok(report) => self.apply_import_report(report, window, cx),
             Err(error) => {
-                self.status_text = format!("导入标记组失败：{error:#}").into();
+                self.status_text = format!("导入路线失败：{error:#}").into();
             }
         }
     }
@@ -2045,13 +2139,13 @@ impl TrackerWorkbench {
         if report.imported_count == 0 {
             if let Some(first_error) = report.failed_sources.first() {
                 self.status_text = format!(
-                    "没有成功导入任何标记组，共 {} 个文件失败。首个错误：{}",
+                    "没有成功导入任何路线，共 {} 个文件失败。首个错误：{}",
                     report.failed_sources.len(),
                     first_error
                 )
                 .into();
             } else {
-                self.status_text = "没有发现可导入的标记组文件。".into();
+                self.status_text = "没有发现可导入的路线文件。".into();
             }
             return;
         }
@@ -2059,12 +2153,12 @@ impl TrackerWorkbench {
         if let Err(error) =
             self.reload_route_groups(report.first_imported_group_id.as_ref(), window, cx)
         {
-            self.status_text = format!("导入完成，但刷新标记组失败：{error:#}").into();
+            self.status_text = format!("导入完成，但刷新路线失败：{error:#}").into();
             return;
         }
 
         let mut message = format!(
-            "已导入 {} 个标记组，共 {} 个节点。",
+            "已导入 {} 条路线，共 {} 个节点。",
             report.imported_count, report.imported_point_count
         );
         if !report.failed_sources.is_empty() {
@@ -2081,7 +2175,7 @@ impl TrackerWorkbench {
 
     pub(super) fn save_point(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(group_id) = self.selected_group_id.clone() else {
-            self.status_text = "请先选择一个标记组，再保存节点。".into();
+            self.status_text = "请先选择一条路线，再保存节点。".into();
             return;
         };
         let draft = match MarkerDraft::read(self, cx) {
@@ -2132,7 +2226,7 @@ impl TrackerWorkbench {
 
     pub(super) fn delete_selected_point(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(group_id) = self.selected_group_id.clone() else {
-            self.status_text = "当前没有选中的标记组。".into();
+            self.status_text = "当前没有选中的路线。".into();
             return;
         };
         let Some(point_id) = self.selected_point_id.clone() else {
@@ -2300,7 +2394,7 @@ impl TrackerWorkbench {
             .iter()
             .position(|group| &group.id == group_id)
         else {
-            self.status_text = "待保存的标记组不存在。".into();
+            self.status_text = "待保存的路线不存在。".into();
             return false;
         };
 
@@ -2329,7 +2423,7 @@ impl TrackerWorkbench {
                 true
             }
             Err(error) => {
-                self.status_text = format!("保存标记组失败：{error:#}").into();
+                self.status_text = format!("保存路线失败：{error:#}").into();
                 false
             }
         }
@@ -2386,7 +2480,10 @@ impl Drop for TrackerWorkbench {
 }
 
 impl Render for TrackerWorkbench {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        if self.bwiki_icon_picker_version != self.bwiki_version {
+            self.sync_bwiki_icon_picker_state(window, cx);
+        }
         render_workbench(self, cx)
     }
 }
