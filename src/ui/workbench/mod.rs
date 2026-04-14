@@ -1,4 +1,5 @@
 mod forms;
+mod minimap_picker;
 mod page;
 mod panels;
 mod select;
@@ -12,7 +13,10 @@ use std::{
     time::Duration,
 };
 
-use gpui::{AppContext, Context, PathPromptOptions, Render, SharedString, Subscription, Window};
+use gpui::{
+    AnyWindowHandle, AppContext, Bounds, Context, PathPromptOptions, Pixels, Render, SharedString,
+    Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
+};
 use gpui_component::input::InputEvent;
 
 use crate::{
@@ -42,6 +46,7 @@ use self::{
         PagedListState, PlannerRouteDraft, PointReorderTargetItem, RoutePlannerFormInputs,
         read_input_value, set_input_value,
     },
+    minimap_picker::MinimapRegionPicker,
     page::{MapPage, SettingsPage, WorkbenchPage},
     panels::render_workbench,
     select::{SelectEvent, SelectState},
@@ -255,6 +260,14 @@ where
             .any(|value| value.as_ref().to_lowercase().contains(query))
 }
 
+fn screen_bounds_contains(bounds: Bounds<Pixels>, x: f32, y: f32) -> bool {
+    let left = f32::from(bounds.origin.x);
+    let top = f32::from(bounds.origin.y);
+    let right = left + f32::from(bounds.size.width);
+    let bottom = top + f32::from(bounds.size.height);
+    x >= left && x < right && y >= top && y < bottom
+}
+
 pub struct TrackerWorkbench {
     pub(super) project_root: SharedString,
     pub(super) workspace: Arc<WorkspaceSnapshot>,
@@ -314,6 +327,7 @@ pub struct TrackerWorkbench {
     marker_icon_picker: gpui::Entity<SelectState<BwikiIconPickerItem>>,
     point_reorder_target_id: Option<RoutePointId>,
     point_reorder_picker: gpui::Entity<SelectState<PointReorderTargetItem>>,
+    minimap_region_picker_window: Option<AnyWindowHandle>,
     pub(super) ui_preferences_path: PathBuf,
     pub(super) bwiki_resources: BwikiResourceManager,
     pub(super) bwiki_tile_cache: gpui::Entity<TileImageCache>,
@@ -343,19 +357,16 @@ impl TrackerWorkbench {
         let map_group_list = PagedListState::new(window, cx, "搜索地图中的路线", 8);
         let marker_group_list = PagedListState::new(window, cx, "搜索路线", 8);
         let point_list = PagedListState::new(window, cx, "搜索当前路线节点", 10);
-        let bwiki_category_search = cx.new(|cx| {
-            gpui_component::input::InputState::new(window, cx).placeholder("过滤分类")
-        });
-        let bwiki_type_search = cx.new(|cx| {
-            gpui_component::input::InputState::new(window, cx).placeholder("过滤节点")
-        });
+        let bwiki_category_search =
+            cx.new(|cx| gpui_component::input::InputState::new(window, cx).placeholder("过滤分类"));
+        let bwiki_type_search =
+            cx.new(|cx| gpui_component::input::InputState::new(window, cx).placeholder("过滤节点"));
         let marker_group_picker = cx.new(|cx| SelectState::new(Vec::new(), None, 8, window, cx));
         let group_icon_picker = cx.new(|cx| SelectState::new(Vec::new(), None, 10, window, cx));
         let marker_icon_picker = cx.new(|cx| SelectState::new(Vec::new(), None, 10, window, cx));
         let bwiki_planner_icon_picker =
             cx.new(|cx| SelectState::new(Vec::new(), None, 10, window, cx));
-        let point_reorder_picker =
-            cx.new(|cx| SelectState::new(Vec::new(), None, 8, window, cx));
+        let point_reorder_picker = cx.new(|cx| SelectState::new(Vec::new(), None, 8, window, cx));
         let bwiki_tile_cache =
             TileImageCache::new(BWIKI_TILE_CACHE_MAX_ITEMS, BWIKI_TILE_CACHE_MAX_BYTES, cx);
         let ui_preferences_path = UiPreferencesRepository::path_for(&project_root);
@@ -454,6 +465,7 @@ impl TrackerWorkbench {
                     marker_icon_picker: marker_icon_picker.clone(),
                     point_reorder_target_id: None,
                     point_reorder_picker: point_reorder_picker.clone(),
+                    minimap_region_picker_window: None,
                     ui_preferences_path: ui_preferences_path.clone(),
                     bwiki_resources,
                     bwiki_tile_cache: bwiki_tile_cache.clone(),
@@ -543,6 +555,7 @@ impl TrackerWorkbench {
                     marker_icon_picker,
                     point_reorder_target_id: None,
                     point_reorder_picker,
+                    minimap_region_picker_window: None,
                     ui_preferences_path: ui_preferences_path.clone(),
                     bwiki_resources,
                     bwiki_tile_cache,
@@ -956,7 +969,9 @@ impl TrackerWorkbench {
         match self.tracker_pending_action {
             Some(TrackerPendingAction::Starting) => "启动中".into(),
             Some(TrackerPendingAction::Stopping) => "停止中".into(),
-            None if self.is_tracking_active() && self.tracker_lifecycle == TrackerLifecycle::Running => {
+            None if self.is_tracking_active()
+                && self.tracker_lifecycle == TrackerLifecycle::Running =>
+            {
                 "运行中".into()
             }
             None if self.tracker_lifecycle == TrackerLifecycle::Failed => "失败".into(),
@@ -1309,7 +1324,10 @@ impl TrackerWorkbench {
         dataset
             .types
             .iter()
-            .filter(|definition| self.bwiki_visible_mark_types.contains(&definition.mark_type))
+            .filter(|definition| {
+                self.bwiki_visible_mark_types
+                    .contains(&definition.mark_type)
+            })
             .filter_map(|definition| dataset.points_by_type.get(&definition.mark_type))
             .flatten()
             .filter_map(|record| {
@@ -1340,7 +1358,10 @@ impl TrackerWorkbench {
         dataset
             .types
             .iter()
-            .filter(|definition| self.bwiki_visible_mark_types.contains(&definition.mark_type))
+            .filter(|definition| {
+                self.bwiki_visible_mark_types
+                    .contains(&definition.mark_type)
+            })
             .filter_map(|definition| dataset.points_by_type.get(&definition.mark_type))
             .flatten()
             .filter_map(|record| {
@@ -1452,7 +1473,9 @@ impl TrackerWorkbench {
     }
 
     pub(super) fn bwiki_planner_preview_total_cost(&self) -> Option<f32> {
-        self.bwiki_planner_preview.as_ref().map(|preview| preview.total_cost)
+        self.bwiki_planner_preview
+            .as_ref()
+            .map(|preview| preview.total_cost)
     }
 
     pub(super) fn bwiki_planner_has_preview(&self) -> bool {
@@ -1781,7 +1804,9 @@ impl TrackerWorkbench {
     }
 
     fn has_busy_operation(&self) -> bool {
-        self.is_tracker_transition_pending() || self.is_bwiki_refreshing() || self.is_route_import_busy()
+        self.is_tracker_transition_pending()
+            || self.is_bwiki_refreshing()
+            || self.is_route_import_busy()
     }
 
     fn tick_busy_indicator(&mut self) -> bool {
@@ -1959,8 +1984,7 @@ impl TrackerWorkbench {
         self.clear_bwiki_planner_selection();
         self.ensure_bwiki_planner_defaults(window, cx);
         self.status_text =
-            "已进入路线规划模式。单击节点切换选中，按住 Ctrl 左键手绘闭合曲线可反选。"
-                .into();
+            "已进入路线规划模式。单击节点切换选中，按住 Ctrl 左键手绘闭合曲线可反选。".into();
     }
 
     pub(super) fn plan_bwiki_route_preview(&mut self) {
@@ -1994,7 +2018,10 @@ impl TrackerWorkbench {
             return;
         }
 
-        let worlds = resolved.iter().map(|point| point.record.world).collect::<Vec<_>>();
+        let worlds = resolved
+            .iter()
+            .map(|point| point.record.world)
+            .collect::<Vec<_>>();
         let pair_costs =
             build_bwiki_planner_cost_matrix(&worlds, &teleports, teleport_link_distance);
         let order = build_bwiki_planner_order(&pair_costs);
@@ -2003,11 +2030,8 @@ impl TrackerWorkbench {
             .filter_map(|index| resolved.get(*index))
             .cloned()
             .collect::<Vec<_>>();
-        let preview = build_bwiki_route_plan_preview(
-            &ordered_points,
-            &teleports,
-            teleport_link_distance,
-        );
+        let preview =
+            build_bwiki_route_plan_preview(&ordered_points, &teleports, teleport_link_distance);
         let total_cost = preview.total_cost;
 
         self.bwiki_planner_preview = Some(preview);
@@ -2816,7 +2840,10 @@ impl TrackerWorkbench {
             return;
         };
 
-        let insert_index = self.active_group().map(RouteDocument::point_count).unwrap_or(0);
+        let insert_index = self
+            .active_group()
+            .map(RouteDocument::point_count)
+            .unwrap_or(0);
         let label = format!(
             "节点 {}",
             self.active_group()
@@ -3031,10 +3058,7 @@ impl TrackerWorkbench {
                 self.status_text = "选中的节点不存在。".into();
                 return;
             };
-            let Some(target_index) = group
-                .points
-                .iter()
-                .position(|point| point.id == target_id)
+            let Some(target_index) = group.points.iter().position(|point| point.id == target_id)
             else {
                 self.status_text = "目标节点不存在。".into();
                 return;
@@ -3896,7 +3920,12 @@ impl TrackerWorkbench {
 
     fn sync_config_form_from_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let config = self.workspace.config.clone();
-        set_input_value(&self.config_form.minimap_top, config.minimap.top.to_string(), window, cx);
+        set_input_value(
+            &self.config_form.minimap_top,
+            config.minimap.top.to_string(),
+            window,
+            cx,
+        );
         set_input_value(
             &self.config_form.minimap_left,
             config.minimap.left.to_string(),
@@ -3921,7 +3950,12 @@ impl TrackerWorkbench {
             window,
             cx,
         );
-        set_input_value(&self.config_form.view_size, config.view_size.to_string(), window, cx);
+        set_input_value(
+            &self.config_form.view_size,
+            config.view_size.to_string(),
+            window,
+            cx,
+        );
         set_input_value(
             &self.config_form.max_lost_frames,
             config.max_lost_frames.to_string(),
@@ -4143,6 +4177,206 @@ impl TrackerWorkbench {
         }
     }
 
+    pub(super) fn is_minimap_region_picker_active(&self) -> bool {
+        self.minimap_region_picker_window.is_some()
+    }
+
+    pub(super) fn toggle_minimap_region_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.minimap_region_picker_window.take() {
+            self.status_text = "已取消小地图取区。".into();
+            let _ = handle.update(cx, |_, picker_window, _| {
+                picker_window.remove_window();
+            });
+            return;
+        }
+
+        self.open_minimap_region_picker(window, cx);
+    }
+
+    fn open_minimap_region_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((display_id, display_bounds)) = self.resolve_minimap_picker_display(window, cx)
+        else {
+            self.status_text = "无法定位可用显示器，不能进入小地图取区模式。".into();
+            return;
+        };
+
+        let workbench = cx.entity().downgrade();
+        let workbench_for_close = workbench.clone();
+        let main_window_handle = window.window_handle();
+        let picker_result = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(display_bounds)),
+                focus: true,
+                show: true,
+                kind: WindowKind::PopUp,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                display_id: Some(display_id),
+                window_background: WindowBackgroundAppearance::Transparent,
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("小地图取区".into()),
+                    appears_transparent: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            move |picker_window, cx| {
+                picker_window.on_window_should_close(cx, move |_, cx| {
+                    if let Some(workbench) = workbench_for_close.upgrade() {
+                        let _ = workbench.update(cx, |this, _| {
+                            this.handle_minimap_region_picker_closed();
+                        });
+                    }
+                    true
+                });
+
+                cx.new(|_| {
+                    MinimapRegionPicker::new(workbench.clone(), main_window_handle, display_bounds)
+                })
+            },
+        );
+
+        match picker_result {
+            Ok(handle) => {
+                self.minimap_region_picker_window = Some(handle.into());
+                self.status_text = "小地图取区已开启：拖动选择屏幕区域，右键取消。".into();
+            }
+            Err(error) => {
+                self.status_text = format!("打开小地图取区窗口失败：{error:#}").into();
+            }
+        }
+    }
+
+    fn resolve_minimap_picker_display(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(gpui::DisplayId, Bounds<Pixels>)> {
+        let displays = cx.displays();
+        if displays.is_empty() {
+            return None;
+        }
+
+        let minimap = &self.workspace.config.minimap;
+        let minimap_center_x = minimap.left as f32 + minimap.width as f32 / 2.0;
+        let minimap_center_y = minimap.top as f32 + minimap.height as f32 / 2.0;
+        if let Some(display) = displays.iter().find(|display| {
+            screen_bounds_contains(display.bounds(), minimap_center_x, minimap_center_y)
+        }) {
+            return Some((display.id(), display.bounds()));
+        }
+
+        let window_bounds = window.window_bounds().get_bounds();
+        let window_center = window_bounds.center();
+        if let Some(display) = displays.iter().find(|display| {
+            screen_bounds_contains(
+                display.bounds(),
+                f32::from(window_center.x),
+                f32::from(window_center.y),
+            )
+        }) {
+            return Some((display.id(), display.bounds()));
+        }
+
+        let display = cx.primary_display().or_else(|| displays.first().cloned())?;
+        Some((display.id(), display.bounds()))
+    }
+
+    fn sync_minimap_form_region(
+        &mut self,
+        region: &crate::config::CaptureRegion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        set_input_value(
+            &self.config_form.minimap_top,
+            region.top.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_left,
+            region.left.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_width,
+            region.width.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_height,
+            region.height.to_string(),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn finish_minimap_region_pick(
+        &mut self,
+        region: crate::config::CaptureRegion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.minimap_region_picker_window = None;
+
+        let mut config = self.workspace.config.clone();
+        config.minimap = region.clone();
+        self.update_workspace_config(config.clone());
+        self.sync_minimap_form_region(&region, window, cx);
+
+        match save_config(&self.workspace.project_root, &config) {
+            Ok(path) => {
+                self.status_text = if self.is_tracking_active() {
+                    format!(
+                        "已更新小地图截图区域为 top {} / left {} / {}x{}，并保存到 {}。当前追踪需重启后才会应用新区域。",
+                        region.top,
+                        region.left,
+                        region.width,
+                        region.height,
+                        path.display()
+                    )
+                    .into()
+                } else {
+                    format!(
+                        "已更新小地图截图区域为 top {} / left {} / {}x{}，并保存到 {}。",
+                        region.top,
+                        region.left,
+                        region.width,
+                        region.height,
+                        path.display()
+                    )
+                    .into()
+                };
+            }
+            Err(error) => {
+                self.status_text = format!(
+                    "小地图截图区域已更新为 top {} / left {} / {}x{}，但写入配置失败：{error:#}",
+                    region.top, region.left, region.width, region.height
+                )
+                .into();
+            }
+        }
+    }
+
+    pub(super) fn handle_minimap_region_picker_cancelled(&mut self) {
+        self.minimap_region_picker_window = None;
+        self.status_text = "已取消小地图取区。".into();
+    }
+
+    pub(super) fn handle_minimap_region_picker_closed(&mut self) {
+        if self.minimap_region_picker_window.take().is_some() {
+            self.status_text = "已取消小地图取区。".into();
+        }
+    }
+
     fn request_center_on_current_point(&mut self) {
         if !self.auto_focus_enabled {
             return;
@@ -4201,7 +4435,12 @@ impl TrackerWorkbench {
             return false;
         };
 
-        let file_name = if self.route_groups[index].metadata.file_name.trim().is_empty() {
+        let file_name = if self.route_groups[index]
+            .metadata
+            .file_name
+            .trim()
+            .is_empty()
+        {
             self.allocate_group_file_name()
         } else {
             self.route_groups[index].metadata.file_name.clone()
@@ -4218,10 +4457,9 @@ impl TrackerWorkbench {
             Ok(()) => {
                 self.route_groups[index] = group;
                 if self.selected_group_id.as_ref() == Some(group_id)
-                    && self
-                        .selected_point_id
-                        .as_ref()
-                        .is_some_and(|point_id| self.route_groups[index].find_point(point_id).is_none())
+                    && self.selected_point_id.as_ref().is_some_and(|point_id| {
+                        self.route_groups[index].find_point(point_id).is_none()
+                    })
                 {
                     self.selected_point_id = None;
                     self.confirming_delete_point_id = None;
@@ -4301,8 +4539,7 @@ fn point_in_polygon(point: WorldPoint, polygon: &[WorldPoint]) -> bool {
         };
         let intersects = ((current.y > point.y) != (previous.y > point.y))
             && (point.x
-                < (previous.x - current.x) * (point.y - current.y) / safe_denominator
-                    + current.x);
+                < (previous.x - current.x) * (point.y - current.y) / safe_denominator + current.x);
         if intersects {
             inside = !inside;
         }
@@ -4480,8 +4717,8 @@ fn build_bwiki_planner_order_exact(costs: &[Vec<f32>]) -> Vec<usize> {
                 if previous_mask & (1usize << candidate_prev) == 0 {
                     continue;
                 }
-                let candidate_cost = dp[previous_mask * point_count + candidate_prev]
-                    + costs[candidate_prev][end];
+                let candidate_cost =
+                    dp[previous_mask * point_count + candidate_prev] + costs[candidate_prev][end];
                 if candidate_cost < dp[state_index] {
                     dp[state_index] = candidate_cost;
                     previous[state_index] = candidate_prev;
@@ -4493,8 +4730,7 @@ fn build_bwiki_planner_order_exact(costs: &[Vec<f32>]) -> Vec<usize> {
     let final_mask = state_count - 1;
     let best_end = (0..point_count)
         .min_by(|left, right| {
-            dp[final_mask * point_count + *left]
-                .total_cmp(&dp[final_mask * point_count + *right])
+            dp[final_mask * point_count + *left].total_cmp(&dp[final_mask * point_count + *right])
         })
         .unwrap_or(0);
 

@@ -82,8 +82,7 @@ fn navigation_sidebar(
 ) -> impl IntoElement {
     let tracker_is_active =
         this.active_page == WorkbenchPage::Map && this.map_page == MapPage::Tracker;
-    let bwiki_is_active =
-        this.active_page == WorkbenchPage::Map && this.map_page == MapPage::Bwiki;
+    let bwiki_is_active = this.active_page == WorkbenchPage::Map && this.map_page == MapPage::Bwiki;
     let markers_is_active = this.active_page == WorkbenchPage::Markers;
     let settings_is_active = this.active_page == WorkbenchPage::Settings;
     let settings_is_open = this.settings_nav_expanded;
@@ -1363,10 +1362,7 @@ fn page_header(
                     this.tracker_toggle_label(),
                     Some(this.tracker_status_tooltip()),
                     if this.is_tracking_active()
-                        || matches!(
-                            this.tracker_status_summary().as_ref(),
-                            "停止中"
-                        )
+                        || matches!(this.tracker_status_summary().as_ref(), "停止中")
                     {
                         ToolbarButtonTone::Danger
                     } else {
@@ -1388,11 +1384,13 @@ fn page_header(
                     tokens,
                     "A",
                     this.selected_engine.to_string(),
-                    Some(if this.is_tracking_active() || this.is_tracker_transition_pending() {
-                        "追踪运行或切换中时不能切换引擎。".into()
-                    } else {
-                        format!("切换追踪引擎，当前为 {}。", this.selected_engine).into()
-                    }),
+                    Some(
+                        if this.is_tracking_active() || this.is_tracker_transition_pending() {
+                            "追踪运行或切换中时不能切换引擎。".into()
+                        } else {
+                            format!("切换追踪引擎，当前为 {}。", this.selected_engine).into()
+                        },
+                    ),
                     ToolbarButtonTone::Neutral,
                     this.is_tracking_active() || this.is_tracker_transition_pending(),
                     cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -1774,68 +1772,64 @@ fn group_detail_panel(
         .when_some(active_group, |panel, _group| {
             panel
                 .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_3()
-                        .children([
-                            div()
-                                .w(px(280.0))
-                                .child(labeled_input(tokens, "路线名称", &this.group_form.name))
-                                .into_any_element(),
-                            div()
-                                .flex_1()
-                                .min_w(px(360.0))
-                                .child(labeled_input(tokens, "路线说明", &this.group_form.description))
-                                .into_any_element(),
-                        ]),
+                    div().flex().flex_wrap().gap_3().children([
+                        div()
+                            .w(px(280.0))
+                            .child(labeled_input(tokens, "路线名称", &this.group_form.name))
+                            .into_any_element(),
+                        div()
+                            .flex_1()
+                            .min_w(px(360.0))
+                            .child(labeled_input(
+                                tokens,
+                                "路线说明",
+                                &this.group_form.description,
+                            ))
+                            .into_any_element(),
+                    ]),
                 )
                 .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_3()
-                        .mt_3()
-                        .children([
-                            div()
-                                .w(px(180.0))
-                                .child(labeled_input(tokens, "路线颜色", &this.group_form.color_hex))
-                                .into_any_element(),
-                            div()
-                                .flex_1()
-                                .min_w(px(360.0))
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(field_label(tokens, "默认节点图标"))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .when_some(
-                                            group_icon_definition.clone(),
-                                            |row, definition| {
-                                                row.child(bwiki_type_icon_preview(
-                                                    definition.mark_type,
-                                                    definition.icon_url.clone(),
-                                                    this.bwiki_resources.clone(),
-                                                    tokens,
-                                                ))
-                                            },
-                                        )
-                                        .child(
-                                            Select::new(&this.group_icon_picker)
-                                                .w_full()
-                                                .menu_width(px(420.0))
-                                                .placeholder("搜索并选择默认节点图标")
-                                                .search_placeholder("按图标名、分类或编号搜索")
-                                                .disabled(!bwiki_dataset_ready)
-                                                .empty_message("BWiki 图标目录加载中，请稍后重试。"),
-                                        ),
-                                )
-                                .into_any_element(),
-                        ]),
+                    div().flex().flex_wrap().gap_3().mt_3().children([
+                        div()
+                            .w(px(180.0))
+                            .child(labeled_input(
+                                tokens,
+                                "路线颜色",
+                                &this.group_form.color_hex,
+                            ))
+                            .into_any_element(),
+                        div()
+                            .flex_1()
+                            .min_w(px(360.0))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(field_label(tokens, "默认节点图标"))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .when_some(group_icon_definition.clone(), |row, definition| {
+                                        row.child(bwiki_type_icon_preview(
+                                            definition.mark_type,
+                                            definition.icon_url.clone(),
+                                            this.bwiki_resources.clone(),
+                                            tokens,
+                                        ))
+                                    })
+                                    .child(
+                                        Select::new(&this.group_icon_picker)
+                                            .w_full()
+                                            .menu_width(px(420.0))
+                                            .placeholder("搜索并选择默认节点图标")
+                                            .search_placeholder("按图标名、分类或编号搜索")
+                                            .disabled(!bwiki_dataset_ready)
+                                            .empty_message("BWiki 图标目录加载中，请稍后重试。"),
+                                    ),
+                            )
+                            .into_any_element(),
+                    ]),
                 )
         })
         .when(this.active_group().is_none(), |panel| {
@@ -1953,11 +1947,45 @@ fn settings_config_page(
         .child(editable_config_section(
             "截图区域",
             vec![
+                toolbar_cluster(vec![
+                    toolbar_button_with_tooltip(
+                        "settings-minimap-picker",
+                        tokens,
+                        if this.is_minimap_region_picker_active() {
+                            this.busy_spinner_icon()
+                        } else {
+                            "P"
+                        },
+                        if this.is_minimap_region_picker_active() {
+                            "取区中"
+                        } else {
+                            "手动取区"
+                        },
+                        Some(if this.is_minimap_region_picker_active() {
+                            "小地图取区窗口已打开：拖动选择屏幕区域，右键取消。".into()
+                        } else {
+                            "打开屏幕取区窗口，拖动选择小地图截图范围。".into()
+                        }),
+                        if this.is_minimap_region_picker_active() {
+                            ToolbarButtonTone::Primary
+                        } else {
+                            ToolbarButtonTone::Neutral
+                        },
+                        false,
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.toggle_minimap_region_picker(window, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
                 div()
                     .flex()
                     .gap_2()
                     .children([
-                        labeled_input(tokens, "Top", &this.config_form.minimap_top).into_any_element(),
+                        labeled_input(tokens, "Top", &this.config_form.minimap_top)
+                            .into_any_element(),
                         labeled_input(tokens, "Left", &this.config_form.minimap_left)
                             .into_any_element(),
                         labeled_input(tokens, "Width", &this.config_form.minimap_width)
@@ -1982,12 +2010,8 @@ fn settings_config_page(
                             &this.config_form.local_search_enabled,
                         )
                         .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "搜索半径",
-                            &this.config_form.local_search_radius_px,
-                        )
-                        .into_any_element(),
+                        labeled_input(tokens, "搜索半径", &this.config_form.local_search_radius_px)
+                            .into_any_element(),
                         labeled_input(
                             tokens,
                             "锁定失败阈值",
@@ -2012,22 +2036,14 @@ fn settings_config_page(
                     .flex()
                     .gap_2()
                     .children([
-                        labeled_input(
-                            tokens,
-                            "刷新间隔",
-                            &this.config_form.sift_refresh_rate_ms,
-                        )
-                        .into_any_element(),
+                        labeled_input(tokens, "刷新间隔", &this.config_form.sift_refresh_rate_ms)
+                            .into_any_element(),
                         labeled_input(tokens, "CLAHE", &this.config_form.sift_clahe_limit)
                             .into_any_element(),
                         labeled_input(tokens, "匹配比", &this.config_form.sift_match_ratio)
                             .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "最小匹配数",
-                            &this.config_form.sift_min_match_count,
-                        )
-                        .into_any_element(),
+                        labeled_input(tokens, "最小匹配数", &this.config_form.sift_min_match_count)
+                            .into_any_element(),
                         labeled_input(
                             tokens,
                             "RANSAC 阈值",
@@ -2054,18 +2070,10 @@ fn settings_config_page(
                             &this.config_form.ai_confidence_threshold,
                         )
                         .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "最小匹配数",
-                            &this.config_form.ai_min_match_count,
-                        )
-                        .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "RANSAC 阈值",
-                            &this.config_form.ai_ransac_threshold,
-                        )
-                        .into_any_element(),
+                        labeled_input(tokens, "最小匹配数", &this.config_form.ai_min_match_count)
+                            .into_any_element(),
+                        labeled_input(tokens, "RANSAC 阈值", &this.config_form.ai_ransac_threshold)
+                            .into_any_element(),
                     ])
                     .into_any_element(),
                 div()
@@ -2563,7 +2571,10 @@ fn bwiki_types_sidebar(
                                     ToolbarButtonTone::Primary,
                                     false,
                                     cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.set_bwiki_category_visibility(&category_for_show, true);
+                                        this.set_bwiki_category_visibility(
+                                            &category_for_show,
+                                            true,
+                                        );
                                         cx.notify();
                                     }),
                                 )
@@ -2576,7 +2587,10 @@ fn bwiki_types_sidebar(
                                     ToolbarButtonTone::Danger,
                                     false,
                                     cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.set_bwiki_category_visibility(&category_for_hide, false);
+                                        this.set_bwiki_category_visibility(
+                                            &category_for_hide,
+                                            false,
+                                        );
                                         cx.notify();
                                     }),
                                 )
@@ -2657,17 +2671,10 @@ fn bwiki_types_sidebar(
                 .flex_col()
                 .gap_3()
                 .child(field_label(tokens, "节点过滤"))
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .children([
-                            labeled_input(tokens, "分类", &this.bwiki_category_search)
-                                .into_any_element(),
-                            labeled_input(tokens, "节点", &this.bwiki_type_search)
-                                .into_any_element(),
-                        ]),
-                )
+                .child(div().flex().gap_2().children([
+                    labeled_input(tokens, "分类", &this.bwiki_category_search).into_any_element(),
+                    labeled_input(tokens, "节点", &this.bwiki_type_search).into_any_element(),
+                ]))
                 .child(div().h(px(1.0)).w_full().bg(tokens.border))
                 .child(
                     div()
@@ -2744,7 +2751,9 @@ fn bwiki_types_sidebar(
         .when(dataset.is_some() && category_cards.is_empty(), |panel| {
             panel.child(empty_list_state(tokens, "没有匹配的分类或节点。"))
         })
-        .when(!category_cards.is_empty(), |panel| panel.children(category_cards))
+        .when(!category_cards.is_empty(), |panel| {
+            panel.children(category_cards)
+        })
 }
 
 fn bwiki_route_planner_card(
@@ -2756,7 +2765,12 @@ fn bwiki_route_planner_card(
     planner_total_cost: Option<f32>,
 ) -> impl IntoElement {
     let preview_summary = planner_total_cost
-        .map(|total_cost| format!("已选 {} 个点 · 预计长度 {:.0}", planner_selected_count, total_cost))
+        .map(|total_cost| {
+            format!(
+                "已选 {} 个点 · 预计长度 {:.0}",
+                planner_selected_count, total_cost
+            )
+        })
         .unwrap_or_else(|| format!("已选 {} 个点 · 尚未规划", planner_selected_count));
     let plan_disabled = planner_selected_count == 0;
     let create_disabled = !this.bwiki_planner_has_preview();
@@ -2830,90 +2844,80 @@ fn bwiki_route_planner_card(
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .children([
-                        labeled_input(tokens, "名称", &this.bwiki_planner_form.name).into_any_element(),
-                        labeled_input(tokens, "说明", &this.bwiki_planner_form.description)
-                            .into_any_element(),
-                    ]),
+                div().flex().gap_2().children([
+                    labeled_input(tokens, "名称", &this.bwiki_planner_form.name).into_any_element(),
+                    labeled_input(tokens, "说明", &this.bwiki_planner_form.description)
+                        .into_any_element(),
+                ]),
             )
             .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .children([
-                        labeled_input(tokens, "颜色", &this.bwiki_planner_form.color_hex)
-                            .into_any_element(),
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(field_label(tokens, "图标"))
-                            .child(
-                                Select::new(&this.bwiki_planner_icon_picker)
-                                    .w_full()
-                                    .menu_width(px(360.0))
-                                    .placeholder("选择路线默认图标")
-                                    .search_placeholder("按名称、分类或编号搜索")
-                                    .empty_message("当前没有可用的 BWiki 图标。"),
-                            )
-                            .into_any_element(),
-                    ]),
+                div().flex().gap_2().children([
+                    labeled_input(tokens, "颜色", &this.bwiki_planner_form.color_hex)
+                        .into_any_element(),
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(field_label(tokens, "图标"))
+                        .child(
+                            Select::new(&this.bwiki_planner_icon_picker)
+                                .w_full()
+                                .menu_width(px(360.0))
+                                .placeholder("选择路线默认图标")
+                                .search_placeholder("按名称、分类或编号搜索")
+                                .empty_message("当前没有可用的 BWiki 图标。"),
+                        )
+                        .into_any_element(),
+                ]),
             )
             .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .children([
-                        toolbar_button_with_tooltip(
-                            "bwiki-planner-clear",
-                            tokens,
-                            "C",
-                            "清空已选",
-                            None,
-                            ToolbarButtonTone::Neutral,
-                            planner_selected_count == 0,
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.clear_bwiki_planner_selection();
-                                this.status_text = "已清空当前规划点。".into();
-                                cx.notify();
-                            }),
-                        )
-                        .into_any_element(),
-                        toolbar_button_with_tooltip(
-                            "bwiki-planner-plan",
-                            tokens,
-                            "P",
-                            "规划路线",
-                            None,
-                            ToolbarButtonTone::Neutral,
-                            plan_disabled,
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.plan_bwiki_route_preview();
-                                cx.notify();
-                            }),
-                        )
-                        .into_any_element(),
-                        toolbar_button_with_tooltip(
-                            "bwiki-planner-create",
-                            tokens,
-                            "+",
-                            "创建路线",
-                            None,
-                            ToolbarButtonTone::Primary,
-                            create_disabled,
-                            cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.create_route_from_bwiki_planner(window, cx);
-                                cx.notify();
-                            }),
-                        )
-                        .into_any_element(),
-                    ]),
+                div().flex().justify_end().gap_2().children([
+                    toolbar_button_with_tooltip(
+                        "bwiki-planner-clear",
+                        tokens,
+                        "C",
+                        "清空已选",
+                        None,
+                        ToolbarButtonTone::Neutral,
+                        planner_selected_count == 0,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.clear_bwiki_planner_selection();
+                            this.status_text = "已清空当前规划点。".into();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                    toolbar_button_with_tooltip(
+                        "bwiki-planner-plan",
+                        tokens,
+                        "P",
+                        "规划路线",
+                        None,
+                        ToolbarButtonTone::Neutral,
+                        plan_disabled,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.plan_bwiki_route_preview();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                    toolbar_button_with_tooltip(
+                        "bwiki-planner-create",
+                        tokens,
+                        "+",
+                        "创建路线",
+                        None,
+                        ToolbarButtonTone::Primary,
+                        create_disabled,
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.create_route_from_bwiki_planner(window, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                ]),
             )
         })
 }
@@ -3392,31 +3396,26 @@ fn selected_tracker_point_editor_popup(
                 cx.stop_propagation();
             })
             .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(tokens.app_fg)
-                                    .child(point.display_label().to_owned()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(tokens.text_muted)
-                                    .child(popup.route_name),
-                            ),
-                    )
+                div().flex().items_start().justify_between().gap_3().child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(tokens.app_fg)
+                                .child(point.display_label().to_owned()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.text_muted)
+                                .child(popup.route_name),
+                        ),
+                ),
             )
             .child(
                 div()
@@ -3429,27 +3428,22 @@ fn selected_tracker_point_editor_popup(
                     .child(labeled_input(tokens, "备注", &this.marker_form.note)),
             )
             .child(
-                div()
-                    .mt_3()
-                    .flex()
-                    .items_end()
-                    .gap_3()
-                    .children([
-                        labeled_input(tokens, "X", &this.marker_form.x).into_any_element(),
-                        labeled_input(tokens, "Y", &this.marker_form.y).into_any_element(),
-                        toolbar_button(
-                            "popup-point-move-toggle",
-                            tokens,
-                            "M",
-                            "取点",
-                            ToolbarButtonTone::Neutral,
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.toggle_selected_point_move_mode();
-                                cx.notify();
-                            }),
-                        )
-                        .into_any_element(),
-                    ]),
+                div().mt_3().flex().items_end().gap_3().children([
+                    labeled_input(tokens, "X", &this.marker_form.x).into_any_element(),
+                    labeled_input(tokens, "Y", &this.marker_form.y).into_any_element(),
+                    toolbar_button(
+                        "popup-point-move-toggle",
+                        tokens,
+                        "M",
+                        "取点",
+                        ToolbarButtonTone::Neutral,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.toggle_selected_point_move_mode();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                ]),
             )
             .child(
                 div()
@@ -3458,8 +3452,7 @@ fn selected_tracker_point_editor_popup(
                     .flex_col()
                     .gap_2()
                     .child(field_label(tokens, "顺序调整"))
-                    .child(
-                        div().flex().justify_center().child(toolbar_cluster(vec![
+                    .child(div().flex().justify_center().child(toolbar_cluster(vec![
                             toolbar_icon_button(
                                 "popup-point-move-start",
                                 tokens,
@@ -3512,8 +3505,7 @@ fn selected_tracker_point_editor_popup(
                                 }),
                             )
                             .into_any_element(),
-                        ])),
-                    ),
+                        ]))),
             )
             .child(
                 div()
@@ -3538,55 +3530,55 @@ fn selected_tracker_point_editor_popup(
                                         .empty_message("当前没有可作为目标的其他节点。"),
                                 ),
                             )
-                            .child(
-                                toolbar_icon_button(
-                                    "popup-point-move-before-target",
-                                    tokens,
-                                    "<",
-                                    "移到目标前",
-                                    ToolbarButtonTone::Neutral,
-                                    reorder_action_disabled,
-                                    cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.move_selected_point_before_target(window, cx);
-                                        cx.notify();
-                                    }),
-                                ),
-                            )
-                            .child(
-                                toolbar_icon_button(
-                                    "popup-point-move-after-target",
-                                    tokens,
-                                    ">",
-                                    "移到目标后",
-                                    ToolbarButtonTone::Neutral,
-                                    reorder_action_disabled,
-                                    cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.move_selected_point_after_target(window, cx);
-                                        cx.notify();
-                                    }),
-                                ),
-                            ),
+                            .child(toolbar_icon_button(
+                                "popup-point-move-before-target",
+                                tokens,
+                                "<",
+                                "移到目标前",
+                                ToolbarButtonTone::Neutral,
+                                reorder_action_disabled,
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.move_selected_point_before_target(window, cx);
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(toolbar_icon_button(
+                                "popup-point-move-after-target",
+                                tokens,
+                                ">",
+                                "移到目标后",
+                                ToolbarButtonTone::Neutral,
+                                reorder_action_disabled,
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.move_selected_point_after_target(window, cx);
+                                    cx.notify();
+                                }),
+                            )),
                     ),
             )
             .child(
-                div().mt_4().flex().justify_end().child(toolbar_cluster(vec![
-                    toolbar_button(
-                        "popup-point-delete",
-                        tokens,
-                        if delete_confirming { "!" } else { "-" },
-                        if delete_confirming {
-                            "确认删除节点"
-                        } else {
-                            "删除节点"
-                        },
-                        ToolbarButtonTone::Danger,
-                        cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.confirm_or_delete_selected_point(window, cx);
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element(),
-                ])),
+                div()
+                    .mt_4()
+                    .flex()
+                    .justify_end()
+                    .child(toolbar_cluster(vec![
+                        toolbar_button(
+                            "popup-point-delete",
+                            tokens,
+                            if delete_confirming { "!" } else { "-" },
+                            if delete_confirming {
+                                "确认删除节点"
+                            } else {
+                                "删除节点"
+                            },
+                            ToolbarButtonTone::Danger,
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.confirm_or_delete_selected_point(window, cx);
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element(),
+                    ])),
             )
             .into_any_element(),
     )
@@ -3702,13 +3694,20 @@ fn paint_tracker_map_overlay(
                 );
                 let accent = parse_hex_color(&marker.style.color_hex, 0xff6b6b);
                 if let Some((mark_type, image)) = route_icon_assets.get(&marker.style.icon) {
-                    paint_bwiki_style_marker(window, anchor, highlighted, tokens, |window, bounds| {
-                        if let Some(image) = image.as_ref() {
-                            let _ = window.paint_image(bounds, 0.0.into(), image.clone(), 0, false);
-                        } else {
-                            paint_bwiki_placeholder_marker(window, anchor, *mark_type, tokens);
-                        }
-                    });
+                    paint_bwiki_style_marker(
+                        window,
+                        anchor,
+                        highlighted,
+                        tokens,
+                        |window, bounds| {
+                            if let Some(image) = image.as_ref() {
+                                let _ =
+                                    window.paint_image(bounds, 0.0.into(), image.clone(), 0, false);
+                            } else {
+                                paint_bwiki_placeholder_marker(window, anchor, *mark_type, tokens);
+                            }
+                        },
+                    );
                 } else {
                     paint_route_marker(window, anchor, 24.0, accent, highlighted, false, tokens);
                 }
@@ -3779,8 +3778,7 @@ fn paint_bwiki_map_overlay(
     window.paint_layer(bounds, |window| {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(dataset) = dataset.as_ref() {
-                let preview_color =
-                    gpui::rgb(parse_hex_color(&planner_color_hex, 0xff6b6b));
+                let preview_color = gpui::rgb(parse_hex_color(&planner_color_hex, 0xff6b6b));
                 let visible_definitions = dataset
                     .types
                     .iter()
@@ -3882,8 +3880,8 @@ fn paint_bwiki_map_overlay(
                             bounds.origin.x + px(screen.x),
                             bounds.origin.y + px(screen.y),
                         );
-                        let highlighted =
-                            selected_keys.contains(&super::BwikiPointKey::from_record(point_record));
+                        let highlighted = selected_keys
+                            .contains(&super::BwikiPointKey::from_record(point_record));
                         paint_bwiki_style_marker(
                             window,
                             anchor,

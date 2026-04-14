@@ -105,22 +105,64 @@ pub fn spawn_tracker_session(
     workspace: Arc<WorkspaceSnapshot>,
     engine: TrackerEngineKind,
 ) -> Result<TrackerSession> {
-    let worker: Box<dyn TrackingWorker> = match engine {
-        TrackerEngineKind::RustTemplate => Box::new(TemplateTrackerWorker::new(workspace.clone())?),
-        TrackerEngineKind::CandleAi => Box::new(CandleTrackerWorker::new(workspace.clone())?),
-    };
-
     let (command_tx, command_rx) = unbounded();
     let (event_tx, event_rx) = unbounded();
 
     let thread = thread::Builder::new()
         .name(format!("tracker-{}", engine))
-        .spawn(move || run_worker_loop(worker, command_rx, event_tx))?;
+        .spawn(move || run_tracker_session(workspace, engine, command_rx, event_tx))?;
 
     Ok(TrackerSession {
         command_tx,
         event_rx,
         thread: Some(thread),
+    })
+}
+
+fn run_tracker_session(
+    workspace: Arc<WorkspaceSnapshot>,
+    engine: TrackerEngineKind,
+    command_rx: Receiver<TrackerCommand>,
+    event_tx: Sender<TrackingEvent>,
+) {
+    let _ = event_tx.send(TrackingEvent::Status(TrackingStatus {
+        engine,
+        frame_index: 0,
+        message: format!("正在初始化 {engine} 追踪器。"),
+        lifecycle: TrackerLifecycle::Idle,
+        source: None,
+        match_score: None,
+    }));
+
+    if matches!(command_rx.try_recv(), Ok(TrackerCommand::Stop)) {
+        let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
+        return;
+    }
+
+    let worker = match build_worker(workspace, engine) {
+        Ok(worker) => worker,
+        Err(error) => {
+            let _ = event_tx.send(TrackingEvent::Error(error.to_string()));
+            let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Failed));
+            return;
+        }
+    };
+
+    if matches!(command_rx.try_recv(), Ok(TrackerCommand::Stop)) {
+        let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
+        return;
+    }
+
+    run_worker_loop(worker, command_rx, event_tx);
+}
+
+fn build_worker(
+    workspace: Arc<WorkspaceSnapshot>,
+    engine: TrackerEngineKind,
+) -> Result<Box<dyn TrackingWorker>> {
+    Ok(match engine {
+        TrackerEngineKind::RustTemplate => Box::new(TemplateTrackerWorker::new(workspace)?),
+        TrackerEngineKind::CandleAi => Box::new(CandleTrackerWorker::new(workspace)?),
     })
 }
 
