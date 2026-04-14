@@ -753,20 +753,35 @@ impl TrackerWorkbench {
         };
 
         let mut changed = false;
-        if self.bwiki_expanded_categories.is_empty() {
-            self.bwiki_expanded_categories = dataset.sorted_category_names().into_iter().collect();
+        let valid_categories = dataset
+            .sorted_category_names()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let expanded_before = self.bwiki_expanded_categories.len();
+        self.bwiki_expanded_categories
+            .retain(|category| valid_categories.contains(category));
+        if self.bwiki_expanded_categories.len() != expanded_before {
             changed = true;
         }
+
+        let valid_mark_types = dataset
+            .types
+            .iter()
+            .filter(|item| item.point_count > 0)
+            .map(|item| item.mark_type)
+            .collect::<HashSet<_>>();
+        let visible_before = self.bwiki_visible_mark_types.len();
+        self.bwiki_visible_mark_types
+            .retain(|mark_type| valid_mark_types.contains(mark_type));
+        if self.bwiki_visible_mark_types.len() != visible_before {
+            changed = true;
+        }
+
         if !self.bwiki_visibility_initialized {
-            self.bwiki_visible_mark_types = dataset
-                .types
-                .iter()
-                .filter(|item| item.point_count > 0)
-                .map(|item| item.mark_type)
-                .collect();
             self.bwiki_visibility_initialized = true;
             changed = true;
         }
+
         changed
     }
 

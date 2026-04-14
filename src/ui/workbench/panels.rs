@@ -19,7 +19,7 @@ use strum::IntoEnumIterator;
 
 use crate::{
     domain::{marker::MarkerIconStyle, theme::ThemePreference, tracker::TrackingSource},
-    resources::BWIKI_WORLD_ZOOM,
+    resources::{BWIKI_WORLD_ZOOM, BwikiResourceManager},
     ui::map_canvas::{parse_hex_color, route_points, screen_points},
 };
 
@@ -2498,6 +2498,7 @@ fn bwiki_types_sidebar(
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
     let dataset = this.bwiki_resources.dataset_snapshot();
+    let bwiki_resources = this.bwiki_resources.clone();
     let mut grouped = BTreeMap::<String, Vec<(u32, String, String, usize)>>::new();
     if let Some(dataset) = dataset.as_ref() {
         for definition in &dataset.types {
@@ -2517,6 +2518,7 @@ fn bwiki_types_sidebar(
         .into_iter()
         .enumerate()
         .map(|(category_index, (category, definitions))| {
+            let bwiki_resources = bwiki_resources.clone();
             let visible_type_count = definitions
                 .iter()
                 .filter(|(mark_type, _, _, _)| this.bwiki_visible_mark_types.contains(mark_type))
@@ -2539,7 +2541,7 @@ fn bwiki_types_sidebar(
                 .child(
                     div()
                         .flex()
-                        .items_start()
+                        .items_center()
                         .justify_between()
                         .gap_3()
                         .child(
@@ -2570,7 +2572,7 @@ fn bwiki_types_sidebar(
                                         .child(
                                             div().text_xs().text_color(tokens.text_muted).child(
                                                 format!(
-                                                    "{} / {} 类型可见 · {} 点位",
+                                                    "{}/{} 类 · {} 点",
                                                     visible_type_count,
                                                     definitions.len(),
                                                     total_point_count
@@ -2609,33 +2611,30 @@ fn bwiki_types_sidebar(
                         ])),
                 )
                 .when(expanded, |card| {
-                    let type_rows = definitions
+                    let type_buttons = definitions
                         .into_iter()
-                        .map(|(mark_type, name, _icon_url, point_count)| {
-                            let title = if point_count == 0 {
-                                format!("{name} (空)")
-                            } else {
-                                name.clone()
-                            };
-                            let subtitle = format!("markType {mark_type} · {point_count} 点");
-                            let visible = this.bwiki_visible_mark_types.contains(&mark_type);
-                            let label = name.clone();
-                            selectable_list_row(
-                                format!("bwiki-type-{mark_type}"),
+                        .map(|(mark_type, name, icon_url, point_count)| {
+                            bwiki_type_toggle_button(
+                                mark_type,
+                                name,
+                                icon_url,
+                                point_count,
+                                this.bwiki_visible_mark_types.contains(&mark_type),
+                                bwiki_resources.clone(),
                                 tokens,
-                                title,
-                                subtitle,
-                                visible,
-                                Some(if visible { "显示中" } else { "已隐藏" }.into()),
-                                cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    this.toggle_bwiki_type_visibility(mark_type, &label);
-                                    cx.notify();
-                                }),
+                                cx,
                             )
                             .into_any_element()
                         })
                         .collect::<Vec<_>>();
-                    card.child(div().mt_3().flex().flex_col().gap_2().children(type_rows))
+                    card.child(
+                        div()
+                            .mt_3()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .children(type_buttons),
+                    )
                 })
                 .into_any_element()
         })
@@ -2657,7 +2656,7 @@ fn bwiki_types_sidebar(
         .child(section_title("BWiki 类型过滤"))
         .child(body_text(
             tokens,
-            "这里按 Wiki 原始分类列出全部类型。点击分类可展开，点击类型可切换地图显示；图标会在地图上首次需要时懒下载并缓存。",
+            "默认全部隐藏、默认全部收起。展开分类后可直接按下类型按钮切换显示；图标会在侧栏或地图首次需要时懒下载并缓存。",
         ))
         .when_some(last_error, |panel, error| {
             panel.child(config_section("最近一次缓存错误", vec![error], tokens))
@@ -2667,12 +2666,130 @@ fn bwiki_types_sidebar(
                 "正在同步 BWiki 数据",
                 vec![
                     "首次启动会请求点位目录与类型目录。".to_owned(),
-                    "缓存准备好以后，这里会自动列出所有分类与类型。".to_owned(),
+                    "缓存准备好以后，这里会列出所有分类；默认仍然全部收起且全部隐藏。".to_owned(),
                 ],
                 tokens,
             ))
         })
         .when(!category_cards.is_empty(), |panel| panel.children(category_cards))
+}
+
+fn bwiki_type_toggle_button(
+    mark_type: u32,
+    name: String,
+    icon_url: String,
+    point_count: usize,
+    visible: bool,
+    bwiki_resources: BwikiResourceManager,
+    tokens: WorkbenchThemeTokens,
+    cx: &mut Context<TrackerWorkbench>,
+) -> impl IntoElement {
+    let label = name.clone();
+    let count_label = if point_count == 0 {
+        "空".to_owned()
+    } else {
+        format!("{point_count} 点")
+    };
+    let background = if visible {
+        tokens.toolbar_button_primary_bg
+    } else {
+        tokens.panel_alt_bg
+    };
+    let hover_background = if visible {
+        tokens.toolbar_button_primary_hover_bg
+    } else {
+        tokens.toolbar_button_hover_bg
+    };
+    let border_color = if visible {
+        tokens.border_strong
+    } else {
+        tokens.border
+    };
+
+    div()
+        .id(("bwiki-type-toggle", mark_type))
+        .w(px(118.0))
+        .min_h(px(86.0))
+        .px_2()
+        .py_2()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .rounded_lg()
+        .bg(background)
+        .border_1()
+        .border_color(border_color)
+        .when(point_count > 0, |button| {
+            button
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover_background))
+                .active(|style| style.opacity(0.92))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.toggle_bwiki_type_visibility(mark_type, &label);
+                    cx.notify();
+                }))
+        })
+        .when(point_count == 0, |button| button.opacity(0.45))
+        .child(bwiki_type_icon_preview(
+            mark_type,
+            icon_url,
+            bwiki_resources,
+            tokens,
+        ))
+        .child(
+            div()
+                .w_full()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(tokens.app_fg)
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(name),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(tokens.text_muted)
+                .child(count_label),
+        )
+}
+
+fn bwiki_type_icon_preview(
+    mark_type: u32,
+    icon_url: String,
+    bwiki_resources: BwikiResourceManager,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    canvas(
+        move |_, _, _| bwiki_resources.ensure_icon_path(mark_type, &icon_url),
+        move |bounds, icon_path, window, cx| {
+            window.paint_quad(fill(bounds, tokens.panel_sunken_bg).corner_radii(px(10.0)));
+
+            if let Some(path) = icon_path.as_ref() {
+                let resource = gpui::Resource::from(path.clone());
+                let image_result = window.use_asset::<ImgResourceLoader>(&resource, cx);
+                if let Some(Ok(image)) = image_result.as_ref() {
+                    let image_bounds = bwiki_type_icon_bounds(bounds);
+                    let _ = window.paint_image(image_bounds, 0.0.into(), image.clone(), 0, false);
+                    return;
+                }
+            }
+
+            paint_bwiki_placeholder_marker(
+                window,
+                point(
+                    bounds.origin.x + px(f32::from(bounds.size.width) * 0.5),
+                    bounds.origin.y + px(f32::from(bounds.size.height) * 0.5),
+                ),
+                mark_type,
+                tokens,
+            );
+        },
+    )
+    .w(px(34.0))
+    .h(px(34.0))
 }
 
 fn bwiki_map_panel(
@@ -3295,6 +3412,23 @@ const BWIKI_MARKER_ICON_HEIGHT: f32 = 50.0;
 const BWIKI_MARKER_ICON_ANCHOR_X: f32 = 15.0;
 const BWIKI_MARKER_ICON_ANCHOR_Y: f32 = 42.0;
 const BWIKI_MARKER_CULL_MARGIN: f32 = 64.0;
+
+fn bwiki_type_icon_bounds(bounds: Bounds<gpui::Pixels>) -> Bounds<gpui::Pixels> {
+    let available_width = (f32::from(bounds.size.width) - 8.0).max(1.0);
+    let available_height = (f32::from(bounds.size.height) - 8.0).max(1.0);
+    let scale = (available_width / BWIKI_MARKER_ICON_WIDTH)
+        .min(available_height / BWIKI_MARKER_ICON_HEIGHT);
+    let width = BWIKI_MARKER_ICON_WIDTH * scale;
+    let height = BWIKI_MARKER_ICON_HEIGHT * scale;
+
+    Bounds {
+        origin: point(
+            bounds.origin.x + px((f32::from(bounds.size.width) - width) * 0.5),
+            bounds.origin.y + px((f32::from(bounds.size.height) - height) * 0.5),
+        ),
+        size: size(px(width), px(height)),
+    }
+}
 
 fn bwiki_marker_image_bounds(anchor: gpui::Point<gpui::Pixels>) -> Bounds<gpui::Pixels> {
     Bounds {
