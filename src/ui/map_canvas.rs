@@ -13,6 +13,8 @@ pub struct MapViewportState {
     pub viewport: ViewportSize,
     pub needs_fit: bool,
     pub dragging_from: Option<WorldPoint>,
+    pub drag_origin: Option<WorldPoint>,
+    pub drag_moved: bool,
     pub pending_center: Option<WorldPoint>,
     pub last_interaction_redraw_at: Option<Instant>,
 }

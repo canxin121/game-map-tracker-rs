@@ -96,8 +96,6 @@ pub struct RouteDocument {
     pub id: RouteId,
     #[serde(default)]
     pub name: String,
-    #[serde(rename = "loop", default)]
-    pub looped: bool,
     #[serde(default, alias = "description")]
     pub notes: String,
     #[serde(default = "default_group_visible")]
@@ -116,7 +114,6 @@ impl RouteDocument {
         Self {
             id: RouteId::new(),
             name: name.into(),
-            looped: false,
             notes: String::new(),
             visible: true,
             default_style: MarkerStyle::default(),

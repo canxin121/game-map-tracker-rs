@@ -28,7 +28,7 @@ use crate::{
 use super::{
     MapCanvasKind, TrackerWorkbench,
     forms::read_input_value,
-    page::{MapPage, MarkersPage, SettingsPage, WorkbenchPage},
+    page::{MapPage, SettingsPage, WorkbenchPage},
     select::Select,
     theme::WorkbenchThemeTokens,
 };
@@ -80,7 +80,6 @@ fn navigation_sidebar(
     let map_is_active = this.active_page == WorkbenchPage::Map;
     let map_is_open = this.map_nav_expanded;
     let markers_is_active = this.active_page == WorkbenchPage::Markers;
-    let markers_is_open = this.markers_nav_expanded;
     let settings_is_active = this.active_page == WorkbenchPage::Settings;
     let settings_is_open = this.settings_nav_expanded;
 
@@ -157,50 +156,12 @@ fn navigation_sidebar(
                     "路线",
                     markers_is_active,
                     tokens.nav_item_active_bg,
-                    Some(if markers_is_open { "v" } else { ">" }),
+                    None,
                     cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.toggle_marker_navigation();
+                        this.select_routes_page();
                         cx.notify();
                     }),
                 ))
-                .when(markers_is_open, |column| {
-                    column.child(
-                        div()
-                            .ml_4()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .rounded_lg()
-                            .bg(tokens.nav_branch_bg)
-                            .border_1()
-                            .border_color(tokens.border)
-                            .p_2()
-                            .child(sidebar_nav_item(
-                                "sidebar-nav-markers-groups",
-                                tokens,
-                                "路线管理",
-                                markers_is_active && this.markers_page == MarkersPage::Groups,
-                                tokens.nav_subitem_active_bg,
-                                None,
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.select_markers_page(MarkersPage::Groups);
-                                    cx.notify();
-                                }),
-                            ))
-                            .child(sidebar_nav_item(
-                                "sidebar-nav-markers-points",
-                                tokens,
-                                "路线节点管理",
-                                markers_is_active && this.markers_page == MarkersPage::Points,
-                                tokens.nav_subitem_active_bg,
-                                None,
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.select_markers_page(MarkersPage::Points);
-                                    cx.notify();
-                                }),
-                            )),
-                    )
-                })
                 .child(sidebar_nav_item(
                     "sidebar-nav-settings",
                     tokens,
@@ -1489,17 +1450,6 @@ fn markers_page(
     cx: &mut Context<TrackerWorkbench>,
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
-    match this.markers_page {
-        MarkersPage::Groups => markers_groups_page(this, cx, tokens).into_any_element(),
-        MarkersPage::Points => markers_points_page(this, cx, tokens).into_any_element(),
-    }
-}
-
-fn markers_groups_page(
-    this: &TrackerWorkbench,
-    cx: &mut Context<TrackerWorkbench>,
-    tokens: WorkbenchThemeTokens,
-) -> impl IntoElement {
     div()
         .flex_1()
         .min_h(px(0.0))
@@ -1507,22 +1457,37 @@ fn markers_groups_page(
         .gap_4()
         .overflow_hidden()
         .child(group_manager(this, cx, tokens))
-        .child(group_detail_panel(this, cx, tokens))
-}
-
-fn markers_points_page(
-    this: &TrackerWorkbench,
-    cx: &mut Context<TrackerWorkbench>,
-    tokens: WorkbenchThemeTokens,
-) -> impl IntoElement {
-    div()
-        .flex_1()
-        .min_h(px(0.0))
-        .flex()
-        .gap_4()
-        .overflow_hidden()
-        .child(point_sidebar_panel(this, cx, tokens))
-        .child(point_detail_panel(this, cx, tokens))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .flex()
+                .flex_col()
+                .gap_4()
+                .overflow_hidden()
+                .child(group_detail_panel(this, cx, tokens))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .overflow_hidden()
+                        .child(route_editor_map_panel(this, cx, tokens))
+                        .child(
+                            div()
+                                .h(px(360.0))
+                                .min_h(px(280.0))
+                                .flex()
+                                .gap_4()
+                                .overflow_hidden()
+                                .child(route_node_sequence_panel(this, cx, tokens))
+                                .child(point_detail_panel(this, cx, tokens)),
+                        ),
+                ),
+        )
 }
 
 fn settings_page(
@@ -1781,21 +1746,63 @@ fn group_detail_panel(
     let bwiki_dataset_ready = this.bwiki_resources.dataset_snapshot().is_some();
 
     div()
+        .flex_shrink_0()
         .rounded_xl()
         .bg(tokens.panel_bg)
         .border_1()
         .border_color(tokens.border)
         .p_4()
-        .child(section_title("所选路线"))
+        .child(section_title("路线信息"))
         .when_some(active_group, |panel, group| {
             panel
                 .child(
                     div()
-                        .text_sm()
-                        .text_color(tokens.text_muted)
-                        .line_height(px(20.0))
-                        .child(format!("文件 {}", group.metadata.file_name)),
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(tokens.app_fg)
+                                        .child(group.display_name().to_owned()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(tokens.text_muted)
+                                        .line_height(px(18.0))
+                                        .child(format!("文件 {}", group.metadata.file_name)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded_lg()
+                                .bg(tokens.panel_sunken_bg)
+                                .border_1()
+                                .border_color(tokens.border)
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(tokens.text_soft)
+                                        .child("单线，无闭环"),
+                                ),
+                        ),
                 )
+                .child(body_text(
+                    tokens,
+                    "右侧地图始终只编辑当前路线。单击节点会把它设为当前节点；单击空白会在当前节点后插入新节点，因此路线顺序始终保持为单线，不允许闭合或成环。",
+                ))
                 .child(toolbar_cluster(vec![
                     toolbar_button(
                         "group-visible-toggle",
@@ -1813,26 +1820,6 @@ fn group_detail_panel(
                         },
                         cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.toggle_selected_group_visible(window, cx);
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element(),
-                    toolbar_button(
-                        "group-loop-toggle",
-                        tokens,
-                        if group.looped { "L" } else { "-" },
-                        if group.looped {
-                            "关闭闭环"
-                        } else {
-                            "开启闭环"
-                        },
-                        if group.looped {
-                            ToolbarButtonTone::Primary
-                        } else {
-                            ToolbarButtonTone::Neutral
-                        },
-                        cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.toggle_selected_group_looped(window, cx);
                             cx.notify();
                         }),
                     )
@@ -1862,6 +1849,8 @@ fn group_detail_panel(
                     )
                     .into_any_element(),
                 ]))
+                .child(labeled_input(tokens, "路线名称", &this.group_form.name))
+                .child(labeled_input(tokens, "路线说明", &this.group_form.description))
                 .child(
                     div().flex().gap_3().children([
                         labeled_input(tokens, "默认强调色", &this.group_form.color_hex)
@@ -1935,7 +1924,7 @@ fn group_detail_panel(
         })
 }
 
-fn point_sidebar_panel(
+fn route_node_sequence_panel(
     this: &TrackerWorkbench,
     cx: &mut Context<TrackerWorkbench>,
     tokens: WorkbenchThemeTokens,
@@ -1968,12 +1957,19 @@ fn point_sidebar_panel(
     );
     let point_rows = visible_points
         .into_iter()
-        .map(|point| {
+        .enumerate()
+        .map(|(page_index, point)| {
             let point_id = point.id.clone();
+            let point_index = this
+                .point_list
+                .page
+                .saturating_mul(this.point_list.page_size.max(1))
+                .saturating_add(page_index)
+                + 1;
             selectable_list_row(
                 format!("point-{}", point.id),
                 tokens,
-                point.display_label().to_owned(),
+                format!("{point_index}. {}", point.display_label()),
                 if point.note.trim().is_empty() {
                     format!("坐标 {:.0}, {:.0}", point.x, point.y)
                 } else {
@@ -1991,7 +1987,7 @@ fn point_sidebar_panel(
         .collect::<Vec<_>>();
 
     div()
-        .w(px(400.0))
+        .w(px(360.0))
         .min_h(px(0.0))
         .flex()
         .flex_col()
@@ -2000,24 +1996,13 @@ fn point_sidebar_panel(
             "group-points",
             cx,
             tokens,
-            Some("路线节点管理".into()),
+            Some("节点顺序".into()),
             vec![
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(field_label(tokens, "路线"))
-                    .child(
-                        Select::new(&this.marker_group_picker)
-                            .w_full()
-                            .menu_width(px(360.0))
-                            .icon(IconName::Search)
-                            .placeholder("搜索并选择路线")
-                            .search_placeholder("按路线名、文件名或备注搜索")
-                            .disabled(this.route_groups.is_empty())
-                            .empty_message("当前还没有路线。"),
-                    )
-                    .into_any_element(),
+                body_text(
+                    tokens,
+                    "这里展示当前路线的线性顺序。调整顺序会直接改变节点连接关系。",
+                )
+                .into_any_element(),
             ],
             &this.point_list.search,
             vec![
@@ -2025,7 +2010,7 @@ fn point_sidebar_panel(
                     "point-new-inline",
                     tokens,
                     "+",
-                    "新建节点",
+                    "新建草稿",
                     ToolbarButtonTone::Neutral,
                     active_group.is_none(),
                     cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -2040,7 +2025,7 @@ fn point_sidebar_panel(
             if active_group.is_some() {
                 "当前路线没有匹配的节点。"
             } else {
-                "请先选择一条路线。"
+                "请先从左侧选择一条路线。"
             },
             point_rows,
             TrackerWorkbench::set_point_page,
@@ -2069,20 +2054,71 @@ fn point_detail_panel(
         .border_1()
         .border_color(tokens.border)
         .p_4()
+        .child(section_title("节点编辑"))
         .when_some(this.active_group(), |panel, group| {
-            panel.child(
-                div()
-                    .text_sm()
-                    .text_color(tokens.text_muted)
-                    .line_height(px(20.0))
-                    .child(format!("当前路线 {}", group.display_name())),
-            )
+            let sequence_label = this.selected_point_index().map(|index| {
+                format!("第 {} / {} 个节点", index + 1, group.point_count())
+            });
+            panel
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(tokens.text_muted)
+                                        .line_height(px(20.0))
+                                        .child(format!("当前路线 {}", group.display_name())),
+                                )
+                                .when_some(sequence_label, |column, sequence| {
+                                    column.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(tokens.text_muted)
+                                            .child(sequence),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded_lg()
+                                .bg(tokens.panel_sunken_bg)
+                                .border_1()
+                                .border_color(tokens.border)
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(tokens.text_soft)
+                                        .child(if this.selected_point().is_some() {
+                                            "地图点选中"
+                                        } else {
+                                            "新建草稿"
+                                        }),
+                                ),
+                        ),
+                )
         })
         .when(this.active_group().is_none(), |panel| {
             panel.child(empty_list_state(tokens, "请先从左侧选择一条路线。"))
         })
         .when(this.active_group().is_some(), |panel| {
             panel
+                .child(body_text(
+                    tokens,
+                    "空白地图单击会直接在当前节点后插入新节点；这里负责编辑当前节点内容，以及调整这条单线路线中的前后顺序。",
+                ))
                 .child(labeled_input(
                     tokens,
                     "路线节点名称",
@@ -2156,6 +2192,60 @@ fn point_detail_panel(
                             ))
                         }),
                 )
+                .child(toolbar_cluster(vec![
+                    toolbar_icon_button(
+                        "point-move-start",
+                        tokens,
+                        "1",
+                        "移到起点",
+                        ToolbarButtonTone::Neutral,
+                        this.selected_point().is_none(),
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.move_selected_point_to_start(window, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                    toolbar_icon_button(
+                        "point-move-prev",
+                        tokens,
+                        "↑",
+                        "上移一个节点",
+                        ToolbarButtonTone::Neutral,
+                        this.selected_point().is_none(),
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.move_selected_point_prev(window, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                    toolbar_icon_button(
+                        "point-move-next",
+                        tokens,
+                        "↓",
+                        "下移一个节点",
+                        ToolbarButtonTone::Neutral,
+                        this.selected_point().is_none(),
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.move_selected_point_next(window, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                    toolbar_icon_button(
+                        "point-move-end",
+                        tokens,
+                        "9",
+                        "移到终点",
+                        ToolbarButtonTone::Neutral,
+                        this.selected_point().is_none(),
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.move_selected_point_to_end(window, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                ]))
                 .child(toolbar_cluster(vec![
                     toolbar_button(
                         "point-use-preview",
@@ -2501,10 +2591,28 @@ fn map_panel(
         cx.entity(),
         tokens,
         "路线地图",
-        "滚轮缩放，左键拖拽；首次使用会懒加载并缓存当前视口需要的 BWiki 瓦片",
+        "滚轮缩放，左键拖拽；单击节点可把它切换为当前节点。",
         MapCanvasKind::Tracker,
         this.workspace.report.map_dimensions,
         paint_tracker_map_overlay,
+        selected_tracker_point_popup(this, tokens),
+    )
+}
+
+fn route_editor_map_panel(
+    this: &TrackerWorkbench,
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    map_canvas_panel(
+        cx.entity(),
+        tokens,
+        "路线预览与地图编辑",
+        "左键拖拽平移；单击节点选中，单击空白会在当前节点后插入新节点。",
+        MapCanvasKind::Tracker,
+        this.workspace.report.map_dimensions,
+        paint_tracker_map_overlay,
+        selected_tracker_point_popup(this, tokens),
     )
 }
 
@@ -2885,6 +2993,7 @@ fn bwiki_map_panel(
         MapCanvasKind::Bwiki,
         this.workspace.report.map_dimensions,
         paint_bwiki_map_overlay,
+        None,
     )
 }
 
@@ -3008,6 +3117,7 @@ fn map_canvas_panel(
     map_kind: MapCanvasKind,
     map_dimensions: crate::domain::geometry::MapDimensions,
     overlay_painter: MapOverlayPainter,
+    overlay_ui: Option<AnyElement>,
 ) -> impl IntoElement {
     div()
         .flex_1()
@@ -3035,60 +3145,159 @@ fn map_canvas_panel(
                 ),
         )
         .child(
-            div().flex_1().overflow_hidden().child(
-                canvas(
-                    move |_, _, _| (),
-                    move |bounds, _, window, cx| {
-                        let bounds_width = f32::from(bounds.size.width);
-                        let bounds_height = f32::from(bounds.size.height);
-                        sync_map_canvas_viewport(
-                            &entity,
-                            cx,
-                            map_kind,
-                            bounds_width,
-                            bounds_height,
-                            map_dimensions,
-                        );
+            div()
+                .flex_1()
+                .overflow_hidden()
+                .relative()
+                .child(
+                    canvas(
+                        move |_, _, _| (),
+                        move |bounds, _, window, cx| {
+                            let bounds_width = f32::from(bounds.size.width);
+                            let bounds_height = f32::from(bounds.size.height);
+                            sync_map_canvas_viewport(
+                                &entity,
+                                cx,
+                                map_kind,
+                                bounds_width,
+                                bounds_height,
+                                map_dimensions,
+                            );
 
-                        let (camera, bwiki_resources, bwiki_tile_cache) = {
-                            let this = entity.read(cx);
-                            (
-                                this.map_camera(map_kind),
-                                this.bwiki_resources.clone(),
-                                this.bwiki_tile_cache.clone(),
-                            )
-                        };
+                            let (camera, bwiki_resources, bwiki_tile_cache) = {
+                                let this = entity.read(cx);
+                                (
+                                    this.map_camera(map_kind),
+                                    this.bwiki_resources.clone(),
+                                    this.bwiki_tile_cache.clone(),
+                                )
+                            };
 
-                        paint_bwiki_tile_layers(
-                            window,
-                            bounds,
-                            cx,
-                            camera,
-                            &bwiki_resources,
-                            &bwiki_tile_cache,
-                            tokens.map_canvas_backdrop,
-                        );
-                        overlay_painter(
-                            &entity,
-                            window,
-                            bounds,
-                            cx,
-                            bounds_width,
-                            bounds_height,
-                            camera,
-                            tokens,
-                        );
-                        install_map_canvas_navigation_handlers(
-                            window,
-                            entity.clone(),
-                            bounds,
-                            map_kind,
-                        );
-                    },
+                            paint_bwiki_tile_layers(
+                                window,
+                                bounds,
+                                cx,
+                                camera,
+                                &bwiki_resources,
+                                &bwiki_tile_cache,
+                                tokens.map_canvas_backdrop,
+                            );
+                            overlay_painter(
+                                &entity,
+                                window,
+                                bounds,
+                                cx,
+                                bounds_width,
+                                bounds_height,
+                                camera,
+                                tokens,
+                            );
+                            install_map_canvas_navigation_handlers(
+                                window,
+                                entity.clone(),
+                                bounds,
+                                map_kind,
+                            );
+                        },
+                    )
+                    .size_full(),
                 )
-                .size_full(),
-            ),
+                .when_some(overlay_ui, |container, overlay| container.child(overlay)),
         )
+}
+
+fn selected_tracker_point_popup(
+    this: &TrackerWorkbench,
+    tokens: WorkbenchThemeTokens,
+) -> Option<AnyElement> {
+    let popup = this.selected_tracker_point_popup()?;
+
+    Some(
+        div()
+            .absolute()
+            .left(px(popup.left))
+            .top(px(popup.top))
+            .w(px(248.0))
+            .rounded_xl()
+            .bg(tokens.panel_bg)
+            .border_1()
+            .border_color(tokens.border_strong)
+            .shadow_xs()
+            .px_3()
+            .py_3()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(tokens.app_fg)
+                                    .child(popup.point_name),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.text_muted)
+                                    .child(popup.route_name),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded_lg()
+                            .bg(tokens.panel_sunken_bg)
+                            .border_1()
+                            .border_color(tokens.border)
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(tokens.text_soft)
+                                    .child("当前节点"),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.text_muted)
+                            .child(popup.sequence),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.text_muted)
+                            .child(format!("坐标 {}", popup.coordinates)),
+                    )
+                    .when(!popup.point_note.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .text_xs()
+                                .line_height(px(18.0))
+                                .text_color(tokens.text_soft)
+                                .child(popup.point_note),
+                        )
+                    }),
+            )
+            .into_any_element(),
+    )
 }
 
 fn paint_tracker_map_overlay(
@@ -3185,23 +3394,12 @@ fn paint_tracker_map_overlay(
                     for canvas_point in route_canvas.iter().skip(1) {
                         builder.line_to(*canvas_point);
                     }
-                    if group.looped {
-                        builder.line_to(route_canvas[0]);
-                    }
                     if let Ok(path) = builder.build() {
                         window.paint_path(path, tokens.route_path);
                     }
 
                     for segment in route_canvas.windows(2) {
                         paint_route_arrow(window, segment[0], segment[1], tokens.route_path);
-                    }
-                    if group.looped {
-                        paint_route_arrow(
-                            window,
-                            *route_canvas.last().unwrap_or(&route_canvas[0]),
-                            route_canvas[0],
-                            tokens.route_path,
-                        );
                     }
                 }
             }
@@ -3508,9 +3706,17 @@ fn install_map_canvas_navigation_handlers(
     });
     window.on_mouse_event({
         let entity = entity.clone();
-        move |_: &MouseUpEvent, _, _, cx| {
+        move |event: &MouseUpEvent, _, window, cx| {
+            let local_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
+            let local_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
+            let released_inside = bounds.contains(&event.position);
             _ = entity.update(cx, |this, cx| {
-                if this.end_map_drag(map_kind) {
+                let outcome = this.end_map_drag(map_kind);
+                if outcome.redraw {
+                    cx.notify();
+                }
+                if outcome.clicked && released_inside && map_kind == MapCanvasKind::Tracker {
+                    this.handle_tracker_map_click(local_x, local_y, window, cx);
                     cx.notify();
                 }
             });

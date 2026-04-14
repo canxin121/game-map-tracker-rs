@@ -22,15 +22,6 @@ pub(super) enum MapPage {
 }
 
 #[derive(Debug, Clone, Copy, Default, Display, EnumIter, PartialEq, Eq, Hash)]
-pub(super) enum MarkersPage {
-    #[default]
-    #[display("路线管理")]
-    Groups,
-    #[display("路线节点管理")]
-    Points,
-}
-
-#[derive(Debug, Clone, Copy, Default, Display, EnumIter, PartialEq, Eq, Hash)]
 pub(super) enum SettingsPage {
     #[default]
     #[display("配置")]
