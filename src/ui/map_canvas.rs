@@ -120,6 +120,31 @@ pub fn marker_image_bounds(anchor: Point<Pixels>, size_px: f32) -> Bounds<Pixels
     }
 }
 
+pub const BWIKI_MARKER_ICON_WIDTH: f32 = 40.0;
+pub const BWIKI_MARKER_ICON_HEIGHT: f32 = 50.0;
+pub const BWIKI_MARKER_ICON_ANCHOR_X: f32 = 15.0;
+pub const BWIKI_MARKER_ICON_ANCHOR_Y: f32 = 42.0;
+
+#[must_use]
+pub fn bwiki_marker_image_bounds(anchor: Point<Pixels>) -> Bounds<Pixels> {
+    Bounds {
+        origin: point(
+            anchor.x - px(BWIKI_MARKER_ICON_ANCHOR_X),
+            anchor.y - px(BWIKI_MARKER_ICON_ANCHOR_Y),
+        ),
+        size: size(px(BWIKI_MARKER_ICON_WIDTH), px(BWIKI_MARKER_ICON_HEIGHT)),
+    }
+}
+
+#[must_use]
+pub fn bwiki_marker_hit_test(anchor: WorldPoint, screen_x: f32, screen_y: f32) -> bool {
+    let left = anchor.x - BWIKI_MARKER_ICON_ANCHOR_X - 4.0;
+    let top = anchor.y - BWIKI_MARKER_ICON_ANCHOR_Y - 4.0;
+    let right = left + BWIKI_MARKER_ICON_WIDTH + 8.0;
+    let bottom = top + BWIKI_MARKER_ICON_HEIGHT + 8.0;
+    screen_x >= left && screen_x <= right && screen_y >= top && screen_y <= bottom
+}
+
 #[must_use]
 pub fn inflate_bounds(bounds: Bounds<Pixels>, inset: f32) -> Bounds<Pixels> {
     Bounds {

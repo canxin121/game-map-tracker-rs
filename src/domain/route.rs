@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use derive_more::{Display, From};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -187,17 +189,50 @@ impl RouteDocument {
 
     #[must_use]
     pub fn normalized(mut self) -> Self {
-        self.visible = self.visible || self.points.is_empty();
+        self.visible = true;
         self.default_style = self.default_style.normalized();
-        self.points = self
-            .points
-            .into_iter()
-            .map(RoutePoint::normalized)
-            .collect();
+        self.points = normalize_route_points(self.points);
         self
     }
 }
 
 const fn default_group_visible() -> bool {
     true
+}
+
+fn normalize_route_points(points: Vec<RoutePoint>) -> Vec<RoutePoint> {
+    let mut used_point_ids = HashSet::new();
+    let mut normalized = Vec::with_capacity(points.len());
+
+    for mut point in points.into_iter().map(RoutePoint::normalized) {
+        if point.id.0.trim().is_empty() || !used_point_ids.insert(point.id.0.clone()) {
+            point.id = RoutePointId::new();
+            while !used_point_ids.insert(point.id.0.clone()) {
+                point.id = RoutePointId::new();
+            }
+        }
+        normalized.push(point);
+    }
+
+    while has_closing_tail(&normalized) {
+        normalized.pop();
+    }
+
+    normalized
+}
+
+fn has_closing_tail(points: &[RoutePoint]) -> bool {
+    let Some(first) = points.first() else {
+        return false;
+    };
+    let Some(last) = points.last() else {
+        return false;
+    };
+    if points.len() < 2 {
+        return false;
+    }
+
+    let first_world = first.world();
+    let last_world = last.world();
+    (first_world.x - last_world.x).abs() <= 0.001 && (first_world.y - last_world.y).abs() <= 0.001
 }

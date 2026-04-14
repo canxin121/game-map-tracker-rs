@@ -396,6 +396,15 @@ impl BwikiResourceManager {
     }
 
     #[must_use]
+    pub fn is_dataset_refresh_pending(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .queued_jobs
+            .contains(&BwikiJobKey::RefreshDataset)
+    }
+
+    #[must_use]
     pub fn resolve_icon_definition(&self, icon_name: &str) -> Option<BwikiTypeDefinition> {
         self.ensure_dataset_loaded();
         let dataset = self.dataset_snapshot()?;

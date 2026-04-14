@@ -7,7 +7,7 @@ use gpui_component::{input::InputState, select::SelectItem};
 use crate::domain::{
     geometry::WorldPoint,
     marker::{MarkerIconStyle, MarkerStyle, normalize_hex_color},
-    route::RouteId,
+    route::{RouteId, RoutePointId},
 };
 
 use super::TrackerWorkbench;
@@ -184,6 +184,70 @@ impl SelectItem for BwikiIconPickerItem {
 
     fn value(&self) -> &Self::Value {
         &self.value
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        picker_menu_row(&self.title, &self.subtitle)
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        self.searchable_text
+            .to_lowercase()
+            .contains(&query.to_lowercase())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PointReorderTargetItem {
+    pub(super) id: RoutePointId,
+    pub(super) title: SharedString,
+    pub(super) subtitle: SharedString,
+    pub(super) searchable_text: SharedString,
+}
+
+impl PointReorderTargetItem {
+    pub(super) fn new(
+        id: RoutePointId,
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
+        searchable_text: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            subtitle: subtitle.into(),
+            searchable_text: searchable_text.into(),
+        }
+    }
+}
+
+impl SelectItem for PointReorderTargetItem {
+    type Value = RoutePointId;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn display_title(&self) -> Option<AnyElement> {
+        let label = if self.subtitle.is_empty() {
+            self.title.to_string()
+        } else {
+            format!("{} · {}", self.title, self.subtitle)
+        };
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(label)
+                .into_any_element(),
+        )
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.id
     }
 
     fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {

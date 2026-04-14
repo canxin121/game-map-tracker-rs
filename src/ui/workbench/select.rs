@@ -217,6 +217,10 @@ where
         cx.notify();
     }
 
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
     fn default_search_placeholder() -> SharedString {
         "搜索关键字".into()
     }

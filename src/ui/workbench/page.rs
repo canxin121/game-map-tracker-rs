@@ -6,7 +6,7 @@ pub(super) enum WorkbenchPage {
     #[default]
     #[display("地图")]
     Map,
-    #[display("路线")]
+    #[display("路线管理")]
     Markers,
     #[display("设置")]
     Settings,
@@ -17,7 +17,7 @@ pub(super) enum MapPage {
     #[default]
     #[display("路线追踪")]
     Tracker,
-    #[display("BWiki 全图")]
+    #[display("节点图鉴")]
     Bwiki,
 }
 

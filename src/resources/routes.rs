@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
+use uuid::Uuid;
 
 use crate::domain::route::{RouteDocument, RouteId, RouteMetadata, RoutePointId};
 
@@ -64,6 +65,7 @@ impl RouteRepository {
             })
             .unwrap_or_else(|| route.name.clone());
 
+        route.id = RouteId(file_name.clone());
         route.metadata = RouteMetadata {
             id: route.id.clone(),
             file_name,
@@ -119,10 +121,6 @@ impl RouteRepository {
             .iter()
             .map(|route| route.metadata.file_name.to_ascii_lowercase())
             .collect::<HashSet<_>>();
-        let mut used_group_ids = existing_routes
-            .iter()
-            .map(|route| route.id.0.clone())
-            .collect::<HashSet<_>>();
         let mut report = RouteImportReport::default();
 
         for source in paths {
@@ -132,11 +130,12 @@ impl RouteRepository {
 
             match Self::load_path(&source) {
                 Ok(mut route) => {
-                    ensure_unique_ids(&mut route, &mut used_group_ids);
+                    ensure_unique_point_ids(&mut route);
                     let display_name = route.display_name().to_owned();
                     let file_name =
                         allocate_import_file_name(&source, &display_name, &used_file_names);
                     let target = routes_dir.join(&file_name);
+                    route.id = RouteId(file_name.clone());
                     route.metadata = RouteMetadata {
                         id: route.id.clone(),
                         file_name: file_name.clone(),
@@ -180,6 +179,11 @@ impl RouteRepository {
     pub fn suggested_file_name(name: &str) -> String {
         let stem = sanitize_file_stem(name);
         format!("{stem}.json")
+    }
+
+    #[must_use]
+    pub fn random_file_name() -> String {
+        format!("route_{}.json", Uuid::new_v4().simple())
     }
 }
 
@@ -225,15 +229,7 @@ fn allocate_import_file_name(
     candidate
 }
 
-fn ensure_unique_ids(route: &mut RouteDocument, used_group_ids: &mut HashSet<String>) {
-    if route.id.0.trim().is_empty() || used_group_ids.contains(&route.id.0) {
-        route.id = RouteId::new();
-        while used_group_ids.contains(&route.id.0) {
-            route.id = RouteId::new();
-        }
-    }
-    used_group_ids.insert(route.id.0.clone());
-
+fn ensure_unique_point_ids(route: &mut RouteDocument) {
     let mut used_point_ids = HashSet::new();
     for point in &mut route.points {
         if point.id.0.trim().is_empty() || used_point_ids.contains(&point.id.0) {

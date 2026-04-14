@@ -30,7 +30,6 @@ pub(super) struct WorkbenchThemeTokens {
     pub(super) map_canvas_backdrop: Hsla,
     pub(super) debug_canvas_bg: Hsla,
     pub(super) debug_card_bg: Hsla,
-    pub(super) route_path: Hsla,
     pub(super) trail_path: Hsla,
     pub(super) preview_live: Hsla,
     pub(super) preview_inertial: Hsla,
@@ -110,7 +109,6 @@ impl WorkbenchThemeTokens {
             debug_card_bg: theme
                 .background
                 .mix(theme.popover, if is_dark { 0.5 } else { 0.82 }),
-            route_path: theme.red,
             trail_path: theme.warning.opacity(0.55),
             preview_live: theme.danger,
             preview_inertial: theme.warning,
