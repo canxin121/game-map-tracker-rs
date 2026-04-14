@@ -2507,8 +2507,9 @@ fn bwiki_route_planner_card(
 ) -> impl IntoElement {
     let preview_summary = planner_total_cost
         .map(|total_cost| format!("已选 {} 个点 · 预计长度 {:.0}", planner_selected_count, total_cost))
-        .unwrap_or_else(|| format!("已选 {} 个点", planner_selected_count));
-    let create_disabled = planner_selected_count == 0;
+        .unwrap_or_else(|| format!("已选 {} 个点 · 尚未规划", planner_selected_count));
+    let plan_disabled = planner_selected_count == 0;
+    let create_disabled = !this.bwiki_planner_has_preview();
 
     div()
         .rounded_lg()
@@ -2560,7 +2561,7 @@ fn bwiki_route_planner_card(
                 div()
                     .text_xs()
                     .text_color(tokens.text_muted)
-                    .child("左键点选，Ctrl 拖动画圈反选。"),
+                    .child("左键点选，Ctrl 左键手绘闭合曲线可反选。"),
             )
             .child(
                 div()
@@ -2630,6 +2631,20 @@ fn bwiki_route_planner_card(
                             cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.clear_bwiki_planner_selection();
                                 this.status_text = "已清空当前规划点。".into();
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element(),
+                        toolbar_button_with_tooltip(
+                            "bwiki-planner-plan",
+                            tokens,
+                            "P",
+                            "规划路线",
+                            None,
+                            ToolbarButtonTone::Neutral,
+                            plan_disabled,
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.plan_bwiki_route_preview();
                                 cx.notify();
                             }),
                         )
@@ -3497,7 +3512,7 @@ fn paint_bwiki_map_overlay(
         selected_keys,
         planner_preview_worlds,
         planner_color_hex,
-        planner_circle_selection,
+        planner_lasso_selection,
     ) = {
         let this = entity.read(cx);
         (
@@ -3507,7 +3522,7 @@ fn paint_bwiki_map_overlay(
             this.bwiki_planner_selected_points.clone(),
             this.bwiki_planner_preview_worlds(),
             this.bwiki_planner_route_color_hex(cx),
-            this.bwiki_planner_circle_selection.clone(),
+            this.bwiki_planner_lasso_selection.clone(),
         )
     };
 
@@ -3572,25 +3587,29 @@ fn paint_bwiki_map_overlay(
                     }
                 }
 
-                if let Some(selection) = planner_circle_selection.as_ref() {
-                    let radius = selection.radius();
-                    if radius >= 1.0 {
-                        let circle_bounds = Bounds {
-                            origin: point(
-                                bounds.origin.x + px(selection.center_screen.x - radius),
-                                bounds.origin.y + px(selection.center_screen.y - radius),
-                            ),
-                            size: size(px(radius * 2.0), px(radius * 2.0)),
-                        };
-                        window.paint_quad(
-                            fill(
-                                circle_bounds,
-                                gpui::rgba(
-                                    (parse_hex_color(&planner_color_hex, 0xff6b6b) << 8) | 0x22,
-                                ),
-                            )
-                            .corner_radii(px(radius)),
-                        );
+                if let Some(selection) = planner_lasso_selection.as_ref()
+                    && selection.path.len() > 1
+                {
+                    let mut builder = PathBuilder::stroke(px(2.0));
+                    let first = selection.path[0];
+                    builder.move_to(point(
+                        bounds.origin.x + px(first.x),
+                        bounds.origin.y + px(first.y),
+                    ));
+                    for screen_point in selection.path.iter().skip(1) {
+                        builder.line_to(point(
+                            bounds.origin.x + px(screen_point.x),
+                            bounds.origin.y + px(screen_point.y),
+                        ));
+                    }
+                    if selection.path.len() > 2 {
+                        builder.line_to(point(
+                            bounds.origin.x + px(first.x),
+                            bounds.origin.y + px(first.y),
+                        ));
+                    }
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, preview_color);
                     }
                 }
 
@@ -3809,7 +3828,7 @@ fn install_map_canvas_navigation_handlers(
                     return;
                 }
                 if bwiki_circle_mode {
-                    this.begin_bwiki_planner_circle_selection(local_x, local_y);
+                    this.begin_bwiki_planner_lasso_selection(local_x, local_y);
                     return;
                 }
                 this.begin_map_drag(
@@ -3834,12 +3853,12 @@ fn install_map_canvas_navigation_handlers(
             };
             let bwiki_circle_active = map_kind == MapCanvasKind::Bwiki
                 && event.pressed_button == Some(MouseButton::Left)
-                && entity.read(cx).bwiki_planner_circle_selection.is_some();
+                && entity.read(cx).bwiki_planner_lasso_selection.is_some();
             _ = entity.update(cx, |this, cx| {
                 let local_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
                 let local_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
                 if bwiki_circle_active
-                    && this.update_bwiki_planner_circle_selection(local_x, local_y)
+                    && this.update_bwiki_planner_lasso_selection(local_x, local_y)
                 {
                     cx.notify();
                     return;
@@ -3886,10 +3905,10 @@ fn install_map_canvas_navigation_handlers(
             };
             let bwiki_circle_active = map_kind == MapCanvasKind::Bwiki
                 && event.button == MouseButton::Left
-                && entity.read(cx).bwiki_planner_circle_selection.is_some();
+                && entity.read(cx).bwiki_planner_lasso_selection.is_some();
             _ = entity.update(cx, |this, cx| {
                 if bwiki_circle_active {
-                    if this.finish_bwiki_planner_circle_selection(local_x, local_y) {
+                    if this.finish_bwiki_planner_lasso_selection(local_x, local_y) {
                         cx.notify();
                     }
                     return;

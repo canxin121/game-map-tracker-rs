@@ -4,7 +4,13 @@ mod panels;
 mod select;
 mod theme;
 
-use std::{collections::HashSet, env, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use gpui::{AppContext, Context, PathPromptOptions, Render, SharedString, Subscription, Window};
 use gpui_component::input::InputEvent;
@@ -49,22 +55,29 @@ struct MapPointRenderItem {
     style: MarkerStyle,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct BwikiPointKey {
     mark_type: u32,
-    uid: String,
+    raw_lat: i32,
+    raw_lng: i32,
+    id: String,
+    title: String,
+    layer: String,
+    time: Option<u64>,
+    version: Option<u32>,
 }
 
 impl BwikiPointKey {
     fn from_record(record: &BwikiPointRecord) -> Self {
-        let uid = if record.uid.trim().is_empty() {
-            format!("{}:{}", record.id, record.title)
-        } else {
-            record.uid.clone()
-        };
         Self {
             mark_type: record.mark_type,
-            uid,
+            raw_lat: record.raw_lat,
+            raw_lng: record.raw_lng,
+            id: record.id.clone(),
+            title: record.title.clone(),
+            layer: record.layer.clone(),
+            time: record.time,
+            version: record.version,
         }
     }
 }
@@ -77,22 +90,47 @@ struct BwikiPlannerResolvedPoint {
 }
 
 #[derive(Debug, Clone)]
-struct BwikiPlannerCircleSelection {
-    center_screen: WorldPoint,
-    current_screen: WorldPoint,
+struct BwikiPlannerLassoSelection {
+    path: Vec<WorldPoint>,
 }
 
-impl BwikiPlannerCircleSelection {
-    fn radius(&self) -> f32 {
-        let dx = self.current_screen.x - self.center_screen.x;
-        let dy = self.current_screen.y - self.center_screen.y;
-        dx.hypot(dy)
+impl BwikiPlannerLassoSelection {
+    fn new(anchor: WorldPoint) -> Self {
+        Self { path: vec![anchor] }
+    }
+
+    fn push_point(&mut self, point: WorldPoint) -> bool {
+        let Some(last) = self.path.last_mut() else {
+            self.path.push(point);
+            return true;
+        };
+
+        let dx = point.x - last.x;
+        let dy = point.y - last.y;
+        if dx.hypot(dy) >= 3.0 {
+            self.path.push(point);
+            true
+        } else {
+            *last = point;
+            false
+        }
+    }
+
+    fn travel_distance(&self) -> f32 {
+        self.path
+            .windows(2)
+            .map(|segment| {
+                let dx = segment[1].x - segment[0].x;
+                let dy = segment[1].y - segment[0].y;
+                dx.hypot(dy)
+            })
+            .sum()
     }
 }
 
 #[derive(Debug, Clone, Default)]
 struct BwikiRoutePlanPreview {
-    ordered_keys: Vec<BwikiPointKey>,
+    route_keys: Vec<BwikiPointKey>,
     total_cost: f32,
 }
 
@@ -266,7 +304,7 @@ pub struct TrackerWorkbench {
     bwiki_type_search: gpui::Entity<gpui_component::input::InputState>,
     bwiki_planner_active: bool,
     bwiki_planner_selected_points: HashSet<BwikiPointKey>,
-    bwiki_planner_circle_selection: Option<BwikiPlannerCircleSelection>,
+    bwiki_planner_lasso_selection: Option<BwikiPlannerLassoSelection>,
     bwiki_planner_preview: Option<BwikiRoutePlanPreview>,
     bwiki_planner_form: RoutePlannerFormInputs,
     bwiki_planner_icon: MarkerIconStyle,
@@ -404,7 +442,7 @@ impl TrackerWorkbench {
                     bwiki_type_search: bwiki_type_search.clone(),
                     bwiki_planner_active: false,
                     bwiki_planner_selected_points: HashSet::new(),
-                    bwiki_planner_circle_selection: None,
+                    bwiki_planner_lasso_selection: None,
                     bwiki_planner_preview: None,
                     bwiki_planner_form: bwiki_planner_form.clone(),
                     bwiki_planner_icon: MarkerIconStyle::default(),
@@ -492,7 +530,7 @@ impl TrackerWorkbench {
                     bwiki_type_search,
                     bwiki_planner_active: false,
                     bwiki_planner_selected_points: HashSet::new(),
-                    bwiki_planner_circle_selection: None,
+                    bwiki_planner_lasso_selection: None,
                     bwiki_planner_preview: None,
                     bwiki_planner_form,
                     bwiki_planner_icon: MarkerIconStyle::default(),
@@ -1284,16 +1322,15 @@ impl TrackerWorkbench {
             .map(|(_, key)| key)
     }
 
-    fn bwiki_points_in_circle(
-        &self,
-        center_screen: WorldPoint,
-        radius: f32,
-    ) -> Vec<BwikiPointKey> {
+    fn bwiki_points_in_lasso(&self, lasso_path: &[WorldPoint]) -> Vec<BwikiPointKey> {
+        if lasso_path.len() < 3 {
+            return Vec::new();
+        }
+
         let Some(dataset) = self.bwiki_resources.dataset_snapshot() else {
             return Vec::new();
         };
         let camera = self.bwiki_map_view.camera;
-        let radius_sq = radius * radius;
 
         dataset
             .types
@@ -1303,9 +1340,7 @@ impl TrackerWorkbench {
             .flatten()
             .filter_map(|record| {
                 let screen = camera.world_to_screen(record.world);
-                let dx = screen.x - center_screen.x;
-                let dy = screen.y - center_screen.y;
-                if dx * dx + dy * dy <= radius_sq {
+                if point_in_polygon(screen, lasso_path) {
                     Some(BwikiPointKey::from_record(record))
                 } else {
                     None
@@ -1315,59 +1350,75 @@ impl TrackerWorkbench {
     }
 
     fn resolve_bwiki_selected_points(&self) -> Vec<BwikiPlannerResolvedPoint> {
+        let mut keys = self
+            .bwiki_planner_selected_points
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        self.resolve_bwiki_points_by_keys(&keys)
+    }
+
+    fn resolve_bwiki_points_by_keys(
+        &self,
+        keys: &[BwikiPointKey],
+    ) -> Vec<BwikiPlannerResolvedPoint> {
         let Some(dataset) = self.bwiki_resources.dataset_snapshot() else {
             return Vec::new();
         };
-        if self.bwiki_planner_selected_points.is_empty() {
+        if keys.is_empty() {
             return Vec::new();
         }
 
-        let mut resolved = Vec::new();
+        let mut lookup = HashMap::new();
         for definition in &dataset.types {
             let Some(records) = dataset.points_by_type.get(&definition.mark_type) else {
                 continue;
             };
             for record in records {
                 let key = BwikiPointKey::from_record(record);
-                if self.bwiki_planner_selected_points.contains(&key) {
-                    resolved.push(BwikiPlannerResolvedPoint {
+                lookup.insert(
+                    key.clone(),
+                    BwikiPlannerResolvedPoint {
                         key,
                         record: record.clone(),
                         type_definition: Some(definition.clone()),
-                    });
-                }
+                    },
+                );
             }
         }
-        resolved
+
+        keys.iter()
+            .filter_map(|key| lookup.get(key).cloned())
+            .collect()
     }
 
     fn resolve_bwiki_preview_points(&self) -> Vec<BwikiPlannerResolvedPoint> {
-        let selected = self.resolve_bwiki_selected_points();
-        if selected.is_empty() {
+        let Some(preview) = self.bwiki_planner_preview.as_ref() else {
             return Vec::new();
-        }
+        };
+        self.resolve_bwiki_points_by_keys(&preview.route_keys)
+    }
 
-        let mut by_key = selected
-            .into_iter()
-            .map(|point| (point.key.clone(), point))
-            .collect::<std::collections::HashMap<_, _>>();
-        let ordered = self
-            .bwiki_planner_preview
-            .as_ref()
-            .map(|preview| {
-                preview
-                    .ordered_keys
+    fn resolve_bwiki_teleports(&self) -> Vec<BwikiPlannerResolvedPoint> {
+        let Some(dataset) = self.bwiki_resources.dataset_snapshot() else {
+            return Vec::new();
+        };
+        let teleport_keys = dataset
+            .points_by_type
+            .get(&BWIKI_TELEPORT_MARK_TYPE)
+            .map(|points| {
+                points
                     .iter()
-                    .filter_map(|key| by_key.remove(key))
+                    .map(BwikiPointKey::from_record)
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        self.resolve_bwiki_points_by_keys(&teleport_keys)
+    }
 
-        if ordered.is_empty() {
-            by_key.into_values().collect()
-        } else {
-            ordered
-        }
+    fn invalidate_bwiki_route_plan_preview(&mut self) {
+        self.bwiki_planner_preview = None;
     }
 
     fn toggle_bwiki_planner_keys<I>(&mut self, keys: I) -> usize
@@ -1382,7 +1433,7 @@ impl TrackerWorkbench {
             changed += 1;
         }
         if changed > 0 {
-            self.rebuild_bwiki_route_plan_preview();
+            self.invalidate_bwiki_route_plan_preview();
         }
         changed
     }
@@ -1397,6 +1448,10 @@ impl TrackerWorkbench {
 
     pub(super) fn bwiki_planner_preview_total_cost(&self) -> Option<f32> {
         self.bwiki_planner_preview.as_ref().map(|preview| preview.total_cost)
+    }
+
+    pub(super) fn bwiki_planner_has_preview(&self) -> bool {
+        self.bwiki_planner_preview.is_some()
     }
 
     pub(super) fn bwiki_planner_route_color_hex(&self, cx: &gpui::App) -> String {
@@ -1746,7 +1801,7 @@ impl TrackerWorkbench {
             changed = true;
         }
         if changed && self.bwiki_planner_active {
-            self.rebuild_bwiki_route_plan_preview();
+            self.invalidate_bwiki_route_plan_preview();
         }
         changed
     }
@@ -1879,8 +1934,8 @@ impl TrackerWorkbench {
 
     pub(super) fn clear_bwiki_planner_selection(&mut self) {
         self.bwiki_planner_selected_points.clear();
-        self.bwiki_planner_circle_selection = None;
-        self.bwiki_planner_preview = None;
+        self.bwiki_planner_lasso_selection = None;
+        self.invalidate_bwiki_route_plan_preview();
     }
 
     pub(super) fn toggle_bwiki_planner_mode(
@@ -1899,12 +1954,14 @@ impl TrackerWorkbench {
         self.clear_bwiki_planner_selection();
         self.ensure_bwiki_planner_defaults(window, cx);
         self.status_text =
-            "已进入路线规划模式。按住 Ctrl 拖动画圈可反选，单击节点可切换选中。".into();
+            "已进入路线规划模式。单击节点切换选中，按住 Ctrl 左键手绘闭合曲线可反选。"
+                .into();
     }
 
-    fn rebuild_bwiki_route_plan_preview(&mut self) {
-        let Some(dataset) = self.bwiki_resources.dataset_snapshot() else {
+    pub(super) fn plan_bwiki_route_preview(&mut self) {
+        let Some(_) = self.bwiki_resources.dataset_snapshot() else {
             self.bwiki_planner_preview = None;
+            self.status_text = "节点图鉴数据尚未就绪，暂时无法规划。".into();
             return;
         };
 
@@ -1916,36 +1973,39 @@ impl TrackerWorkbench {
                 .collect::<HashSet<_>>();
         }
         if resolved.is_empty() {
-            self.bwiki_planner_preview = None;
+            self.invalidate_bwiki_route_plan_preview();
+            self.status_text = "请先在地图中选择至少一个节点。".into();
             return;
         }
 
+        let teleports = self.resolve_bwiki_teleports();
         if resolved.len() == 1 {
             self.bwiki_planner_preview = Some(BwikiRoutePlanPreview {
-                ordered_keys: vec![resolved[0].key.clone()],
+                route_keys: vec![resolved[0].key.clone()],
                 total_cost: 0.0,
             });
+            self.status_text = "当前只选中了 1 个节点，已生成单点路线。".into();
             return;
         }
 
-        let teleports = dataset
-            .points_by_type
-            .get(&BWIKI_TELEPORT_MARK_TYPE)
-            .map(|points| points.iter().map(|point| point.world).collect::<Vec<_>>())
-            .unwrap_or_default();
         let worlds = resolved.iter().map(|point| point.record.world).collect::<Vec<_>>();
         let pair_costs = build_bwiki_planner_cost_matrix(&worlds, &teleports);
         let order = build_bwiki_planner_order(&pair_costs);
-        let total_cost = ordered_bwiki_route_cost(&order, &pair_costs);
+        let ordered_points = order
+            .iter()
+            .filter_map(|index| resolved.get(*index))
+            .cloned()
+            .collect::<Vec<_>>();
+        let preview = build_bwiki_route_plan_preview(&ordered_points, &teleports);
+        let total_cost = preview.total_cost;
 
-        self.bwiki_planner_preview = Some(BwikiRoutePlanPreview {
-            ordered_keys: order
-                .into_iter()
-                .filter_map(|index| resolved.get(index))
-                .map(|point| point.key.clone())
-                .collect(),
-            total_cost,
-        });
+        self.bwiki_planner_preview = Some(preview);
+        self.status_text = format!(
+            "已完成路线规划，共 {} 个节点，预计长度 {:.0}。",
+            resolved.len(),
+            total_cost
+        )
+        .into();
     }
 
     pub(super) fn handle_bwiki_planner_click(&mut self, screen_x: f32, screen_y: f32) -> bool {
@@ -1959,55 +2019,57 @@ impl TrackerWorkbench {
         let selecting = !self.bwiki_planner_selected_points.contains(&key);
         self.toggle_bwiki_planner_keys([key]);
         self.status_text = if selecting {
-            format!("已选中 {} 个规划点。", self.bwiki_planner_selected_count()).into()
+            format!(
+                "已选中 {} 个规划点。若要生成路线，请点击“规划路线”。",
+                self.bwiki_planner_selected_count()
+            )
+            .into()
         } else {
-            format!("已取消 1 个规划点，当前还剩 {} 个。", self.bwiki_planner_selected_count())
-                .into()
+            format!(
+                "已取消 1 个规划点，当前还剩 {} 个。若要更新路线，请重新点击“规划路线”。",
+                self.bwiki_planner_selected_count()
+            )
+            .into()
         };
         true
     }
 
-    pub(super) fn begin_bwiki_planner_circle_selection(&mut self, screen_x: f32, screen_y: f32) {
+    pub(super) fn begin_bwiki_planner_lasso_selection(&mut self, screen_x: f32, screen_y: f32) {
         let anchor = WorldPoint::new(screen_x, screen_y);
-        self.bwiki_planner_circle_selection = Some(BwikiPlannerCircleSelection {
-            center_screen: anchor,
-            current_screen: anchor,
-        });
+        self.bwiki_planner_lasso_selection = Some(BwikiPlannerLassoSelection::new(anchor));
     }
 
-    pub(super) fn update_bwiki_planner_circle_selection(
+    pub(super) fn update_bwiki_planner_lasso_selection(
         &mut self,
         screen_x: f32,
         screen_y: f32,
     ) -> bool {
-        let Some(selection) = self.bwiki_planner_circle_selection.as_mut() else {
+        let Some(selection) = self.bwiki_planner_lasso_selection.as_mut() else {
             return false;
         };
-        selection.current_screen = WorldPoint::new(screen_x, screen_y);
-        true
+        selection.push_point(WorldPoint::new(screen_x, screen_y))
     }
 
-    pub(super) fn finish_bwiki_planner_circle_selection(
+    pub(super) fn finish_bwiki_planner_lasso_selection(
         &mut self,
         screen_x: f32,
         screen_y: f32,
     ) -> bool {
-        let Some(mut selection) = self.bwiki_planner_circle_selection.take() else {
+        let Some(mut selection) = self.bwiki_planner_lasso_selection.take() else {
             return false;
         };
-        selection.current_screen = WorldPoint::new(screen_x, screen_y);
-        let radius = selection.radius();
-        if radius < MAP_CLICK_DRAG_THRESHOLD {
+        selection.push_point(WorldPoint::new(screen_x, screen_y));
+        if selection.travel_distance() < MAP_CLICK_DRAG_THRESHOLD {
             return self.handle_bwiki_planner_click(screen_x, screen_y);
         }
 
-        let affected_keys = self.bwiki_points_in_circle(selection.center_screen, radius);
+        let affected_keys = self.bwiki_points_in_lasso(&selection.path);
         let affected = self.toggle_bwiki_planner_keys(affected_keys);
         self.status_text = if affected == 0 {
             "当前圈选范围内没有可切换的节点。".into()
         } else {
             format!(
-                "已反选 {} 个节点，当前已选 {} 个规划点。",
+                "已反选 {} 个节点，当前已选 {} 个规划点。若要更新路线，请重新点击“规划路线”。",
                 affected,
                 self.bwiki_planner_selected_count()
             )
@@ -2033,9 +2095,14 @@ impl TrackerWorkbench {
             }
         };
 
+        let Some(_) = self.bwiki_planner_preview.as_ref() else {
+            self.status_text = "请先点击“规划路线”，确认预览结果后再创建路线。".into();
+            return;
+        };
+
         let planned_points = self.resolve_bwiki_preview_points();
         if planned_points.is_empty() {
-            self.status_text = "请先在地图中选择至少一个节点。".into();
+            self.status_text = "当前没有可创建的规划结果，请重新规划。".into();
             return;
         }
 
@@ -3958,26 +4025,127 @@ impl Drop for TrackerWorkbench {
     }
 }
 
+fn point_in_polygon(point: WorldPoint, polygon: &[WorldPoint]) -> bool {
+    if polygon.len() < 3 {
+        return false;
+    }
+
+    let mut inside = false;
+    let mut previous = *polygon.last().expect("polygon length already checked");
+    for current in polygon.iter().copied() {
+        let denominator = previous.y - current.y;
+        let safe_denominator = if denominator.abs() < 0.0001 {
+            0.0001
+        } else {
+            denominator
+        };
+        let intersects = ((current.y > point.y) != (previous.y > point.y))
+            && (point.x
+                < (previous.x - current.x) * (point.y - current.y) / safe_denominator
+                    + current.x);
+        if intersects {
+            inside = !inside;
+        }
+        previous = current;
+    }
+    inside
+}
+
 fn planner_world_distance(from: WorldPoint, to: WorldPoint) -> f32 {
     let dx = from.x - to.x;
     let dy = from.y - to.y;
     dx.hypot(dy)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct NearestTeleport {
+    index: usize,
+    distance: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BwikiSegmentPlan {
+    total_cost: f32,
+    source_teleport_index: Option<usize>,
+    target_teleport_index: Option<usize>,
+}
+
+fn nearest_two_teleports(
+    point: WorldPoint,
+    teleports: &[BwikiPlannerResolvedPoint],
+) -> [Option<NearestTeleport>; 2] {
+    let mut nearest: [Option<NearestTeleport>; 2] = [None, None];
+
+    for (index, teleport) in teleports.iter().enumerate() {
+        let distance = planner_world_distance(point, teleport.record.world);
+        let candidate = NearestTeleport { index, distance };
+        if nearest[0].is_none_or(|current| distance < current.distance) {
+            nearest[1] = nearest[0];
+            nearest[0] = Some(candidate);
+        } else if nearest[0].is_some_and(|current| current.index != index)
+            && nearest[1].is_none_or(|current| distance < current.distance)
+        {
+            nearest[1] = Some(candidate);
+        }
+    }
+
+    nearest
+}
+
+fn build_bwiki_segment_plan(
+    from: WorldPoint,
+    to: WorldPoint,
+    teleports: &[BwikiPlannerResolvedPoint],
+) -> BwikiSegmentPlan {
+    let direct_cost = planner_world_distance(from, to);
+    if teleports.len() < 2 {
+        return BwikiSegmentPlan {
+            total_cost: direct_cost,
+            source_teleport_index: None,
+            target_teleport_index: None,
+        };
+    }
+
+    let from_candidates = nearest_two_teleports(from, teleports);
+    let to_candidates = nearest_two_teleports(to, teleports);
+    let mut best_teleport_cost = f32::INFINITY;
+    let mut best_pair = None;
+
+    for from_candidate in from_candidates.into_iter().flatten() {
+        for to_candidate in to_candidates.into_iter().flatten() {
+            if from_candidate.index == to_candidate.index {
+                continue;
+            }
+            let candidate_cost =
+                from_candidate.distance + BWIKI_TELEPORT_HOP_COST + to_candidate.distance;
+            if candidate_cost < best_teleport_cost {
+                best_teleport_cost = candidate_cost;
+                best_pair = Some((from_candidate.index, to_candidate.index));
+            }
+        }
+    }
+
+    if let Some((source_teleport_index, target_teleport_index)) = best_pair
+        && best_teleport_cost + 0.001 < direct_cost
+    {
+        return BwikiSegmentPlan {
+            total_cost: best_teleport_cost,
+            source_teleport_index: Some(source_teleport_index),
+            target_teleport_index: Some(target_teleport_index),
+        };
+    }
+
+    BwikiSegmentPlan {
+        total_cost: direct_cost,
+        source_teleport_index: None,
+        target_teleport_index: None,
+    }
+}
+
 fn build_bwiki_planner_cost_matrix(
     points: &[WorldPoint],
-    teleports: &[WorldPoint],
+    teleports: &[BwikiPlannerResolvedPoint],
 ) -> Vec<Vec<f32>> {
-    let teleport_access_costs = points
-        .iter()
-        .map(|point| {
-            teleports
-                .iter()
-                .map(|teleport| planner_world_distance(*point, *teleport))
-                .fold(f32::INFINITY, f32::min)
-        })
-        .collect::<Vec<_>>();
-
     (0..points.len())
         .map(|from_index| {
             (0..points.len())
@@ -3986,15 +4154,8 @@ fn build_bwiki_planner_cost_matrix(
                         return 0.0;
                     }
 
-                    let direct = planner_world_distance(points[from_index], points[to_index]);
-                    let teleport = if teleports.is_empty() {
-                        f32::INFINITY
-                    } else {
-                        teleport_access_costs[from_index]
-                            + BWIKI_TELEPORT_HOP_COST
-                            + teleport_access_costs[to_index]
-                    };
-                    direct.min(teleport)
+                    build_bwiki_segment_plan(points[from_index], points[to_index], teleports)
+                        .total_cost
                 })
                 .collect::<Vec<_>>()
         })
@@ -4138,6 +4299,44 @@ fn ordered_bwiki_route_cost(order: &[usize], costs: &[Vec<f32>]) -> f32 {
         .windows(2)
         .map(|segment| costs[segment[0]][segment[1]])
         .sum()
+}
+
+fn append_preview_key(route_keys: &mut Vec<BwikiPointKey>, key: &BwikiPointKey) {
+    if route_keys.last() != Some(key) {
+        route_keys.push(key.clone());
+    }
+}
+
+fn build_bwiki_route_plan_preview(
+    ordered_points: &[BwikiPlannerResolvedPoint],
+    teleports: &[BwikiPlannerResolvedPoint],
+) -> BwikiRoutePlanPreview {
+    let Some(first_point) = ordered_points.first() else {
+        return BwikiRoutePlanPreview::default();
+    };
+
+    let mut route_keys = vec![first_point.key.clone()];
+    let mut total_cost = 0.0;
+
+    for segment in ordered_points.windows(2) {
+        let from = &segment[0];
+        let to = &segment[1];
+        let segment_plan = build_bwiki_segment_plan(from.record.world, to.record.world, teleports);
+        total_cost += segment_plan.total_cost;
+
+        if let Some(source_teleport_index) = segment_plan.source_teleport_index {
+            append_preview_key(&mut route_keys, &teleports[source_teleport_index].key);
+        }
+        if let Some(target_teleport_index) = segment_plan.target_teleport_index {
+            append_preview_key(&mut route_keys, &teleports[target_teleport_index].key);
+        }
+        append_preview_key(&mut route_keys, &to.key);
+    }
+
+    BwikiRoutePlanPreview {
+        route_keys,
+        total_cost,
+    }
 }
 
 fn planner_point_to_route_point(
