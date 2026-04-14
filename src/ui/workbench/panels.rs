@@ -19,7 +19,10 @@ use strum::IntoEnumIterator;
 
 use crate::{
     domain::{marker::MarkerIconStyle, theme::ThemePreference, tracker::TrackingSource},
-    resources::{BwikiResourceManager, tile_coordinate_to_world_origin, visible_tile_layers},
+    resources::{
+        BwikiResourceManager, tile_coordinate_to_world_origin, visible_tile_layers,
+        zoom_world_bounds,
+    },
     ui::map_canvas::{parse_hex_color, route_points, screen_points},
 };
 
@@ -3245,13 +3248,13 @@ fn paint_bwiki_tile_layers(
         width: f32::from(bounds.size.width),
         height: f32::from(bounds.size.height),
     };
-    let layers = visible_tile_layers(camera, viewport, 1);
+    let preferred_layer = visible_tile_layers(camera, viewport, 1).into_iter().last();
 
     window.paint_layer(bounds, |window| {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             window.paint_quad(fill(bounds, backdrop));
 
-            for layer in &layers {
+            if let Some(layer) = preferred_layer.as_ref() {
                 for tile in &layer.tiles {
                     let Some(path) = bwiki_resources.ensure_tile_path(tile.zoom, tile.x, tile.y)
                     else {
@@ -3273,6 +3276,9 @@ fn paint_bwiki_tile_layers(
                                 tile_origin.x + tile.world_size as f32,
                                 tile_origin.y + tile.world_size as f32,
                             ));
+                        let Some(tile_range) = zoom_world_bounds(tile.zoom) else {
+                            continue;
+                        };
                         let image_bounds = snapped_tile_image_bounds(
                             bounds,
                             screen_origin.x,
@@ -3280,6 +3286,10 @@ fn paint_bwiki_tile_layers(
                             screen_bottom_right.x,
                             screen_bottom_right.y,
                             window.scale_factor(),
+                            tile.x > tile_range.min_x,
+                            tile.y > tile_range.min_y,
+                            tile.x < tile_range.max_x,
+                            tile.y < tile_range.max_y,
                         );
                         let _ = window.paint_image(image_bounds, 0.0.into(), image, 0, false);
                     }
@@ -3296,10 +3306,15 @@ fn snapped_tile_image_bounds(
     right: f32,
     bottom: f32,
     scale_factor: f32,
+    extend_left: bool,
+    extend_top: bool,
+    extend_right: bool,
+    extend_bottom: bool,
 ) -> Bounds<gpui::Pixels> {
     let canvas_left = f32::from(canvas_bounds.origin.x);
     let canvas_top = f32::from(canvas_bounds.origin.y);
     let scale_factor = scale_factor.max(0.0001);
+    let overdraw = 1.0f32;
 
     // GPUI snaps image origins with floor() and sizes with ceil(). If adjacent tiles
     // are painted from independent float origins/sizes, tiny rounding differences turn
@@ -3310,13 +3325,18 @@ fn snapped_tile_image_bounds(
     let right_device = ((canvas_left + right) * scale_factor).round();
     let bottom_device = ((canvas_top + bottom) * scale_factor).round();
 
-    let width_device = (right_device - left_device).max(1.0);
-    let height_device = (bottom_device - top_device).max(1.0);
+    let snapped_left = left_device - if extend_left { overdraw } else { 0.0 };
+    let snapped_top = top_device - if extend_top { overdraw } else { 0.0 };
+    let snapped_right = right_device + if extend_right { overdraw } else { 0.0 };
+    let snapped_bottom = bottom_device + if extend_bottom { overdraw } else { 0.0 };
+
+    let width_device = (snapped_right - snapped_left).max(1.0);
+    let height_device = (snapped_bottom - snapped_top).max(1.0);
 
     Bounds {
         origin: point(
-            px(left_device / scale_factor),
-            px(top_device / scale_factor),
+            px(snapped_left / scale_factor),
+            px(snapped_top / scale_factor),
         ),
         size: size(
             px(width_device / scale_factor),
