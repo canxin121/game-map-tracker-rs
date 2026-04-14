@@ -1869,7 +1869,6 @@ fn settings_config_page(
             }
         }));
 
-    let config = &this.workspace.config;
     div()
         .flex_1()
         .min_h(px(0.0))
@@ -1882,7 +1881,41 @@ fn settings_config_page(
         .border_1()
         .border_color(tokens.border)
         .p_4()
-        .child(section_title("界面与追踪配置"))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(section_title("界面与追踪配置"))
+                .child(toolbar_cluster(vec![
+                    toolbar_button(
+                        "settings-config-reload",
+                        tokens,
+                        "R",
+                        "回填当前配置",
+                        ToolbarButtonTone::Neutral,
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.sync_config_form_from_workspace(window, cx);
+                            this.status_text = "已回填当前配置文件内容。".into();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                    toolbar_button(
+                        "settings-config-save",
+                        tokens,
+                        "S",
+                        "保存配置",
+                        ToolbarButtonTone::Primary,
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.save_app_config(window, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                ])),
+        )
         .child(
             div()
                 .rounded_lg()
@@ -1893,52 +1926,248 @@ fn settings_config_page(
                 .child(field_label(tokens, "主题模式"))
                 .child(theme_mode_picker),
         )
-        .child(config_section(
+        .child(editable_config_section(
+            "通用",
+            vec![
+                div()
+                    .flex()
+                    .gap_2()
+                    .children([
+                        labeled_input(tokens, "窗口几何", &this.config_form.window_geometry)
+                            .into_any_element(),
+                        labeled_input(tokens, "视图尺寸", &this.config_form.view_size)
+                            .into_any_element(),
+                        labeled_input(tokens, "最大丢帧", &this.config_form.max_lost_frames)
+                            .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "传送等效距离",
+                            &this.config_form.teleport_link_distance,
+                        )
+                        .into_any_element(),
+                    ])
+                    .into_any_element(),
+            ],
+            tokens,
+        ))
+        .child(editable_config_section(
             "截图区域",
             vec![
-                format!("top = {}", config.minimap.top),
-                format!("left = {}", config.minimap.left),
-                format!("width = {}", config.minimap.width),
-                format!("height = {}", config.minimap.height),
+                div()
+                    .flex()
+                    .gap_2()
+                    .children([
+                        labeled_input(tokens, "Top", &this.config_form.minimap_top).into_any_element(),
+                        labeled_input(tokens, "Left", &this.config_form.minimap_left)
+                            .into_any_element(),
+                        labeled_input(tokens, "Width", &this.config_form.minimap_width)
+                            .into_any_element(),
+                        labeled_input(tokens, "Height", &this.config_form.minimap_height)
+                            .into_any_element(),
+                    ])
+                    .into_any_element(),
             ],
             tokens,
         ))
-        .child(config_section(
-            "模板追踪",
+        .child(editable_config_section(
+            "局部搜索",
             vec![
-                format!("refresh_rate_ms = {}", config.template.refresh_rate_ms),
-                format!("local_downscale = {}", config.template.local_downscale),
-                format!("global_downscale = {}", config.template.global_downscale),
-                format!(
-                    "local_match_threshold = {:.2}",
-                    config.template.local_match_threshold
-                ),
-                format!(
-                    "global_match_threshold = {:.2}",
-                    config.template.global_match_threshold
-                ),
+                div()
+                    .flex()
+                    .gap_2()
+                    .children([
+                        labeled_input(
+                            tokens,
+                            "启用 true/false",
+                            &this.config_form.local_search_enabled,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "搜索半径",
+                            &this.config_form.local_search_radius_px,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "锁定失败阈值",
+                            &this.config_form.local_search_lock_fail_threshold,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "最大跳变",
+                            &this.config_form.local_search_max_accepted_jump_px,
+                        )
+                        .into_any_element(),
+                    ])
+                    .into_any_element(),
             ],
             tokens,
         ))
-        .child(config_section(
+        .child(editable_config_section(
+            "SIFT 追踪",
+            vec![
+                div()
+                    .flex()
+                    .gap_2()
+                    .children([
+                        labeled_input(
+                            tokens,
+                            "刷新间隔",
+                            &this.config_form.sift_refresh_rate_ms,
+                        )
+                        .into_any_element(),
+                        labeled_input(tokens, "CLAHE", &this.config_form.sift_clahe_limit)
+                            .into_any_element(),
+                        labeled_input(tokens, "匹配比", &this.config_form.sift_match_ratio)
+                            .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "最小匹配数",
+                            &this.config_form.sift_min_match_count,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "RANSAC 阈值",
+                            &this.config_form.sift_ransac_threshold,
+                        )
+                        .into_any_element(),
+                    ])
+                    .into_any_element(),
+            ],
+            tokens,
+        ))
+        .child(editable_config_section(
             "AI 追踪",
             vec![
-                format!("refresh_rate_ms = {}", config.ai.refresh_rate_ms),
-                format!(
-                    "confidence_threshold = {:.2}",
-                    config.ai.confidence_threshold
-                ),
-                format!("scan_size = {}", config.ai.scan_size),
-                format!("scan_step = {}", config.ai.scan_step),
-                format!("track_radius = {}", config.ai.track_radius),
+                div()
+                    .flex()
+                    .gap_2()
+                    .children([
+                        labeled_input(tokens, "刷新间隔", &this.config_form.ai_refresh_rate_ms)
+                            .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "置信度阈值",
+                            &this.config_form.ai_confidence_threshold,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "最小匹配数",
+                            &this.config_form.ai_min_match_count,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "RANSAC 阈值",
+                            &this.config_form.ai_ransac_threshold,
+                        )
+                        .into_any_element(),
+                    ])
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .gap_2()
+                    .children([
+                        labeled_input(tokens, "扫描尺寸", &this.config_form.ai_scan_size)
+                            .into_any_element(),
+                        labeled_input(tokens, "扫描步长", &this.config_form.ai_scan_step)
+                            .into_any_element(),
+                        labeled_input(tokens, "跟踪半径", &this.config_form.ai_track_radius)
+                            .into_any_element(),
+                        labeled_input(tokens, "权重路径", &this.config_form.ai_weights_path)
+                            .into_any_element(),
+                    ])
+                    .into_any_element(),
             ],
             tokens,
         ))
-        .child(config_section(
+        .child(editable_config_section(
+            "模板追踪",
+            vec![
+                div()
+                    .flex()
+                    .gap_2()
+                    .children([
+                        labeled_input(
+                            tokens,
+                            "刷新间隔",
+                            &this.config_form.template_refresh_rate_ms,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "局部缩放",
+                            &this.config_form.template_local_downscale,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "全局缩放",
+                            &this.config_form.template_global_downscale,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "全局细化半径",
+                            &this.config_form.template_global_refine_radius_px,
+                        )
+                        .into_any_element(),
+                    ])
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .gap_2()
+                    .children([
+                        labeled_input(
+                            tokens,
+                            "局部阈值",
+                            &this.config_form.template_local_match_threshold,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "全局阈值",
+                            &this.config_form.template_global_match_threshold,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "外圈半径",
+                            &this.config_form.template_mask_outer_radius,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "内圈半径",
+                            &this.config_form.template_mask_inner_radius,
+                        )
+                        .into_any_element(),
+                    ])
+                    .into_any_element(),
+            ],
+            tokens,
+        ))
+        .child(editable_config_section(
             "网络",
             vec![
-                format!("http_port = {}", config.network.http_port),
-                format!("websocket_port = {}", config.network.websocket_port),
+                div()
+                    .flex()
+                    .gap_2()
+                    .children([
+                        labeled_input(tokens, "HTTP 端口", &this.config_form.network_http_port)
+                            .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "WebSocket 端口",
+                            &this.config_form.network_websocket_port,
+                        )
+                        .into_any_element(),
+                    ])
+                    .into_any_element(),
             ],
             tokens,
         ))
@@ -2097,6 +2326,27 @@ fn config_section(
                         .map(|line| body_text(tokens, line).into_any_element())
                         .collect::<Vec<_>>(),
                 ),
+        )
+}
+
+fn editable_config_section(
+    title: &'static str,
+    rows: Vec<AnyElement>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    div()
+        .rounded_xl()
+        .bg(tokens.panel_sunken_bg)
+        .border_1()
+        .border_color(tokens.border)
+        .p_4()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(section_title(title))
+                .children(rows),
         )
 }
 

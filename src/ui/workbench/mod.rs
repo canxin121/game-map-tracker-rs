@@ -16,7 +16,7 @@ use gpui::{AppContext, Context, PathPromptOptions, Render, SharedString, Subscri
 use gpui_component::input::InputEvent;
 
 use crate::{
-    config::{AppConfig, CONFIG_FILE_NAME},
+    config::{AppConfig, CONFIG_FILE_NAME, save_config},
     domain::{
         geometry::WorldPoint,
         marker::{MarkerIconStyle, MarkerStyle},
@@ -37,9 +37,10 @@ use crate::{
 
 use self::{
     forms::{
-        BwikiIconPickerItem, GroupDraft, GroupFormInputs, GroupInlineEditInputs, MarkerDraft,
-        MarkerFormInputs, MarkerGroupPickerItem, PagedListState, PlannerRouteDraft,
-        PointReorderTargetItem, RoutePlannerFormInputs, read_input_value, set_input_value,
+        BwikiIconPickerItem, ConfigDraft, ConfigFormInputs, GroupDraft, GroupFormInputs,
+        GroupInlineEditInputs, MarkerDraft, MarkerFormInputs, MarkerGroupPickerItem,
+        PagedListState, PlannerRouteDraft, PointReorderTargetItem, RoutePlannerFormInputs,
+        read_input_value, set_input_value,
     },
     page::{MapPage, SettingsPage, WorkbenchPage},
     panels::render_workbench,
@@ -235,7 +236,6 @@ const BWIKI_TILE_CACHE_MAX_BYTES: usize = 96 * 1024 * 1024;
 const MAP_CLICK_DRAG_THRESHOLD: f32 = 4.0;
 const BWIKI_PLANNER_EXACT_LIMIT: usize = 15;
 const BWIKI_TELEPORT_MARK_TYPE: u32 = 202;
-const BWIKI_TELEPORT_HOP_COST: f32 = 320.0;
 
 fn normalized_list_query(
     input: &gpui::Entity<gpui_component::input::InputState>,
@@ -322,6 +322,7 @@ pub struct TrackerWorkbench {
     pub(super) bwiki_expanded_categories: HashSet<String>,
     bwiki_visibility_initialized: bool,
     bwiki_icon_picker_version: u64,
+    config_form: ConfigFormInputs,
     group_form: GroupFormInputs,
     group_inline_edit: GroupInlineEditInputs,
     marker_form: MarkerFormInputs,
@@ -334,6 +335,7 @@ pub(crate) fn init(cx: &mut gpui::App) {
 
 impl TrackerWorkbench {
     pub fn new(project_root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let config_form = ConfigFormInputs::new(window, cx);
         let group_form = GroupFormInputs::new(window, cx);
         let group_inline_edit = GroupInlineEditInputs::new(window, cx);
         let marker_form = MarkerFormInputs::new(window, cx);
@@ -460,6 +462,7 @@ impl TrackerWorkbench {
                     bwiki_expanded_categories: HashSet::new(),
                     bwiki_visibility_initialized: false,
                     bwiki_icon_picker_version: 0,
+                    config_form: config_form.clone(),
                     group_form,
                     group_inline_edit,
                     marker_form,
@@ -548,6 +551,7 @@ impl TrackerWorkbench {
                     bwiki_expanded_categories: HashSet::new(),
                     bwiki_visibility_initialized: false,
                     bwiki_icon_picker_version: 0,
+                    config_form,
                     group_form,
                     group_inline_edit,
                     marker_form,
@@ -841,6 +845,7 @@ impl TrackerWorkbench {
                 }
             },
         ));
+        workbench.sync_config_form_from_workspace(window, cx);
         workbench.sync_editor_from_selection(window, cx);
         workbench.request_center_on_current_point();
         workbench.sync_bwiki_visibility_defaults();
@@ -1979,6 +1984,7 @@ impl TrackerWorkbench {
         }
 
         let teleports = self.resolve_bwiki_teleports();
+        let teleport_link_distance = self.teleport_link_distance();
         if resolved.len() == 1 {
             self.bwiki_planner_preview = Some(BwikiRoutePlanPreview {
                 route_keys: vec![resolved[0].key.clone()],
@@ -1989,14 +1995,19 @@ impl TrackerWorkbench {
         }
 
         let worlds = resolved.iter().map(|point| point.record.world).collect::<Vec<_>>();
-        let pair_costs = build_bwiki_planner_cost_matrix(&worlds, &teleports);
+        let pair_costs =
+            build_bwiki_planner_cost_matrix(&worlds, &teleports, teleport_link_distance);
         let order = build_bwiki_planner_order(&pair_costs);
         let ordered_points = order
             .iter()
             .filter_map(|index| resolved.get(*index))
             .cloned()
             .collect::<Vec<_>>();
-        let preview = build_bwiki_route_plan_preview(&ordered_points, &teleports);
+        let preview = build_bwiki_route_plan_preview(
+            &ordered_points,
+            &teleports,
+            teleport_link_distance,
+        );
         let total_cost = preview.total_cost;
 
         self.bwiki_planner_preview = Some(preview);
@@ -3883,6 +3894,255 @@ impl TrackerWorkbench {
         self.workspace = Arc::new(workspace);
     }
 
+    fn sync_config_form_from_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let config = self.workspace.config.clone();
+        set_input_value(&self.config_form.minimap_top, config.minimap.top.to_string(), window, cx);
+        set_input_value(
+            &self.config_form.minimap_left,
+            config.minimap.left.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_width,
+            config.minimap.width.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_height,
+            config.minimap.height.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.window_geometry,
+            config.window_geometry,
+            window,
+            cx,
+        );
+        set_input_value(&self.config_form.view_size, config.view_size.to_string(), window, cx);
+        set_input_value(
+            &self.config_form.max_lost_frames,
+            config.max_lost_frames.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.teleport_link_distance,
+            format!("{:.0}", config.teleport_link_distance),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.local_search_enabled,
+            config.local_search.enabled.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.local_search_radius_px,
+            config.local_search.radius_px.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.local_search_lock_fail_threshold,
+            config.local_search.lock_fail_threshold.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.local_search_max_accepted_jump_px,
+            config.local_search.max_accepted_jump_px.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.sift_refresh_rate_ms,
+            config.sift.refresh_rate_ms.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.sift_clahe_limit,
+            config.sift.clahe_limit.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.sift_match_ratio,
+            config.sift.match_ratio.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.sift_min_match_count,
+            config.sift.min_match_count.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.sift_ransac_threshold,
+            config.sift.ransac_threshold.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.ai_refresh_rate_ms,
+            config.ai.refresh_rate_ms.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.ai_confidence_threshold,
+            config.ai.confidence_threshold.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.ai_min_match_count,
+            config.ai.min_match_count.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.ai_ransac_threshold,
+            config.ai.ransac_threshold.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.ai_scan_size,
+            config.ai.scan_size.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.ai_scan_step,
+            config.ai.scan_step.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.ai_track_radius,
+            config.ai.track_radius.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.ai_weights_path,
+            config.ai.weights_path.unwrap_or_default(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.template_refresh_rate_ms,
+            config.template.refresh_rate_ms.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.template_local_downscale,
+            config.template.local_downscale.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.template_global_downscale,
+            config.template.global_downscale.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.template_global_refine_radius_px,
+            config.template.global_refine_radius_px.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.template_local_match_threshold,
+            config.template.local_match_threshold.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.template_global_match_threshold,
+            config.template.global_match_threshold.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.template_mask_outer_radius,
+            config.template.mask_outer_radius.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.template_mask_inner_radius,
+            config.template.mask_inner_radius.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.network_http_port,
+            config.network.http_port.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.network_websocket_port,
+            config.network.websocket_port.to_string(),
+            window,
+            cx,
+        );
+    }
+
+    fn update_workspace_config(&mut self, config: AppConfig) {
+        let mut workspace = (*self.workspace).clone();
+        workspace.config = config;
+        self.workspace = Arc::new(workspace);
+    }
+
+    fn teleport_link_distance(&self) -> f32 {
+        self.workspace.config.teleport_link_distance.max(0.0)
+    }
+
+    pub(super) fn save_app_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = match ConfigDraft::read(self, cx) {
+            Ok(draft) => draft,
+            Err(message) => {
+                self.status_text = message.into();
+                return;
+            }
+        };
+
+        if draft.config.window_geometry.trim().is_empty() {
+            self.status_text = "window_geometry 不能为空。".into();
+            return;
+        }
+
+        match save_config(&self.workspace.project_root, &draft.config) {
+            Ok(path) => {
+                self.update_workspace_config(draft.config);
+                self.invalidate_bwiki_route_plan_preview();
+                self.sync_config_form_from_workspace(window, cx);
+                self.status_text = if self.is_tracking_active() {
+                    format!(
+                        "配置已保存到 {}。当前追踪需重启后才会完全应用新参数。",
+                        path.display()
+                    )
+                    .into()
+                } else {
+                    format!("配置已保存到 {}。", path.display()).into()
+                };
+            }
+            Err(error) => {
+                self.status_text = format!("保存配置失败：{error:#}").into();
+            }
+        }
+    }
+
     fn request_center_on_current_point(&mut self) {
         if !self.auto_focus_enabled {
             return;
@@ -4096,6 +4356,7 @@ fn build_bwiki_segment_plan(
     from: WorldPoint,
     to: WorldPoint,
     teleports: &[BwikiPlannerResolvedPoint],
+    teleport_link_distance: f32,
 ) -> BwikiSegmentPlan {
     let direct_cost = planner_world_distance(from, to);
     if teleports.len() < 2 {
@@ -4117,7 +4378,7 @@ fn build_bwiki_segment_plan(
                 continue;
             }
             let candidate_cost =
-                from_candidate.distance + BWIKI_TELEPORT_HOP_COST + to_candidate.distance;
+                from_candidate.distance + teleport_link_distance + to_candidate.distance;
             if candidate_cost < best_teleport_cost {
                 best_teleport_cost = candidate_cost;
                 best_pair = Some((from_candidate.index, to_candidate.index));
@@ -4145,6 +4406,7 @@ fn build_bwiki_segment_plan(
 fn build_bwiki_planner_cost_matrix(
     points: &[WorldPoint],
     teleports: &[BwikiPlannerResolvedPoint],
+    teleport_link_distance: f32,
 ) -> Vec<Vec<f32>> {
     (0..points.len())
         .map(|from_index| {
@@ -4154,8 +4416,13 @@ fn build_bwiki_planner_cost_matrix(
                         return 0.0;
                     }
 
-                    build_bwiki_segment_plan(points[from_index], points[to_index], teleports)
-                        .total_cost
+                    build_bwiki_segment_plan(
+                        points[from_index],
+                        points[to_index],
+                        teleports,
+                        teleport_link_distance,
+                    )
+                    .total_cost
                 })
                 .collect::<Vec<_>>()
         })
@@ -4310,6 +4577,7 @@ fn append_preview_key(route_keys: &mut Vec<BwikiPointKey>, key: &BwikiPointKey) 
 fn build_bwiki_route_plan_preview(
     ordered_points: &[BwikiPlannerResolvedPoint],
     teleports: &[BwikiPlannerResolvedPoint],
+    teleport_link_distance: f32,
 ) -> BwikiRoutePlanPreview {
     let Some(first_point) = ordered_points.first() else {
         return BwikiRoutePlanPreview::default();
@@ -4321,7 +4589,12 @@ fn build_bwiki_route_plan_preview(
     for segment in ordered_points.windows(2) {
         let from = &segment[0];
         let to = &segment[1];
-        let segment_plan = build_bwiki_segment_plan(from.record.world, to.record.world, teleports);
+        let segment_plan = build_bwiki_segment_plan(
+            from.record.world,
+            to.record.world,
+            teleports,
+            teleport_link_distance,
+        );
         total_cost += segment_plan.total_cost;
 
         if let Some(source_teleport_index) = segment_plan.source_teleport_index {

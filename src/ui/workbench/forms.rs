@@ -4,10 +4,16 @@ use gpui::{
 };
 use gpui_component::{input::InputState, select::SelectItem};
 
-use crate::domain::{
-    geometry::WorldPoint,
-    marker::{MarkerIconStyle, MarkerStyle, normalize_hex_color},
-    route::{RouteId, RoutePointId},
+use crate::{
+    config::{
+        AiTrackingConfig, AppConfig, CaptureRegion, LocalSearchConfig, NetworkConfig,
+        SiftTrackingConfig, TemplateTrackingConfig,
+    },
+    domain::{
+        geometry::WorldPoint,
+        marker::{MarkerIconStyle, MarkerStyle, normalize_hex_color},
+        route::{RouteId, RoutePointId},
+    },
 };
 
 use super::TrackerWorkbench;
@@ -82,6 +88,91 @@ impl RoutePlannerFormInputs {
             name: cx.new(|cx| InputState::new(window, cx).placeholder("新路线名称")),
             description: cx.new(|cx| InputState::new(window, cx).placeholder("路线说明")),
             color_hex: cx.new(|cx| InputState::new(window, cx).default_value("#FF6B6B")),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct ConfigFormInputs {
+    pub(super) minimap_top: gpui::Entity<InputState>,
+    pub(super) minimap_left: gpui::Entity<InputState>,
+    pub(super) minimap_width: gpui::Entity<InputState>,
+    pub(super) minimap_height: gpui::Entity<InputState>,
+    pub(super) window_geometry: gpui::Entity<InputState>,
+    pub(super) view_size: gpui::Entity<InputState>,
+    pub(super) max_lost_frames: gpui::Entity<InputState>,
+    pub(super) teleport_link_distance: gpui::Entity<InputState>,
+    pub(super) local_search_enabled: gpui::Entity<InputState>,
+    pub(super) local_search_radius_px: gpui::Entity<InputState>,
+    pub(super) local_search_lock_fail_threshold: gpui::Entity<InputState>,
+    pub(super) local_search_max_accepted_jump_px: gpui::Entity<InputState>,
+    pub(super) sift_refresh_rate_ms: gpui::Entity<InputState>,
+    pub(super) sift_clahe_limit: gpui::Entity<InputState>,
+    pub(super) sift_match_ratio: gpui::Entity<InputState>,
+    pub(super) sift_min_match_count: gpui::Entity<InputState>,
+    pub(super) sift_ransac_threshold: gpui::Entity<InputState>,
+    pub(super) ai_refresh_rate_ms: gpui::Entity<InputState>,
+    pub(super) ai_confidence_threshold: gpui::Entity<InputState>,
+    pub(super) ai_min_match_count: gpui::Entity<InputState>,
+    pub(super) ai_ransac_threshold: gpui::Entity<InputState>,
+    pub(super) ai_scan_size: gpui::Entity<InputState>,
+    pub(super) ai_scan_step: gpui::Entity<InputState>,
+    pub(super) ai_track_radius: gpui::Entity<InputState>,
+    pub(super) ai_weights_path: gpui::Entity<InputState>,
+    pub(super) template_refresh_rate_ms: gpui::Entity<InputState>,
+    pub(super) template_local_downscale: gpui::Entity<InputState>,
+    pub(super) template_global_downscale: gpui::Entity<InputState>,
+    pub(super) template_global_refine_radius_px: gpui::Entity<InputState>,
+    pub(super) template_local_match_threshold: gpui::Entity<InputState>,
+    pub(super) template_global_match_threshold: gpui::Entity<InputState>,
+    pub(super) template_mask_outer_radius: gpui::Entity<InputState>,
+    pub(super) template_mask_inner_radius: gpui::Entity<InputState>,
+    pub(super) network_http_port: gpui::Entity<InputState>,
+    pub(super) network_websocket_port: gpui::Entity<InputState>,
+}
+
+impl ConfigFormInputs {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<TrackerWorkbench>) -> Self {
+        Self {
+            minimap_top: config_input(window, cx, "top"),
+            minimap_left: config_input(window, cx, "left"),
+            minimap_width: config_input(window, cx, "width"),
+            minimap_height: config_input(window, cx, "height"),
+            window_geometry: config_input(window, cx, "窗口几何"),
+            view_size: config_input(window, cx, "view_size"),
+            max_lost_frames: config_input(window, cx, "max_lost_frames"),
+            teleport_link_distance: config_input(window, cx, "传送等效距离"),
+            local_search_enabled: config_input(window, cx, "true / false"),
+            local_search_radius_px: config_input(window, cx, "radius_px"),
+            local_search_lock_fail_threshold: config_input(window, cx, "lock_fail_threshold"),
+            local_search_max_accepted_jump_px: config_input(
+                window,
+                cx,
+                "max_accepted_jump_px",
+            ),
+            sift_refresh_rate_ms: config_input(window, cx, "refresh_rate_ms"),
+            sift_clahe_limit: config_input(window, cx, "clahe_limit"),
+            sift_match_ratio: config_input(window, cx, "match_ratio"),
+            sift_min_match_count: config_input(window, cx, "min_match_count"),
+            sift_ransac_threshold: config_input(window, cx, "ransac_threshold"),
+            ai_refresh_rate_ms: config_input(window, cx, "refresh_rate_ms"),
+            ai_confidence_threshold: config_input(window, cx, "confidence_threshold"),
+            ai_min_match_count: config_input(window, cx, "min_match_count"),
+            ai_ransac_threshold: config_input(window, cx, "ransac_threshold"),
+            ai_scan_size: config_input(window, cx, "scan_size"),
+            ai_scan_step: config_input(window, cx, "scan_step"),
+            ai_track_radius: config_input(window, cx, "track_radius"),
+            ai_weights_path: config_input(window, cx, "weights_path，可留空"),
+            template_refresh_rate_ms: config_input(window, cx, "refresh_rate_ms"),
+            template_local_downscale: config_input(window, cx, "local_downscale"),
+            template_global_downscale: config_input(window, cx, "global_downscale"),
+            template_global_refine_radius_px: config_input(window, cx, "global_refine_radius_px"),
+            template_local_match_threshold: config_input(window, cx, "local_match_threshold"),
+            template_global_match_threshold: config_input(window, cx, "global_match_threshold"),
+            template_mask_outer_radius: config_input(window, cx, "mask_outer_radius"),
+            template_mask_inner_radius: config_input(window, cx, "mask_inner_radius"),
+            network_http_port: config_input(window, cx, "http_port"),
+            network_websocket_port: config_input(window, cx, "websocket_port"),
         }
     }
 }
@@ -421,6 +512,166 @@ impl PlannerRouteDraft {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct ConfigDraft {
+    pub(super) config: AppConfig,
+}
+
+impl ConfigDraft {
+    pub(super) fn read(
+        workbench: &TrackerWorkbench,
+        cx: &mut Context<TrackerWorkbench>,
+    ) -> Result<Self, String> {
+        let form = &workbench.config_form;
+        let weights_path = read_input_value(&form.ai_weights_path, cx);
+        let weights_path = weights_path.trim();
+
+        Ok(Self {
+            config: AppConfig {
+                minimap: CaptureRegion {
+                    top: parse_input_value(&form.minimap_top, "minimap.top", cx)?,
+                    left: parse_input_value(&form.minimap_left, "minimap.left", cx)?,
+                    width: parse_input_value(&form.minimap_width, "minimap.width", cx)?,
+                    height: parse_input_value(&form.minimap_height, "minimap.height", cx)?,
+                },
+                window_geometry: read_input_value(&form.window_geometry, cx),
+                view_size: parse_input_value(&form.view_size, "view_size", cx)?,
+                max_lost_frames: parse_input_value(
+                    &form.max_lost_frames,
+                    "max_lost_frames",
+                    cx,
+                )?,
+                teleport_link_distance: parse_input_value(
+                    &form.teleport_link_distance,
+                    "teleport_link_distance",
+                    cx,
+                )?,
+                local_search: LocalSearchConfig {
+                    enabled: parse_bool_input_value(
+                        &form.local_search_enabled,
+                        "local_search.enabled",
+                        cx,
+                    )?,
+                    radius_px: parse_input_value(
+                        &form.local_search_radius_px,
+                        "local_search.radius_px",
+                        cx,
+                    )?,
+                    lock_fail_threshold: parse_input_value(
+                        &form.local_search_lock_fail_threshold,
+                        "local_search.lock_fail_threshold",
+                        cx,
+                    )?,
+                    max_accepted_jump_px: parse_input_value(
+                        &form.local_search_max_accepted_jump_px,
+                        "local_search.max_accepted_jump_px",
+                        cx,
+                    )?,
+                },
+                sift: SiftTrackingConfig {
+                    refresh_rate_ms: parse_input_value(
+                        &form.sift_refresh_rate_ms,
+                        "sift.refresh_rate_ms",
+                        cx,
+                    )?,
+                    clahe_limit: parse_input_value(&form.sift_clahe_limit, "sift.clahe_limit", cx)?,
+                    match_ratio: parse_input_value(&form.sift_match_ratio, "sift.match_ratio", cx)?,
+                    min_match_count: parse_input_value(
+                        &form.sift_min_match_count,
+                        "sift.min_match_count",
+                        cx,
+                    )?,
+                    ransac_threshold: parse_input_value(
+                        &form.sift_ransac_threshold,
+                        "sift.ransac_threshold",
+                        cx,
+                    )?,
+                },
+                ai: AiTrackingConfig {
+                    refresh_rate_ms: parse_input_value(
+                        &form.ai_refresh_rate_ms,
+                        "ai.refresh_rate_ms",
+                        cx,
+                    )?,
+                    confidence_threshold: parse_input_value(
+                        &form.ai_confidence_threshold,
+                        "ai.confidence_threshold",
+                        cx,
+                    )?,
+                    min_match_count: parse_input_value(
+                        &form.ai_min_match_count,
+                        "ai.min_match_count",
+                        cx,
+                    )?,
+                    ransac_threshold: parse_input_value(
+                        &form.ai_ransac_threshold,
+                        "ai.ransac_threshold",
+                        cx,
+                    )?,
+                    scan_size: parse_input_value(&form.ai_scan_size, "ai.scan_size", cx)?,
+                    scan_step: parse_input_value(&form.ai_scan_step, "ai.scan_step", cx)?,
+                    track_radius: parse_input_value(&form.ai_track_radius, "ai.track_radius", cx)?,
+                    weights_path: (!weights_path.is_empty()).then(|| weights_path.to_owned()),
+                },
+                template: TemplateTrackingConfig {
+                    refresh_rate_ms: parse_input_value(
+                        &form.template_refresh_rate_ms,
+                        "template.refresh_rate_ms",
+                        cx,
+                    )?,
+                    local_downscale: parse_input_value(
+                        &form.template_local_downscale,
+                        "template.local_downscale",
+                        cx,
+                    )?,
+                    global_downscale: parse_input_value(
+                        &form.template_global_downscale,
+                        "template.global_downscale",
+                        cx,
+                    )?,
+                    global_refine_radius_px: parse_input_value(
+                        &form.template_global_refine_radius_px,
+                        "template.global_refine_radius_px",
+                        cx,
+                    )?,
+                    local_match_threshold: parse_input_value(
+                        &form.template_local_match_threshold,
+                        "template.local_match_threshold",
+                        cx,
+                    )?,
+                    global_match_threshold: parse_input_value(
+                        &form.template_global_match_threshold,
+                        "template.global_match_threshold",
+                        cx,
+                    )?,
+                    mask_outer_radius: parse_input_value(
+                        &form.template_mask_outer_radius,
+                        "template.mask_outer_radius",
+                        cx,
+                    )?,
+                    mask_inner_radius: parse_input_value(
+                        &form.template_mask_inner_radius,
+                        "template.mask_inner_radius",
+                        cx,
+                    )?,
+                },
+                network: NetworkConfig {
+                    http_port: parse_input_value(
+                        &form.network_http_port,
+                        "network.http_port",
+                        cx,
+                    )?,
+                    websocket_port: parse_input_value(
+                        &form.network_websocket_port,
+                        "network.websocket_port",
+                        cx,
+                    )?,
+                },
+            },
+        })
+    }
+}
+
 pub(super) fn read_input_value(
     input: &gpui::Entity<InputState>,
     cx: &mut Context<TrackerWorkbench>,
@@ -438,6 +689,41 @@ pub(super) fn set_input_value(
     input.update(cx, |input, cx| {
         input.set_value(value.clone(), window, cx);
     });
+}
+
+fn config_input(
+    window: &mut Window,
+    cx: &mut Context<TrackerWorkbench>,
+    placeholder: &'static str,
+) -> gpui::Entity<InputState> {
+    cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
+}
+
+fn parse_input_value<T>(
+    input: &gpui::Entity<InputState>,
+    field_name: &'static str,
+    cx: &mut Context<TrackerWorkbench>,
+) -> Result<T, String>
+where
+    T: std::str::FromStr,
+{
+    read_input_value(input, cx)
+        .trim()
+        .parse::<T>()
+        .map_err(|_| format!("{field_name} 必须是有效数字。"))
+}
+
+fn parse_bool_input_value(
+    input: &gpui::Entity<InputState>,
+    field_name: &'static str,
+    cx: &mut Context<TrackerWorkbench>,
+) -> Result<bool, String> {
+    let value = read_input_value(input, cx).trim().to_ascii_lowercase();
+    match value.as_str() {
+        "true" | "1" | "yes" | "y" | "on" => Ok(true),
+        "false" | "0" | "no" | "n" | "off" => Ok(false),
+        _ => Err(format!("{field_name} 必须是 true 或 false。")),
+    }
 }
 
 fn picker_menu_row(title: &SharedString, subtitle: &SharedString) -> impl IntoElement {

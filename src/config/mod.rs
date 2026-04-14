@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_FILE_NAME: &str = "config.toml";
+const DEFAULT_TELEPORT_LINK_DISTANCE: f32 = 320.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
@@ -74,6 +75,7 @@ pub struct AppConfig {
     pub window_geometry: String,
     pub view_size: u32,
     pub max_lost_frames: u32,
+    pub teleport_link_distance: f32,
     pub local_search: LocalSearchConfig,
     pub sift: SiftTrackingConfig,
     pub ai: AiTrackingConfig,
@@ -161,6 +163,7 @@ impl Default for AppConfig {
             window_geometry: "400x400+1500+100".to_owned(),
             view_size: 400,
             max_lost_frames: 50,
+            teleport_link_distance: DEFAULT_TELEPORT_LINK_DISTANCE,
             local_search: LocalSearchConfig::default(),
             sift: SiftTrackingConfig::default(),
             ai: AiTrackingConfig::default(),
@@ -180,4 +183,18 @@ pub fn load_existing_config(project_root: &Path) -> Result<AppConfig> {
         .with_context(|| format!("failed to read config file at {}", path.display()))?;
     toml::from_str::<AppConfig>(&raw)
         .with_context(|| format!("failed to parse config file at {}", path.display()))
+}
+
+pub fn save_config(project_root: &Path, config: &AppConfig) -> Result<std::path::PathBuf> {
+    let path = project_root.join(CONFIG_FILE_NAME);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config parent {}", parent.display()))?;
+    }
+
+    let raw =
+        toml::to_string_pretty(config).context("failed to serialize config file as TOML")?;
+    fs::write(&path, raw)
+        .with_context(|| format!("failed to write config file at {}", path.display()))?;
+    Ok(path)
 }
