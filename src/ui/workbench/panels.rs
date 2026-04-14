@@ -3122,7 +3122,11 @@ fn bwiki_map_panel(
                                         }
                                     }
                                 }
+                            });
+                        });
 
+                        window.paint_layer(bounds, |window| {
+                            window.with_content_mask(Some(ContentMask { bounds }), |window| {
                                 if let Some(dataset) = dataset.as_ref() {
                                     let icon_paths = dataset
                                         .types
