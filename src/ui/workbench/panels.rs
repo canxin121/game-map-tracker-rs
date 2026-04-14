@@ -22,10 +22,11 @@ use crate::{
         geometry::WorldPoint, marker::MarkerIconStyle, theme::ThemePreference,
         tracker::TrackingSource,
     },
-    resources::{BWIKI_WORLD_ZOOM, zoom_world_bounds},
-    ui::map_canvas::{
-        bounds_corner_radius, marker_image_bounds, parse_hex_color, route_points, screen_points,
+    resources::{
+        BWIKI_WORLD_ZOOM, raw_coordinate_to_world, tile_coordinate_to_world_origin,
+        zoom_world_bounds,
     },
+    ui::map_canvas::{bounds_corner_radius, parse_hex_color, route_points, screen_points},
 };
 
 use super::{
@@ -3032,6 +3033,11 @@ fn bwiki_map_panel(
 
                                 let tile_zoom = preferred_bwiki_tile_zoom(camera.zoom);
                                 if let Some(range) = zoom_world_bounds(tile_zoom) {
+                                    // BWiki/Leaflet keeps every zoom level anchored to the same
+                                    // z8 tile grid. Coarser tiles extend past the visible content
+                                    // bounds, so both tile lookup and placement must use that
+                                    // shared world origin instead of a per-zoom local origin.
+                                    let world_origin = raw_coordinate_to_world(0, 0);
                                     let world_tile_size = range.world_tile_size() as f32;
                                     let top_left =
                                         camera.screen_to_world(WorldPoint::new(0.0, 0.0));
@@ -3050,42 +3056,44 @@ fn bwiki_map_panel(
                                         .max(bottom_right.y)
                                         .min(map_dimensions.height as f32);
 
-                                    let width_tiles = range.width_tiles() as i32;
-                                    let height_tiles = range.height_tiles() as i32;
                                     let start_col =
-                                        ((min_world_x / world_tile_size).floor() as i32 - 1)
-                                            .clamp(0, width_tiles.saturating_sub(1));
-                                    let end_col = ((max_world_x / world_tile_size).ceil() as i32
-                                        + 1)
-                                    .clamp(0, width_tiles.saturating_sub(1));
+                                        (((min_world_x - world_origin.x) / world_tile_size).floor()
+                                            as i32
+                                            - 1)
+                                        .clamp(range.min_x, range.max_x);
+                                    let end_col =
+                                        (((max_world_x - world_origin.x) / world_tile_size).ceil()
+                                            as i32
+                                            + 1)
+                                        .clamp(range.min_x, range.max_x);
                                     let start_row =
-                                        ((min_world_y / world_tile_size).floor() as i32 - 1)
-                                            .clamp(0, height_tiles.saturating_sub(1));
-                                    let end_row = ((max_world_y / world_tile_size).ceil() as i32
-                                        + 1)
-                                    .clamp(0, height_tiles.saturating_sub(1));
+                                        (((min_world_y - world_origin.y) / world_tile_size).floor()
+                                            as i32
+                                            - 1)
+                                        .clamp(range.min_y, range.max_y);
+                                    let end_row =
+                                        (((max_world_y - world_origin.y) / world_tile_size).ceil()
+                                            as i32
+                                            + 1)
+                                        .clamp(range.min_y, range.max_y);
 
-                                    for local_y in start_row..=end_row {
-                                        for local_x in start_col..=end_col {
-                                            let tile_x = range.min_x + local_x;
-                                            let tile_y = range.min_y + local_y;
-                                            let world_x = local_x as f32 * world_tile_size;
-                                            let world_y = local_y as f32 * world_tile_size;
-                                            let tile_bounds =
-                                                Bounds {
-                                                    origin: point(
-                                                        bounds.origin.x
-                                                            + px(world_x * camera.zoom
-                                                                + camera.offset_x),
-                                                        bounds.origin.y
-                                                            + px(world_y * camera.zoom
-                                                                + camera.offset_y),
-                                                    ),
-                                                    size: size(
-                                                        px(world_tile_size * camera.zoom),
-                                                        px(world_tile_size * camera.zoom),
-                                                    ),
-                                                };
+                                    for tile_y in start_row..=end_row {
+                                        for tile_x in start_col..=end_col {
+                                            let tile_world = tile_coordinate_to_world_origin(
+                                                tile_zoom, tile_x, tile_y,
+                                            )
+                                            .expect("validated BWiki tile origin");
+                                            let tile_screen = camera.world_to_screen(tile_world);
+                                            let tile_bounds = Bounds {
+                                                origin: point(
+                                                    bounds.origin.x + px(tile_screen.x),
+                                                    bounds.origin.y + px(tile_screen.y),
+                                                ),
+                                                size: size(
+                                                    px(world_tile_size * camera.zoom),
+                                                    px(world_tile_size * camera.zoom),
+                                                ),
+                                            };
                                             window.paint_quad(
                                                 fill(tile_bounds, tokens.panel_alt_bg)
                                                     .corner_radii(bounds_corner_radius(
@@ -3144,10 +3152,12 @@ fn bwiki_map_panel(
 
                                         for point_record in points {
                                             let screen = camera.world_to_screen(point_record.world);
-                                            if screen.x < -48.0
-                                                || screen.y < -48.0
-                                                || screen.x > bounds_width + 48.0
-                                                || screen.y > bounds_height + 48.0
+                                            if screen.x < -BWIKI_MARKER_CULL_MARGIN
+                                                || screen.y < -BWIKI_MARKER_CULL_MARGIN
+                                                || screen.x
+                                                    > bounds_width + BWIKI_MARKER_CULL_MARGIN
+                                                || screen.y
+                                                    > bounds_height + BWIKI_MARKER_CULL_MARGIN
                                             {
                                                 continue;
                                             }
@@ -3164,7 +3174,7 @@ fn bwiki_map_panel(
                                                     .use_asset::<ImgResourceLoader>(&resource, cx);
                                                 if let Some(Ok(image)) = image_result.as_ref() {
                                                     let image_bounds =
-                                                        marker_image_bounds(anchor, 18.0);
+                                                        bwiki_marker_image_bounds(anchor);
                                                     let _ = window.paint_image(
                                                         image_bounds,
                                                         0.0.into(),
@@ -3439,6 +3449,22 @@ fn preferred_bwiki_tile_zoom(camera_zoom: f32) -> u8 {
         7
     } else {
         BWIKI_WORLD_ZOOM
+    }
+}
+
+const BWIKI_MARKER_ICON_WIDTH: f32 = 40.0;
+const BWIKI_MARKER_ICON_HEIGHT: f32 = 50.0;
+const BWIKI_MARKER_ICON_ANCHOR_X: f32 = 15.0;
+const BWIKI_MARKER_ICON_ANCHOR_Y: f32 = 42.0;
+const BWIKI_MARKER_CULL_MARGIN: f32 = 64.0;
+
+fn bwiki_marker_image_bounds(anchor: gpui::Point<gpui::Pixels>) -> Bounds<gpui::Pixels> {
+    Bounds {
+        origin: point(
+            anchor.x - px(BWIKI_MARKER_ICON_ANCHOR_X),
+            anchor.y - px(BWIKI_MARKER_ICON_ANCHOR_Y),
+        ),
+        size: size(px(BWIKI_MARKER_ICON_WIDTH), px(BWIKI_MARKER_ICON_HEIGHT)),
     }
 }
 

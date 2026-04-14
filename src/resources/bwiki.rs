@@ -436,14 +436,32 @@ pub fn zoom_world_bounds(zoom: u8) -> Option<BwikiTileZoom> {
 }
 
 #[must_use]
-pub fn raw_coordinate_to_world(raw_lat: i32, raw_lng: i32) -> WorldPoint {
+fn world_origin() -> WorldPoint {
     let world = zoom_world_bounds(BWIKI_WORLD_ZOOM).expect("missing z8 range");
-    let scale = (1u32 << (BWIKI_WORLD_ZOOM - 7)) as f32;
-    let offset_x = (-world.min_x) as f32 * TILE_SIZE as f32;
-    let offset_y = (-world.min_y) as f32 * TILE_SIZE as f32;
     WorldPoint::new(
-        raw_lng as f32 * scale + offset_x,
-        raw_lat as f32 * scale + offset_y,
+        (-world.min_x) as f32 * TILE_SIZE as f32,
+        (-world.min_y) as f32 * TILE_SIZE as f32,
+    )
+}
+
+#[must_use]
+pub fn tile_coordinate_to_world_origin(zoom: u8, x: i32, y: i32) -> Option<WorldPoint> {
+    let range = zoom_world_bounds(zoom)?;
+    let origin = world_origin();
+    let world_tile_size = range.world_tile_size() as f32;
+    Some(WorldPoint::new(
+        x as f32 * world_tile_size + origin.x,
+        y as f32 * world_tile_size + origin.y,
+    ))
+}
+
+#[must_use]
+pub fn raw_coordinate_to_world(raw_lat: i32, raw_lng: i32) -> WorldPoint {
+    let scale = (1u32 << (BWIKI_WORLD_ZOOM - 7)) as f32;
+    let origin = world_origin();
+    WorldPoint::new(
+        raw_lng as f32 * scale + origin.x,
+        raw_lat as f32 * scale + origin.y,
     )
 }
 
@@ -635,8 +653,10 @@ fn fetch_remote_text(url: &str) -> Result<String> {
 fn load_dataset_from_cache(path: &Path) -> Result<BwikiDataset> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read cached BWiki dataset {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse cached BWiki dataset {}", path.display()))
+    let mut dataset = serde_json::from_str::<BwikiDataset>(&raw)
+        .with_context(|| format!("failed to parse cached BWiki dataset {}", path.display()))?;
+    recalculate_dataset_world_points(&mut dataset);
+    Ok(dataset)
 }
 
 fn cache_is_stale(path: &Path, ttl: Duration) -> bool {
@@ -664,7 +684,15 @@ fn tile_cache_path(cache: &BwikiCachePaths, zoom: u8, x: i32, y: i32) -> PathBuf
 }
 
 fn stitched_map_path(cache: &BwikiCachePaths, zoom: u8) -> PathBuf {
-    cache.stitched_dir.join(format!("z{zoom}.png"))
+    let suffix = zoom_world_bounds(zoom)
+        .map(|range| {
+            format!(
+                "z{zoom}_x{}-{}_y{}-{}.png",
+                range.min_x, range.max_x, range.min_y, range.max_y
+            )
+        })
+        .unwrap_or_else(|| format!("z{zoom}.png"));
+    cache.stitched_dir.join(suffix)
 }
 
 fn icon_cache_path(cache: &BwikiCachePaths, mark_type: u32, icon_url: &str) -> PathBuf {
@@ -826,4 +854,65 @@ fn unix_now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
+}
+
+fn recalculate_dataset_world_points(dataset: &mut BwikiDataset) {
+    for points in dataset.points_by_type.values_mut() {
+        for point in points {
+            point.world = raw_coordinate_to_world(point.raw_lat, point.raw_lng);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BWIKI_WORLD_ZOOM, default_map_dimensions, raw_coordinate_to_world,
+        tile_coordinate_to_world_origin,
+    };
+
+    #[test]
+    fn raw_coordinate_to_world_matches_leaflet_simple_projection() {
+        let world = raw_coordinate_to_world(1387, -1457);
+        assert_eq!(world.x, 3230.0);
+        assert_eq!(world.y, 7382.0);
+    }
+
+    #[test]
+    fn origin_matches_current_stitched_tile_bounds() {
+        let world = raw_coordinate_to_world(0, 0);
+        assert_eq!(world.x, 6144.0);
+        assert_eq!(world.y, 4608.0);
+    }
+
+    #[test]
+    fn coarse_tiles_stay_anchored_to_same_world_origin() {
+        let world = tile_coordinate_to_world_origin(4, -2, -2).expect("z4 tile origin");
+        assert_eq!(world.x, -2048.0);
+        assert_eq!(world.y, -3584.0);
+
+        let z8_top_left =
+            tile_coordinate_to_world_origin(BWIKI_WORLD_ZOOM, -24, -18).expect("z8 tile origin");
+        assert_eq!(z8_top_left.x, 0.0);
+        assert_eq!(z8_top_left.y, 0.0);
+    }
+
+    #[test]
+    fn point_stays_in_same_leaflet_tile_cell_as_browser_projection() {
+        let point = raw_coordinate_to_world(1387, -1457);
+        let tile =
+            tile_coordinate_to_world_origin(BWIKI_WORLD_ZOOM, -12, 10).expect("z8 tile origin");
+        assert_eq!(point.x - tile.x, 158.0);
+        assert_eq!(point.y - tile.y, 214.0);
+    }
+
+    #[test]
+    fn known_dataset_bounds_stay_inside_world() {
+        let dims = default_map_dimensions();
+        for (lat, lng) in [(-2132, -3015), (-2132, 2817), (2061, -3015), (2061, 2817)] {
+            let world = raw_coordinate_to_world(lat, lng);
+            assert!(world.x >= 0.0 && world.x <= dims.width as f32);
+            assert!(world.y >= 0.0 && world.y <= dims.height as f32);
+        }
+    }
 }
