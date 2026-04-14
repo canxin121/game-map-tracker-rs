@@ -2465,220 +2465,31 @@ fn config_section(
         )
 }
 
+type MapOverlayPainter = fn(
+    entity: &gpui::Entity<TrackerWorkbench>,
+    window: &mut gpui::Window,
+    bounds: Bounds<gpui::Pixels>,
+    cx: &mut gpui::App,
+    bounds_width: f32,
+    bounds_height: f32,
+    camera: crate::domain::geometry::MapCamera,
+    tokens: WorkbenchThemeTokens,
+);
+
 fn map_panel(
     this: &TrackerWorkbench,
     cx: &mut Context<TrackerWorkbench>,
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
-    let entity = cx.entity();
-    let map_dimensions = this.workspace.report.map_dimensions;
-
-    div()
-        .flex_1()
-        .min_h(px(0.0))
-        .flex()
-        .flex_col()
-        .overflow_hidden()
-        .rounded_xl()
-        .bg(tokens.panel_deep_bg)
-        .border_1()
-        .border_color(tokens.border)
-        .p_3()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .mb_3()
-                .child(section_title("路线地图"))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(tokens.text_muted)
-                        .child("滚轮缩放，左键拖拽；首次使用会懒加载并缓存 BWiki 拼接底图"),
-                ),
-        )
-        .child(
-            div().flex_1().overflow_hidden().child(
-                canvas(
-                    move |_, _, _| (),
-                    move |bounds, _, window, cx| {
-                        let bounds_width = f32::from(bounds.size.width);
-                        let bounds_height = f32::from(bounds.size.height);
-                        sync_map_canvas_viewport(
-                            &entity,
-                            cx,
-                            MapCanvasKind::Tracker,
-                            bounds_width,
-                            bounds_height,
-                            map_dimensions,
-                        );
-
-                        let (
-                            camera,
-                            active_group,
-                            trail,
-                            preview_position,
-                            point_visuals,
-                            selected_group_id,
-                            selected_point_id,
-                            logic_map_path,
-                        ) = {
-                            let this = entity.read(cx);
-                            (
-                                this.map_camera(MapCanvasKind::Tracker),
-                                this.active_group().cloned(),
-                                this.trail.clone(),
-                                this.preview_position.clone(),
-                                this.active_group_points(),
-                                this.selected_group_id.clone(),
-                                this.selected_point_id.clone(),
-                                this.bwiki_resources
-                                    .ensure_stitched_map_path(BWIKI_WORLD_ZOOM),
-                            )
-                        };
-
-                        paint_stitched_map_layer(
-                            window,
-                            bounds,
-                            cx,
-                            camera,
-                            map_dimensions,
-                            logic_map_path.as_ref(),
-                            tokens.map_canvas_backdrop,
-                        );
-
-                        window.paint_layer(bounds, |window| {
-                            window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                                if trail.len() > 1 {
-                                    let trail_points = screen_points(camera, &trail);
-                                    let mut builder = PathBuilder::stroke(px(2.0));
-                                    let first = trail_points[0];
-                                    builder.move_to(point(
-                                        bounds.origin.x + px(first.x),
-                                        bounds.origin.y + px(first.y),
-                                    ));
-                                    for screen_point in trail_points.iter().skip(1) {
-                                        builder.line_to(point(
-                                            bounds.origin.x + px(screen_point.x),
-                                            bounds.origin.y + px(screen_point.y),
-                                        ));
-                                    }
-                                    if let Ok(path) = builder.build() {
-                                        window.paint_path(path, tokens.trail_path);
-                                    }
-                                }
-
-                                if let Some(group) = active_group.as_ref() {
-                                    let route_world = route_points(group);
-                                    if route_world.len() > 1 {
-                                        let route_screen = screen_points(camera, &route_world);
-                                        let route_canvas = route_screen
-                                            .iter()
-                                            .map(|screen_point| {
-                                                point(
-                                                    bounds.origin.x + px(screen_point.x),
-                                                    bounds.origin.y + px(screen_point.y),
-                                                )
-                                            })
-                                            .collect::<Vec<_>>();
-                                        let mut builder = PathBuilder::stroke(px(3.0));
-                                        builder.move_to(route_canvas[0]);
-                                        for canvas_point in route_canvas.iter().skip(1) {
-                                            builder.line_to(*canvas_point);
-                                        }
-                                        if group.looped {
-                                            builder.line_to(route_canvas[0]);
-                                        }
-                                        if let Ok(path) = builder.build() {
-                                            window.paint_path(path, tokens.route_path);
-                                        }
-
-                                        for segment in route_canvas.windows(2) {
-                                            paint_route_arrow(
-                                                window,
-                                                segment[0],
-                                                segment[1],
-                                                tokens.route_path,
-                                            );
-                                        }
-                                        if group.looped {
-                                            paint_route_arrow(
-                                                window,
-                                                *route_canvas.last().unwrap_or(&route_canvas[0]),
-                                                route_canvas[0],
-                                                tokens.route_path,
-                                            );
-                                        }
-                                    }
-                                }
-
-                                for marker in point_visuals {
-                                    let screen = camera.world_to_screen(marker.world);
-                                    let highlighted = selected_group_id.as_ref()
-                                        == Some(&marker.group_id)
-                                        && selected_point_id.as_ref() == Some(&marker.point_id);
-                                    let anchor = point(
-                                        bounds.origin.x + px(screen.x),
-                                        bounds.origin.y + px(screen.y),
-                                    );
-                                    let accent = parse_hex_color(&marker.style.color_hex, 0x4ecdc4);
-                                    paint_route_marker(
-                                        window,
-                                        anchor,
-                                        marker.style.size_px,
-                                        accent,
-                                        highlighted,
-                                        tokens,
-                                    );
-                                }
-
-                                if let Some(position) =
-                                    preview_position.as_ref().filter(|position| {
-                                        position.source != TrackingSource::ManualPreview
-                                    })
-                                {
-                                    let screen = camera.world_to_screen(position.world);
-                                    let marker_color = if position.inertial {
-                                        tokens.preview_inertial
-                                    } else {
-                                        tokens.preview_live
-                                    };
-                                    let outer = Bounds {
-                                        origin: point(
-                                            bounds.origin.x + px(screen.x - 9.0),
-                                            bounds.origin.y + px(screen.y - 9.0),
-                                        ),
-                                        size: size(px(18.0), px(18.0)),
-                                    };
-                                    let inner = Bounds {
-                                        origin: point(
-                                            bounds.origin.x + px(screen.x - 6.0),
-                                            bounds.origin.y + px(screen.y - 6.0),
-                                        ),
-                                        size: size(px(12.0), px(12.0)),
-                                    };
-                                    window.paint_quad(
-                                        fill(outer, tokens.preview_ring).corner_radii(px(9.0)),
-                                    );
-                                    window.paint_quad(
-                                        fill(inner, marker_color).corner_radii(px(6.0)),
-                                    );
-                                }
-                            });
-                        });
-
-                        install_map_canvas_navigation_handlers(
-                            window,
-                            entity.clone(),
-                            bounds,
-                            MapCanvasKind::Tracker,
-                        );
-                    },
-                )
-                .size_full(),
-            ),
-        )
+    map_canvas_panel(
+        cx.entity(),
+        tokens,
+        "路线地图",
+        "滚轮缩放，左键拖拽；首次使用会懒加载并缓存 BWiki 拼接底图",
+        MapCanvasKind::Tracker,
+        this.workspace.report.map_dimensions,
+        paint_tracker_map_overlay,
+    )
 }
 
 fn bwiki_types_sidebar(
@@ -2869,175 +2680,15 @@ fn bwiki_map_panel(
     cx: &mut Context<TrackerWorkbench>,
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
-    let entity = cx.entity();
-    let map_dimensions = this.workspace.report.map_dimensions;
-
-    div()
-        .flex_1()
-        .min_h(px(0.0))
-        .flex()
-        .flex_col()
-        .overflow_hidden()
-        .rounded_xl()
-        .bg(tokens.panel_deep_bg)
-        .border_1()
-        .border_color(tokens.border)
-        .p_3()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .mb_3()
-                .child(section_title("BWiki 大地图"))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(tokens.text_muted)
-                        .child("滚轮缩放，左键拖拽；启动时会确保整张 BWiki 拼接地图已缓存"),
-                ),
-        )
-        .child(
-            div().flex_1().overflow_hidden().child(
-                canvas(
-                    move |_, _, _| (),
-                    move |bounds, _, window, cx| {
-                        let bounds_width = f32::from(bounds.size.width);
-                        let bounds_height = f32::from(bounds.size.height);
-                        sync_map_canvas_viewport(
-                            &entity,
-                            cx,
-                            MapCanvasKind::Bwiki,
-                            bounds_width,
-                            bounds_height,
-                            map_dimensions,
-                        );
-
-                        let (camera, dataset, bwiki_resources, visible_mark_types, last_error) = {
-                            let this = entity.read(cx);
-                            (
-                                this.map_camera(MapCanvasKind::Bwiki),
-                                this.bwiki_resources.dataset_snapshot(),
-                                this.bwiki_resources.clone(),
-                                this.bwiki_visible_mark_types.clone(),
-                                this.bwiki_resources.last_error(),
-                            )
-                        };
-                        let stitched_map_path =
-                            bwiki_resources.ensure_stitched_map_path(BWIKI_WORLD_ZOOM);
-
-                        paint_stitched_map_layer(
-                            window,
-                            bounds,
-                            cx,
-                            camera,
-                            map_dimensions,
-                            stitched_map_path.as_ref(),
-                            tokens.map_canvas_backdrop,
-                        );
-
-                        window.paint_layer(bounds, |window| {
-                            window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                                if let Some(dataset) = dataset.as_ref() {
-                                    let render_full_icons =
-                                        camera.zoom >= BWIKI_ICON_RENDER_MIN_ZOOM;
-                                    let visible_definitions = dataset
-                                        .types
-                                        .iter()
-                                        .filter(|item| visible_mark_types.contains(&item.mark_type))
-                                        .collect::<Vec<_>>();
-                                    let icon_images = render_full_icons.then(|| {
-                                        visible_definitions
-                                            .iter()
-                                            .map(|definition| {
-                                                (
-                                                    definition.mark_type,
-                                                    bwiki_resources
-                                                        .ensure_icon_path(
-                                                            definition.mark_type,
-                                                            &definition.icon_url,
-                                                        )
-                                                        .and_then(|path| {
-                                                            let resource =
-                                                                gpui::Resource::from(path);
-                                                            window
-                                                                .use_asset::<ImgResourceLoader>(
-                                                                    &resource, cx,
-                                                                )
-                                                                .and_then(|result| result.ok())
-                                                        }),
-                                                )
-                                            })
-                                            .collect::<BTreeMap<_, _>>()
-                                    });
-
-                                    for definition in visible_definitions {
-                                        let Some(points) =
-                                            dataset.points_by_type.get(&definition.mark_type)
-                                        else {
-                                            continue;
-                                        };
-
-                                        for point_record in points {
-                                            let screen = camera.world_to_screen(point_record.world);
-                                            if screen.x < -BWIKI_MARKER_CULL_MARGIN
-                                                || screen.y < -BWIKI_MARKER_CULL_MARGIN
-                                                || screen.x
-                                                    > bounds_width + BWIKI_MARKER_CULL_MARGIN
-                                                || screen.y
-                                                    > bounds_height + BWIKI_MARKER_CULL_MARGIN
-                                            {
-                                                continue;
-                                            }
-
-                                            let anchor = point(
-                                                bounds.origin.x + px(screen.x),
-                                                bounds.origin.y + px(screen.y),
-                                            );
-                                            if let Some(Some(image)) =
-                                                icon_images.as_ref().and_then(|images| {
-                                                    images.get(&definition.mark_type)
-                                                })
-                                            {
-                                                let image_bounds =
-                                                    bwiki_marker_image_bounds(anchor);
-                                                let _ = window.paint_image(
-                                                    image_bounds,
-                                                    0.0.into(),
-                                                    image.clone(),
-                                                    0,
-                                                    false,
-                                                );
-                                                continue;
-                                            }
-
-                                            paint_bwiki_placeholder_marker(
-                                                window,
-                                                anchor,
-                                                definition.mark_type,
-                                                tokens,
-                                            );
-                                        }
-                                    }
-                                }
-                            });
-                        });
-
-                        install_map_canvas_navigation_handlers(
-                            window,
-                            entity.clone(),
-                            bounds,
-                            MapCanvasKind::Bwiki,
-                        );
-
-                        if dataset.is_none() || last_error.is_some() {
-                            _ = window;
-                        }
-                    },
-                )
-                .size_full(),
-            ),
-        )
+    map_canvas_panel(
+        cx.entity(),
+        tokens,
+        "BWiki 大地图",
+        "滚轮缩放，左键拖拽；启动时会确保整张 BWiki 拼接地图已缓存",
+        MapCanvasKind::Bwiki,
+        this.workspace.report.map_dimensions,
+        paint_bwiki_map_overlay,
+    )
 }
 
 fn debug_image_card(
@@ -3150,6 +2801,328 @@ fn debug_field_card(
                 )
                 .child(div().text_sm().text_color(tokens.app_fg).child(field.value)),
         )
+}
+
+fn map_canvas_panel(
+    entity: gpui::Entity<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+    title: &'static str,
+    subtitle: &'static str,
+    map_kind: MapCanvasKind,
+    map_dimensions: crate::domain::geometry::MapDimensions,
+    overlay_painter: MapOverlayPainter,
+) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_h(px(0.0))
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .rounded_xl()
+        .bg(tokens.panel_deep_bg)
+        .border_1()
+        .border_color(tokens.border)
+        .p_3()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .mb_3()
+                .child(section_title(title))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(tokens.text_muted)
+                        .child(subtitle),
+                ),
+        )
+        .child(
+            div().flex_1().overflow_hidden().child(
+                canvas(
+                    move |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        let bounds_width = f32::from(bounds.size.width);
+                        let bounds_height = f32::from(bounds.size.height);
+                        sync_map_canvas_viewport(
+                            &entity,
+                            cx,
+                            map_kind,
+                            bounds_width,
+                            bounds_height,
+                            map_dimensions,
+                        );
+
+                        let (camera, bwiki_resources) = {
+                            let this = entity.read(cx);
+                            (this.map_camera(map_kind), this.bwiki_resources.clone())
+                        };
+                        let stitched_map_path =
+                            bwiki_resources.ensure_stitched_map_path(BWIKI_WORLD_ZOOM);
+
+                        paint_stitched_map_layer(
+                            window,
+                            bounds,
+                            cx,
+                            camera,
+                            map_dimensions,
+                            stitched_map_path.as_ref(),
+                            tokens.map_canvas_backdrop,
+                        );
+                        overlay_painter(
+                            &entity,
+                            window,
+                            bounds,
+                            cx,
+                            bounds_width,
+                            bounds_height,
+                            camera,
+                            tokens,
+                        );
+                        install_map_canvas_navigation_handlers(
+                            window,
+                            entity.clone(),
+                            bounds,
+                            map_kind,
+                        );
+                    },
+                )
+                .size_full(),
+            ),
+        )
+}
+
+fn paint_tracker_map_overlay(
+    entity: &gpui::Entity<TrackerWorkbench>,
+    window: &mut gpui::Window,
+    bounds: Bounds<gpui::Pixels>,
+    cx: &mut gpui::App,
+    _: f32,
+    _: f32,
+    camera: crate::domain::geometry::MapCamera,
+    tokens: WorkbenchThemeTokens,
+) {
+    let (
+        active_group,
+        trail,
+        preview_position,
+        point_visuals,
+        selected_group_id,
+        selected_point_id,
+    ) = {
+        let this = entity.read(cx);
+        (
+            this.active_group().cloned(),
+            this.trail.clone(),
+            this.preview_position.clone(),
+            this.active_group_points(),
+            this.selected_group_id.clone(),
+            this.selected_point_id.clone(),
+        )
+    };
+
+    window.paint_layer(bounds, |window| {
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if trail.len() > 1 {
+                let trail_points = screen_points(camera, &trail);
+                let mut builder = PathBuilder::stroke(px(2.0));
+                let first = trail_points[0];
+                builder.move_to(point(
+                    bounds.origin.x + px(first.x),
+                    bounds.origin.y + px(first.y),
+                ));
+                for screen_point in trail_points.iter().skip(1) {
+                    builder.line_to(point(
+                        bounds.origin.x + px(screen_point.x),
+                        bounds.origin.y + px(screen_point.y),
+                    ));
+                }
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, tokens.trail_path);
+                }
+            }
+
+            if let Some(group) = active_group.as_ref() {
+                let route_world = route_points(group);
+                if route_world.len() > 1 {
+                    let route_screen = screen_points(camera, &route_world);
+                    let route_canvas = route_screen
+                        .iter()
+                        .map(|screen_point| {
+                            point(
+                                bounds.origin.x + px(screen_point.x),
+                                bounds.origin.y + px(screen_point.y),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let mut builder = PathBuilder::stroke(px(3.0));
+                    builder.move_to(route_canvas[0]);
+                    for canvas_point in route_canvas.iter().skip(1) {
+                        builder.line_to(*canvas_point);
+                    }
+                    if group.looped {
+                        builder.line_to(route_canvas[0]);
+                    }
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, tokens.route_path);
+                    }
+
+                    for segment in route_canvas.windows(2) {
+                        paint_route_arrow(window, segment[0], segment[1], tokens.route_path);
+                    }
+                    if group.looped {
+                        paint_route_arrow(
+                            window,
+                            *route_canvas.last().unwrap_or(&route_canvas[0]),
+                            route_canvas[0],
+                            tokens.route_path,
+                        );
+                    }
+                }
+            }
+
+            for marker in point_visuals {
+                let screen = camera.world_to_screen(marker.world);
+                let highlighted = selected_group_id.as_ref() == Some(&marker.group_id)
+                    && selected_point_id.as_ref() == Some(&marker.point_id);
+                let anchor = point(
+                    bounds.origin.x + px(screen.x),
+                    bounds.origin.y + px(screen.y),
+                );
+                let accent = parse_hex_color(&marker.style.color_hex, 0x4ecdc4);
+                paint_route_marker(
+                    window,
+                    anchor,
+                    marker.style.size_px,
+                    accent,
+                    highlighted,
+                    tokens,
+                );
+            }
+
+            if let Some(position) = preview_position
+                .as_ref()
+                .filter(|position| position.source != TrackingSource::ManualPreview)
+            {
+                let screen = camera.world_to_screen(position.world);
+                let marker_color = if position.inertial {
+                    tokens.preview_inertial
+                } else {
+                    tokens.preview_live
+                };
+                let outer = Bounds {
+                    origin: point(
+                        bounds.origin.x + px(screen.x - 9.0),
+                        bounds.origin.y + px(screen.y - 9.0),
+                    ),
+                    size: size(px(18.0), px(18.0)),
+                };
+                let inner = Bounds {
+                    origin: point(
+                        bounds.origin.x + px(screen.x - 6.0),
+                        bounds.origin.y + px(screen.y - 6.0),
+                    ),
+                    size: size(px(12.0), px(12.0)),
+                };
+                window.paint_quad(fill(outer, tokens.preview_ring).corner_radii(px(9.0)));
+                window.paint_quad(fill(inner, marker_color).corner_radii(px(6.0)));
+            }
+        });
+    });
+}
+
+fn paint_bwiki_map_overlay(
+    entity: &gpui::Entity<TrackerWorkbench>,
+    window: &mut gpui::Window,
+    bounds: Bounds<gpui::Pixels>,
+    cx: &mut gpui::App,
+    bounds_width: f32,
+    bounds_height: f32,
+    camera: crate::domain::geometry::MapCamera,
+    tokens: WorkbenchThemeTokens,
+) {
+    let (dataset, bwiki_resources, visible_mark_types) = {
+        let this = entity.read(cx);
+        (
+            this.bwiki_resources.dataset_snapshot(),
+            this.bwiki_resources.clone(),
+            this.bwiki_visible_mark_types.clone(),
+        )
+    };
+
+    window.paint_layer(bounds, |window| {
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Some(dataset) = dataset.as_ref() {
+                let render_full_icons = camera.zoom >= BWIKI_ICON_RENDER_MIN_ZOOM;
+                let visible_definitions = dataset
+                    .types
+                    .iter()
+                    .filter(|item| visible_mark_types.contains(&item.mark_type))
+                    .collect::<Vec<_>>();
+                let icon_images = render_full_icons.then(|| {
+                    visible_definitions
+                        .iter()
+                        .map(|definition| {
+                            (
+                                definition.mark_type,
+                                bwiki_resources
+                                    .ensure_icon_path(definition.mark_type, &definition.icon_url)
+                                    .and_then(|path| {
+                                        let resource = gpui::Resource::from(path);
+                                        window
+                                            .use_asset::<ImgResourceLoader>(&resource, cx)
+                                            .and_then(|result| result.ok())
+                                    }),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                });
+
+                for definition in visible_definitions {
+                    let Some(points) = dataset.points_by_type.get(&definition.mark_type) else {
+                        continue;
+                    };
+
+                    for point_record in points {
+                        let screen = camera.world_to_screen(point_record.world);
+                        if screen.x < -BWIKI_MARKER_CULL_MARGIN
+                            || screen.y < -BWIKI_MARKER_CULL_MARGIN
+                            || screen.x > bounds_width + BWIKI_MARKER_CULL_MARGIN
+                            || screen.y > bounds_height + BWIKI_MARKER_CULL_MARGIN
+                        {
+                            continue;
+                        }
+
+                        let anchor = point(
+                            bounds.origin.x + px(screen.x),
+                            bounds.origin.y + px(screen.y),
+                        );
+                        if let Some(Some(image)) = icon_images
+                            .as_ref()
+                            .and_then(|images| images.get(&definition.mark_type))
+                        {
+                            let image_bounds = bwiki_marker_image_bounds(anchor);
+                            let _ = window.paint_image(
+                                image_bounds,
+                                0.0.into(),
+                                image.clone(),
+                                0,
+                                false,
+                            );
+                            continue;
+                        }
+
+                        paint_bwiki_placeholder_marker(
+                            window,
+                            anchor,
+                            definition.mark_type,
+                            tokens,
+                        );
+                    }
+                }
+            }
+        });
+    });
 }
 
 fn paint_stitched_map_layer(
