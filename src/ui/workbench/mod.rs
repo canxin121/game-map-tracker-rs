@@ -56,6 +56,12 @@ enum PagedListKind {
     Points,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MapCanvasKind {
+    Tracker,
+    Bwiki,
+}
+
 fn normalized_list_query(
     input: &gpui::Entity<gpui_component::input::InputState>,
     cx: &mut Context<TrackerWorkbench>,
@@ -572,6 +578,89 @@ impl TrackerWorkbench {
             self.workspace.report.map_dimensions.width as f32 * 0.5,
             self.workspace.report.map_dimensions.height as f32 * 0.5,
         )
+    }
+
+    fn map_view(&self, map_kind: MapCanvasKind) -> &crate::ui::map_canvas::MapViewportState {
+        match map_kind {
+            MapCanvasKind::Tracker => &self.tracker_map_view,
+            MapCanvasKind::Bwiki => &self.bwiki_map_view,
+        }
+    }
+
+    fn map_view_mut(
+        &mut self,
+        map_kind: MapCanvasKind,
+    ) -> &mut crate::ui::map_canvas::MapViewportState {
+        match map_kind {
+            MapCanvasKind::Tracker => &mut self.tracker_map_view,
+            MapCanvasKind::Bwiki => &mut self.bwiki_map_view,
+        }
+    }
+
+    pub(super) fn map_camera(&self, map_kind: MapCanvasKind) -> crate::domain::geometry::MapCamera {
+        self.map_view(map_kind).camera
+    }
+
+    pub(super) fn sync_map_canvas_view(
+        &mut self,
+        map_kind: MapCanvasKind,
+        width: f32,
+        height: f32,
+        map_dimensions: crate::domain::geometry::MapDimensions,
+    ) -> bool {
+        let active_group = match map_kind {
+            MapCanvasKind::Tracker => self.active_group().cloned(),
+            MapCanvasKind::Bwiki => None,
+        };
+        let map_view = self.map_view_mut(map_kind);
+        map_view.update_viewport(width, height);
+        let needs_fit = map_view.needs_fit;
+        map_view.fit_to_route_or_map(active_group.as_ref(), map_dimensions, 24.0);
+        let centered = map_view.apply_pending_center();
+        needs_fit || centered
+    }
+
+    pub(super) fn begin_map_drag(&mut self, map_kind: MapCanvasKind, screen_x: f32, screen_y: f32) {
+        let map_view = self.map_view_mut(map_kind);
+        map_view.dragging_from = Some(WorldPoint::new(screen_x, screen_y));
+        map_view.reset_interaction_redraw();
+    }
+
+    pub(super) fn update_map_drag(
+        &mut self,
+        map_kind: MapCanvasKind,
+        screen_x: f32,
+        screen_y: f32,
+        min_interval: Duration,
+    ) -> bool {
+        let map_view = self.map_view_mut(map_kind);
+        let Some(from) = map_view.dragging_from.take() else {
+            return false;
+        };
+        let dx = screen_x - from.x;
+        let dy = screen_y - from.y;
+        map_view.camera.pan_by(dx, dy);
+        map_view.dragging_from = Some(WorldPoint::new(screen_x, screen_y));
+        map_view.should_redraw_interaction(min_interval)
+    }
+
+    pub(super) fn end_map_drag(&mut self, map_kind: MapCanvasKind) -> bool {
+        let map_view = self.map_view_mut(map_kind);
+        let dragged = map_view.dragging_from.take().is_some();
+        map_view.reset_interaction_redraw();
+        dragged
+    }
+
+    pub(super) fn zoom_map_canvas(
+        &mut self,
+        map_kind: MapCanvasKind,
+        anchor_x: f32,
+        anchor_y: f32,
+        delta: f32,
+    ) {
+        let map_view = self.map_view_mut(map_kind);
+        map_view.reset_interaction_redraw();
+        map_view.camera.zoom_at(anchor_x, anchor_y, delta);
     }
 
     fn select_map_page(&mut self, page: MapPage) {

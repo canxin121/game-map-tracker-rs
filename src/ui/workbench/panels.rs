@@ -24,7 +24,7 @@ use crate::{
 };
 
 use super::{
-    TrackerWorkbench,
+    MapCanvasKind, TrackerWorkbench,
     forms::read_input_value,
     page::{MapPage, MarkersPage, SettingsPage, WorkbenchPage},
     theme::WorkbenchThemeTokens,
@@ -2505,21 +2505,14 @@ fn map_panel(
                     move |bounds, _, window, cx| {
                         let bounds_width = f32::from(bounds.size.width);
                         let bounds_height = f32::from(bounds.size.height);
-                        _ = entity.update(cx, |this, cx| {
-                            this.tracker_map_view
-                                .update_viewport(bounds_width, bounds_height);
-                            let needs_fit = this.tracker_map_view.needs_fit;
-                            let active_group = this.active_group().cloned();
-                            this.tracker_map_view.fit_to_route_or_map(
-                                active_group.as_ref(),
-                                map_dimensions,
-                                24.0,
-                            );
-                            let centered = this.tracker_map_view.apply_pending_center();
-                            if needs_fit || centered {
-                                cx.notify();
-                            }
-                        });
+                        sync_map_canvas_viewport(
+                            &entity,
+                            cx,
+                            MapCanvasKind::Tracker,
+                            bounds_width,
+                            bounds_height,
+                            map_dimensions,
+                        );
 
                         let (
                             camera,
@@ -2533,7 +2526,7 @@ fn map_panel(
                         ) = {
                             let this = entity.read(cx);
                             (
-                                this.tracker_map_view.camera,
+                                this.map_camera(MapCanvasKind::Tracker),
                                 this.active_group().cloned(),
                                 this.trail.clone(),
                                 this.preview_position.clone(),
@@ -2675,90 +2668,12 @@ fn map_panel(
                             });
                         });
 
-                        window.on_mouse_event({
-                            let entity = entity.clone();
-                            move |event: &MouseDownEvent, _, _, cx| {
-                                if event.button != MouseButton::Left
-                                    || !bounds.contains(&event.position)
-                                {
-                                    return;
-                                }
-
-                                _ = entity.update(cx, |this, _| {
-                                    this.tracker_map_view.dragging_from =
-                                        Some(crate::domain::geometry::WorldPoint::new(
-                                            f32::from(event.position.x),
-                                            f32::from(event.position.y),
-                                        ));
-                                    this.tracker_map_view.reset_interaction_redraw();
-                                });
-                            }
-                        });
-                        window.on_mouse_event({
-                            let entity = entity.clone();
-                            move |event: &MouseMoveEvent, _, _, cx| {
-                                _ = entity.update(cx, |this, cx| {
-                                    let Some(from) = this.tracker_map_view.dragging_from.take()
-                                    else {
-                                        return;
-                                    };
-                                    let dx = f32::from(event.position.x) - from.x;
-                                    let dy = f32::from(event.position.y) - from.y;
-                                    this.tracker_map_view.camera.offset_x += dx;
-                                    this.tracker_map_view.camera.offset_y += dy;
-                                    this.tracker_map_view.dragging_from =
-                                        Some(crate::domain::geometry::WorldPoint::new(
-                                            f32::from(event.position.x),
-                                            f32::from(event.position.y),
-                                        ));
-                                    if this
-                                        .tracker_map_view
-                                        .should_redraw_interaction(MAP_INTERACTION_FRAME_INTERVAL)
-                                    {
-                                        cx.notify();
-                                    }
-                                });
-                            }
-                        });
-                        window.on_mouse_event({
-                            let entity = entity.clone();
-                            move |_: &MouseUpEvent, _, _, cx| {
-                                _ = entity.update(cx, |this, cx| {
-                                    let dragged =
-                                        this.tracker_map_view.dragging_from.take().is_some();
-                                    this.tracker_map_view.reset_interaction_redraw();
-                                    if dragged {
-                                        cx.notify();
-                                    }
-                                });
-                            }
-                        });
-                        window.on_mouse_event({
-                            let entity = entity.clone();
-                            move |event: &ScrollWheelEvent, _, _, cx| {
-                                if !bounds.contains(&event.position) {
-                                    return;
-                                }
-
-                                let delta = match event.delta {
-                                    ScrollDelta::Pixels(delta) => {
-                                        (f32::from(delta.y) / 320.0).clamp(-0.35, 0.35)
-                                    }
-                                    ScrollDelta::Lines(delta) => (delta.y / 8.0).clamp(-0.35, 0.35),
-                                };
-                                let anchor_x =
-                                    f32::from(event.position.x) - f32::from(bounds.origin.x);
-                                let anchor_y =
-                                    f32::from(event.position.y) - f32::from(bounds.origin.y);
-                                _ = entity.update(cx, |this, cx| {
-                                    this.tracker_map_view.reset_interaction_redraw();
-                                    this.tracker_map_view
-                                        .camera
-                                        .zoom_at(anchor_x, anchor_y, delta);
-                                    cx.notify();
-                                });
-                            }
-                        });
+                        install_map_canvas_navigation_handlers(
+                            window,
+                            entity.clone(),
+                            bounds,
+                            MapCanvasKind::Tracker,
+                        );
                     },
                 )
                 .size_full(),
@@ -2989,22 +2904,19 @@ fn bwiki_map_panel(
                     move |bounds, _, window, cx| {
                         let bounds_width = f32::from(bounds.size.width);
                         let bounds_height = f32::from(bounds.size.height);
-                        _ = entity.update(cx, |this, cx| {
-                            this.bwiki_map_view
-                                .update_viewport(bounds_width, bounds_height);
-                            let needs_fit = this.bwiki_map_view.needs_fit;
-                            this.bwiki_map_view
-                                .fit_to_route_or_map(None, map_dimensions, 24.0);
-                            let centered = this.bwiki_map_view.apply_pending_center();
-                            if needs_fit || centered {
-                                cx.notify();
-                            }
-                        });
+                        sync_map_canvas_viewport(
+                            &entity,
+                            cx,
+                            MapCanvasKind::Bwiki,
+                            bounds_width,
+                            bounds_height,
+                            map_dimensions,
+                        );
 
                         let (camera, dataset, bwiki_resources, visible_mark_types, last_error) = {
                             let this = entity.read(cx);
                             (
-                                this.bwiki_map_view.camera,
+                                this.map_camera(MapCanvasKind::Bwiki),
                                 this.bwiki_resources.dataset_snapshot(),
                                 this.bwiki_resources.clone(),
                                 this.bwiki_visible_mark_types.clone(),
@@ -3111,89 +3023,12 @@ fn bwiki_map_panel(
                             });
                         });
 
-                        window.on_mouse_event({
-                            let entity = entity.clone();
-                            move |event: &MouseDownEvent, _, _, cx| {
-                                if event.button != MouseButton::Left
-                                    || !bounds.contains(&event.position)
-                                {
-                                    return;
-                                }
-
-                                _ = entity.update(cx, |this, _| {
-                                    this.bwiki_map_view.dragging_from =
-                                        Some(crate::domain::geometry::WorldPoint::new(
-                                            f32::from(event.position.x),
-                                            f32::from(event.position.y),
-                                        ));
-                                    this.bwiki_map_view.reset_interaction_redraw();
-                                });
-                            }
-                        });
-                        window.on_mouse_event({
-                            let entity = entity.clone();
-                            move |event: &MouseMoveEvent, _, _, cx| {
-                                _ = entity.update(cx, |this, cx| {
-                                    let Some(from) = this.bwiki_map_view.dragging_from.take()
-                                    else {
-                                        return;
-                                    };
-                                    let dx = f32::from(event.position.x) - from.x;
-                                    let dy = f32::from(event.position.y) - from.y;
-                                    this.bwiki_map_view.camera.pan_by(dx, dy);
-                                    this.bwiki_map_view.dragging_from =
-                                        Some(crate::domain::geometry::WorldPoint::new(
-                                            f32::from(event.position.x),
-                                            f32::from(event.position.y),
-                                        ));
-                                    if this
-                                        .bwiki_map_view
-                                        .should_redraw_interaction(MAP_INTERACTION_FRAME_INTERVAL)
-                                    {
-                                        cx.notify();
-                                    }
-                                });
-                            }
-                        });
-                        window.on_mouse_event({
-                            let entity = entity.clone();
-                            move |_: &MouseUpEvent, _, _, cx| {
-                                _ = entity.update(cx, |this, cx| {
-                                    let dragged =
-                                        this.bwiki_map_view.dragging_from.take().is_some();
-                                    this.bwiki_map_view.reset_interaction_redraw();
-                                    if dragged {
-                                        cx.notify();
-                                    }
-                                });
-                            }
-                        });
-                        window.on_mouse_event({
-                            let entity = entity.clone();
-                            move |event: &ScrollWheelEvent, _, _, cx| {
-                                if !bounds.contains(&event.position) {
-                                    return;
-                                }
-
-                                let delta = match event.delta {
-                                    ScrollDelta::Pixels(delta) => {
-                                        (f32::from(delta.y) / 320.0).clamp(-0.35, 0.35)
-                                    }
-                                    ScrollDelta::Lines(delta) => (delta.y / 8.0).clamp(-0.35, 0.35),
-                                };
-                                let anchor_x =
-                                    f32::from(event.position.x) - f32::from(bounds.origin.x);
-                                let anchor_y =
-                                    f32::from(event.position.y) - f32::from(bounds.origin.y);
-                                _ = entity.update(cx, |this, cx| {
-                                    this.bwiki_map_view.reset_interaction_redraw();
-                                    this.bwiki_map_view
-                                        .camera
-                                        .zoom_at(anchor_x, anchor_y, delta);
-                                    cx.notify();
-                                });
-                            }
-                        });
+                        install_map_canvas_navigation_handlers(
+                            window,
+                            entity.clone(),
+                            bounds,
+                            MapCanvasKind::Bwiki,
+                        );
 
                         if dataset.is_none() || last_error.is_some() {
                             _ = window;
@@ -3348,6 +3183,89 @@ fn paint_stitched_map_layer(
                 }
             }
         });
+    });
+}
+
+fn sync_map_canvas_viewport(
+    entity: &gpui::Entity<TrackerWorkbench>,
+    cx: &mut gpui::App,
+    map_kind: MapCanvasKind,
+    bounds_width: f32,
+    bounds_height: f32,
+    map_dimensions: crate::domain::geometry::MapDimensions,
+) {
+    _ = entity.update(cx, |this, cx| {
+        if this.sync_map_canvas_view(map_kind, bounds_width, bounds_height, map_dimensions) {
+            cx.notify();
+        }
+    });
+}
+
+fn install_map_canvas_navigation_handlers(
+    window: &mut gpui::Window,
+    entity: gpui::Entity<TrackerWorkbench>,
+    bounds: Bounds<gpui::Pixels>,
+    map_kind: MapCanvasKind,
+) {
+    window.on_mouse_event({
+        let entity = entity.clone();
+        move |event: &MouseDownEvent, _, _, cx| {
+            if event.button != MouseButton::Left || !bounds.contains(&event.position) {
+                return;
+            }
+
+            _ = entity.update(cx, |this, _| {
+                this.begin_map_drag(
+                    map_kind,
+                    f32::from(event.position.x),
+                    f32::from(event.position.y),
+                );
+            });
+        }
+    });
+    window.on_mouse_event({
+        let entity = entity.clone();
+        move |event: &MouseMoveEvent, _, _, cx| {
+            _ = entity.update(cx, |this, cx| {
+                if this.update_map_drag(
+                    map_kind,
+                    f32::from(event.position.x),
+                    f32::from(event.position.y),
+                    MAP_INTERACTION_FRAME_INTERVAL,
+                ) {
+                    cx.notify();
+                }
+            });
+        }
+    });
+    window.on_mouse_event({
+        let entity = entity.clone();
+        move |_: &MouseUpEvent, _, _, cx| {
+            _ = entity.update(cx, |this, cx| {
+                if this.end_map_drag(map_kind) {
+                    cx.notify();
+                }
+            });
+        }
+    });
+    window.on_mouse_event({
+        let entity = entity.clone();
+        move |event: &ScrollWheelEvent, _, _, cx| {
+            if !bounds.contains(&event.position) {
+                return;
+            }
+
+            let delta = match event.delta {
+                ScrollDelta::Pixels(delta) => (f32::from(delta.y) / 320.0).clamp(-0.35, 0.35),
+                ScrollDelta::Lines(delta) => (delta.y / 8.0).clamp(-0.35, 0.35),
+            };
+            let anchor_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
+            let anchor_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
+            _ = entity.update(cx, |this, cx| {
+                this.zoom_map_canvas(map_kind, anchor_x, anchor_y, delta);
+                cx.notify();
+            });
+        }
     });
 }
 
