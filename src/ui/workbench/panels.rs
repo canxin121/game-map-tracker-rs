@@ -3039,13 +3039,44 @@ fn bwiki_map_panel(
                                 this.bwiki_resources.last_error(),
                             )
                         };
+                        let stitched_map_path =
+                            bwiki_resources.ensure_stitched_map_path(BWIKI_WORLD_ZOOM);
 
                         window.paint_layer(bounds, |window| {
                             window.with_content_mask(Some(ContentMask { bounds }), |window| {
                                 window.paint_quad(fill(bounds, tokens.map_canvas_backdrop));
 
+                                let mut drew_stitched_map = false;
+                                if let Some(path) = stitched_map_path.as_ref() {
+                                    let resource = gpui::Resource::from(path.clone());
+                                    let image_result =
+                                        window.use_asset::<ImgResourceLoader>(&resource, cx);
+                                    if let Some(Ok(image)) = image_result.as_ref() {
+                                        let image_bounds = Bounds {
+                                            origin: point(
+                                                bounds.origin.x + px(camera.offset_x),
+                                                bounds.origin.y + px(camera.offset_y),
+                                            ),
+                                            size: size(
+                                                px(map_dimensions.width as f32 * camera.zoom),
+                                                px(map_dimensions.height as f32 * camera.zoom),
+                                            ),
+                                        };
+                                        let _ = window.paint_image(
+                                            image_bounds,
+                                            0.0.into(),
+                                            image.clone(),
+                                            0,
+                                            false,
+                                        );
+                                        drew_stitched_map = true;
+                                    }
+                                }
+
                                 let tile_zoom = preferred_bwiki_tile_zoom(camera.zoom);
-                                if let Some(range) = zoom_world_bounds(tile_zoom) {
+                                if !drew_stitched_map
+                                    && let Some(range) = zoom_world_bounds(tile_zoom)
+                                {
                                     // BWiki/Leaflet keeps every zoom level anchored to the same
                                     // z8 tile grid. Coarser tiles extend past the visible content
                                     // bounds, so both tile lookup and placement must use that
@@ -3139,32 +3170,37 @@ fn bwiki_map_panel(
                         window.paint_layer(bounds, |window| {
                             window.with_content_mask(Some(ContentMask { bounds }), |window| {
                                 if let Some(dataset) = dataset.as_ref() {
+                                    let render_full_icons =
+                                        camera.zoom >= BWIKI_ICON_RENDER_MIN_ZOOM;
                                     let visible_definitions = dataset
                                         .types
                                         .iter()
                                         .filter(|item| visible_mark_types.contains(&item.mark_type))
                                         .collect::<Vec<_>>();
-                                    let icon_images = visible_definitions
-                                        .iter()
-                                        .map(|definition| {
-                                            (
-                                                definition.mark_type,
-                                                bwiki_resources
-                                                    .ensure_icon_path(
-                                                        definition.mark_type,
-                                                        &definition.icon_url,
-                                                    )
-                                                    .and_then(|path| {
-                                                        let resource = gpui::Resource::from(path);
-                                                        window
-                                                            .use_asset::<ImgResourceLoader>(
-                                                                &resource, cx,
-                                                            )
-                                                            .and_then(|result| result.ok())
-                                                    }),
-                                            )
-                                        })
-                                        .collect::<BTreeMap<_, _>>();
+                                    let icon_images = render_full_icons.then(|| {
+                                        visible_definitions
+                                            .iter()
+                                            .map(|definition| {
+                                                (
+                                                    definition.mark_type,
+                                                    bwiki_resources
+                                                        .ensure_icon_path(
+                                                            definition.mark_type,
+                                                            &definition.icon_url,
+                                                        )
+                                                        .and_then(|path| {
+                                                            let resource =
+                                                                gpui::Resource::from(path);
+                                                            window
+                                                                .use_asset::<ImgResourceLoader>(
+                                                                    &resource, cx,
+                                                                )
+                                                                .and_then(|result| result.ok())
+                                                        }),
+                                                )
+                                            })
+                                            .collect::<BTreeMap<_, _>>()
+                                    });
 
                                     for definition in visible_definitions {
                                         let Some(points) =
@@ -3190,7 +3226,9 @@ fn bwiki_map_panel(
                                                 bounds.origin.y + px(screen.y),
                                             );
                                             if let Some(Some(image)) =
-                                                icon_images.get(&definition.mark_type)
+                                                icon_images.as_ref().and_then(|images| {
+                                                    images.get(&definition.mark_type)
+                                                })
                                             {
                                                 let image_bounds =
                                                     bwiki_marker_image_bounds(anchor);
@@ -3483,6 +3521,7 @@ fn preferred_bwiki_tile_zoom(camera_zoom: f32) -> u8 {
 }
 
 const MAP_INTERACTION_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+const BWIKI_ICON_RENDER_MIN_ZOOM: f32 = 0.18;
 const BWIKI_MARKER_ICON_WIDTH: f32 = 40.0;
 const BWIKI_MARKER_ICON_HEIGHT: f32 = 50.0;
 const BWIKI_MARKER_ICON_ANCHOR_X: f32 = 15.0;
