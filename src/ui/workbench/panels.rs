@@ -2611,31 +2611,40 @@ fn bwiki_types_sidebar(
                         ])),
                 )
                 .when(expanded, |card| {
-                    let type_buttons = definitions
-                        .into_iter()
-                        .map(|(mark_type, name, icon_url, point_count)| {
-                            bwiki_type_toggle_button(
-                                mark_type,
-                                name,
-                                icon_url,
-                                point_count,
-                                this.bwiki_visible_mark_types.contains(&mark_type),
-                                bwiki_resources.clone(),
-                                tokens,
-                                cx,
-                            )
-                            .into_any_element()
+                    let type_rows = definitions
+                        .chunks(2)
+                        .map(|definition_pair| {
+                            let row = definition_pair.iter().fold(
+                                div().flex().gap_2(),
+                                |row, (mark_type, name, icon_url, point_count)| {
+                                    row.child(
+                                        bwiki_type_toggle_button(
+                                            *mark_type,
+                                            name.clone(),
+                                            icon_url.clone(),
+                                            *point_count,
+                                            this.bwiki_visible_mark_types.contains(mark_type),
+                                            bwiki_resources.clone(),
+                                            tokens,
+                                            cx,
+                                        )
+                                        .into_any_element(),
+                                    )
+                                },
+                            );
+                            let row = if definition_pair.len() == 1 {
+                                row.child(
+                                    div()
+                                        .w(px(BWIKI_TYPE_BUTTON_WIDTH))
+                                        .h(px(BWIKI_TYPE_BUTTON_HEIGHT)),
+                                )
+                            } else {
+                                row
+                            };
+                            row.into_any_element()
                         })
                         .collect::<Vec<_>>();
-                    card.child(
-                        div()
-                            .mt_3()
-                            .flex()
-                            .flex_wrap()
-                            .justify_between()
-                            .gap_2()
-                            .children(type_buttons),
-                    )
+                    card.child(div().mt_3().flex().flex_col().gap_2().children(type_rows))
                 })
                 .into_any_element()
         })
@@ -2686,11 +2695,7 @@ fn bwiki_type_toggle_button(
     cx: &mut Context<TrackerWorkbench>,
 ) -> impl IntoElement {
     let label = name.clone();
-    let count_label = if point_count == 0 {
-        "空".to_owned()
-    } else {
-        format!("{point_count} 点")
-    };
+    let count_label = point_count.to_string();
     let background = if visible {
         tokens.toolbar_button_primary_bg
     } else {
@@ -2709,8 +2714,8 @@ fn bwiki_type_toggle_button(
 
     div()
         .id(("bwiki-type-toggle", mark_type))
-        .w(px(178.0))
-        .min_h(px(58.0))
+        .w(px(BWIKI_TYPE_BUTTON_WIDTH))
+        .h(px(BWIKI_TYPE_BUTTON_HEIGHT))
         .px_2()
         .py_2()
         .flex()
@@ -2740,25 +2745,28 @@ fn bwiki_type_toggle_button(
         ))
         .child(
             div()
-                .flex_1()
-                .min_w(px(0.0))
+                .w(px(BWIKI_TYPE_NAME_WIDTH))
+                .min_w(px(BWIKI_TYPE_NAME_WIDTH))
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(tokens.app_fg)
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(name),
+        )
+        .child(
+            div()
+                .w(px(BWIKI_TYPE_COUNT_WIDTH))
+                .min_w(px(BWIKI_TYPE_COUNT_WIDTH))
                 .flex()
-                .flex_col()
-                .gap_0p5()
+                .justify_center()
                 .child(
                     div()
                         .w_full()
                         .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(tokens.app_fg)
+                        .text_color(tokens.text_muted)
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .child(name),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(tokens.text_muted)
                         .child(count_label),
                 ),
         )
@@ -2796,8 +2804,8 @@ fn bwiki_type_icon_preview(
             );
         },
     )
-    .w(px(30.0))
-    .h(px(30.0))
+    .w(px(BWIKI_TYPE_ICON_BOX_SIZE))
+    .h(px(BWIKI_TYPE_ICON_BOX_SIZE))
 }
 
 fn bwiki_map_panel(
@@ -3415,6 +3423,11 @@ fn paint_route_arrow(
 
 const MAP_INTERACTION_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 const BWIKI_ICON_RENDER_MIN_ZOOM: f32 = 0.18;
+const BWIKI_TYPE_BUTTON_WIDTH: f32 = 168.0;
+const BWIKI_TYPE_BUTTON_HEIGHT: f32 = 44.0;
+const BWIKI_TYPE_ICON_BOX_SIZE: f32 = 28.0;
+const BWIKI_TYPE_NAME_WIDTH: f32 = 78.0;
+const BWIKI_TYPE_COUNT_WIDTH: f32 = 38.0;
 const BWIKI_MARKER_ICON_WIDTH: f32 = 40.0;
 const BWIKI_MARKER_ICON_HEIGHT: f32 = 50.0;
 const BWIKI_MARKER_ICON_ANCHOR_X: f32 = 15.0;
