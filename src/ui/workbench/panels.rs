@@ -12,7 +12,6 @@ use gpui_component::{
     button::{Button, ButtonGroup},
     input::Input,
     scroll::ScrollableElement as _,
-    select::Select,
     tooltip::Tooltip,
 };
 use strum::IntoEnumIterator;
@@ -30,6 +29,7 @@ use super::{
     MapCanvasKind, TrackerWorkbench,
     forms::read_input_value,
     page::{MapPage, MarkersPage, SettingsPage, WorkbenchPage},
+    select::Select,
     theme::WorkbenchThemeTokens,
 };
 
@@ -1882,11 +1882,9 @@ fn group_detail_panel(
                                 .menu_width(px(420.0))
                                 .icon(IconName::Search)
                                 .placeholder("搜索并选择 BWiki 图标名")
+                                .search_placeholder("按图标名、分类或编号搜索")
                                 .disabled(!bwiki_dataset_ready)
-                                .empty(empty_list_state(
-                                    tokens,
-                                    "BWiki 图标目录加载中，请稍后重试。",
-                                )),
+                                .empty_message("BWiki 图标目录加载中，请稍后重试。"),
                         )
                         .when_some(group_icon_definition.clone(), |column, definition| {
                             column.child(
@@ -2015,8 +2013,9 @@ fn point_sidebar_panel(
                             .menu_width(px(360.0))
                             .icon(IconName::Search)
                             .placeholder("搜索并选择路线")
+                            .search_placeholder("按路线名、文件名或备注搜索")
                             .disabled(this.route_groups.is_empty())
-                            .empty(empty_list_state(tokens, "当前还没有路线。")),
+                            .empty_message("当前还没有路线。"),
                     )
                     .into_any_element(),
             ],
@@ -2110,11 +2109,9 @@ fn point_detail_panel(
                                 .menu_width(px(420.0))
                                 .icon(IconName::Search)
                                 .placeholder("搜索并选择 BWiki 图标名")
+                                .search_placeholder("按图标名、分类或编号搜索")
                                 .disabled(!bwiki_dataset_ready)
-                                .empty(empty_list_state(
-                                    tokens,
-                                    "BWiki 图标目录加载中，请稍后重试。",
-                                )),
+                                .empty_message("BWiki 图标目录加载中，请稍后重试。"),
                         )
                         .when_some(marker_icon_definition.clone(), |column, definition| {
                             column.child(

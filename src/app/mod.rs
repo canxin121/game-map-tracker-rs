@@ -7,7 +7,11 @@ use gpui::{
 };
 use gpui_component::Root;
 
-use crate::{embedded_assets, resources::WorkspaceBootstrap, ui::TrackerWorkbench};
+use crate::{
+    embedded_assets,
+    resources::WorkspaceBootstrap,
+    ui::{self, TrackerWorkbench},
+};
 
 pub fn launch() -> Result<()> {
     init_tracing();
@@ -18,6 +22,7 @@ pub fn launch() -> Result<()> {
         .with_assets(EmbeddedAssetSource)
         .run(move |cx| {
             gpui_component::init(cx);
+            ui::init(cx);
 
             cx.open_window(
                 WindowOptions {

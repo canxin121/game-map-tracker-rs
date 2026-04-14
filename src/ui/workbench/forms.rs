@@ -1,10 +1,8 @@
 use gpui::{
-    AnyElement, AppContext, Context, IntoElement, ParentElement, SharedString, Styled, Window, div,
+    AnyElement, App, AppContext, Context, IntoElement, ParentElement, SharedString, Styled, Window,
+    div, prelude::FluentBuilder as _,
 };
-use gpui_component::{
-    input::InputState,
-    select::{SearchableVec, SelectItem},
-};
+use gpui_component::{input::InputState, select::SelectItem};
 
 use crate::domain::{
     geometry::WorldPoint,
@@ -99,7 +97,7 @@ impl SelectItem for MarkerGroupPickerItem {
     type Value = RouteId;
 
     fn title(&self) -> SharedString {
-        self.searchable_text.clone()
+        self.title.clone()
     }
 
     fn display_title(&self) -> Option<AnyElement> {
@@ -123,9 +121,17 @@ impl SelectItem for MarkerGroupPickerItem {
     fn value(&self) -> &Self::Value {
         &self.id
     }
-}
 
-pub(super) type MarkerGroupPickerDelegate = SearchableVec<MarkerGroupPickerItem>;
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        picker_menu_row(&self.title, &self.subtitle)
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        self.searchable_text
+            .to_lowercase()
+            .contains(&query.to_lowercase())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BwikiIconPickerItem {
@@ -155,7 +161,7 @@ impl SelectItem for BwikiIconPickerItem {
     type Value = MarkerIconStyle;
 
     fn title(&self) -> SharedString {
-        self.searchable_text.clone()
+        self.title.clone()
     }
 
     fn display_title(&self) -> Option<AnyElement> {
@@ -179,9 +185,17 @@ impl SelectItem for BwikiIconPickerItem {
     fn value(&self) -> &Self::Value {
         &self.value
     }
-}
 
-pub(super) type BwikiIconPickerDelegate = SearchableVec<BwikiIconPickerItem>;
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        picker_menu_row(&self.title, &self.subtitle)
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        self.searchable_text
+            .to_lowercase()
+            .contains(&query.to_lowercase())
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct PagedListState {
@@ -310,4 +324,34 @@ pub(super) fn set_input_value(
     input.update(cx, |input, cx| {
         input.set_value(value.clone(), window, cx);
     });
+}
+
+fn picker_menu_row(title: &SharedString, subtitle: &SharedString) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap_1()
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .line_height(gpui::px(18.0))
+                .child(title.clone()),
+        )
+        .when(!subtitle.is_empty(), |column| {
+            column.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .line_height(gpui::px(16.0))
+                    .text_xs()
+                    .opacity(0.72)
+                    .child(subtitle.clone()),
+            )
+        })
 }

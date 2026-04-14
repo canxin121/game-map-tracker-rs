@@ -1,15 +1,13 @@
 mod forms;
 mod page;
 mod panels;
+mod select;
 mod theme;
 
 use std::{collections::HashSet, env, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{AppContext, Context, PathPromptOptions, Render, SharedString, Subscription, Window};
-use gpui_component::{
-    input::InputEvent,
-    select::{SelectEvent, SelectState},
-};
+use gpui_component::input::InputEvent;
 
 use crate::{
     config::{AppConfig, CONFIG_FILE_NAME},
@@ -32,12 +30,12 @@ use crate::{
 
 use self::{
     forms::{
-        BwikiIconPickerDelegate, BwikiIconPickerItem, GroupDraft, GroupFormInputs,
-        GroupInlineEditInputs, MarkerDraft, MarkerFormInputs, MarkerGroupPickerDelegate,
-        MarkerGroupPickerItem, PagedListState, read_input_value, set_input_value,
+        BwikiIconPickerItem, GroupDraft, GroupFormInputs, GroupInlineEditInputs, MarkerDraft,
+        MarkerFormInputs, MarkerGroupPickerItem, PagedListState, read_input_value, set_input_value,
     },
     page::{MapPage, MarkersPage, SettingsPage, WorkbenchPage},
     panels::render_workbench,
+    select::{SelectEvent, SelectState},
     theme::apply_theme_preference,
 };
 
@@ -119,9 +117,9 @@ pub struct TrackerWorkbench {
     map_group_list: PagedListState,
     marker_group_list: PagedListState,
     point_list: PagedListState,
-    marker_group_picker: gpui::Entity<SelectState<MarkerGroupPickerDelegate>>,
-    group_icon_picker: gpui::Entity<SelectState<BwikiIconPickerDelegate>>,
-    marker_icon_picker: gpui::Entity<SelectState<BwikiIconPickerDelegate>>,
+    marker_group_picker: gpui::Entity<SelectState<MarkerGroupPickerItem>>,
+    group_icon_picker: gpui::Entity<SelectState<BwikiIconPickerItem>>,
+    marker_icon_picker: gpui::Entity<SelectState<BwikiIconPickerItem>>,
     pub(super) ui_preferences_path: PathBuf,
     pub(super) bwiki_resources: BwikiResourceManager,
     pub(super) bwiki_tile_cache: gpui::Entity<TileImageCache>,
@@ -136,6 +134,10 @@ pub struct TrackerWorkbench {
     subscriptions: Vec<Subscription>,
 }
 
+pub(crate) fn init(cx: &mut gpui::App) {
+    select::init(cx);
+}
+
 impl TrackerWorkbench {
     pub fn new(project_root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let group_form = GroupFormInputs::new(window, cx);
@@ -144,13 +146,9 @@ impl TrackerWorkbench {
         let map_group_list = PagedListState::new(window, cx, "搜索地图中的路线", 8);
         let marker_group_list = PagedListState::new(window, cx, "搜索路线", 8);
         let point_list = PagedListState::new(window, cx, "搜索当前路线节点", 10);
-        let marker_group_picker = cx.new(|cx| {
-            SelectState::new(MarkerGroupPickerDelegate::new(Vec::new()), None, window, cx)
-        });
-        let group_icon_picker = cx
-            .new(|cx| SelectState::new(BwikiIconPickerDelegate::new(Vec::new()), None, window, cx));
-        let marker_icon_picker = cx
-            .new(|cx| SelectState::new(BwikiIconPickerDelegate::new(Vec::new()), None, window, cx));
+        let marker_group_picker = cx.new(|cx| SelectState::new(Vec::new(), None, 8, window, cx));
+        let group_icon_picker = cx.new(|cx| SelectState::new(Vec::new(), None, 10, window, cx));
+        let marker_icon_picker = cx.new(|cx| SelectState::new(Vec::new(), None, 10, window, cx));
         let bwiki_tile_cache =
             TileImageCache::new(BWIKI_TILE_CACHE_MAX_ITEMS, BWIKI_TILE_CACHE_MAX_BYTES, cx);
         let ui_preferences_path = UiPreferencesRepository::path_for(&project_root);
@@ -392,7 +390,7 @@ impl TrackerWorkbench {
         workbench.subscriptions.push(cx.subscribe_in(
             &marker_group_picker,
             window,
-            |this, _, event: &SelectEvent<MarkerGroupPickerDelegate>, window, cx| {
+            |this, _, event: &SelectEvent<MarkerGroupPickerItem>, window, cx| {
                 let SelectEvent::Confirm(Some(group_id)) = event else {
                     return;
                 };
@@ -404,7 +402,7 @@ impl TrackerWorkbench {
         workbench.subscriptions.push(cx.subscribe_in(
             &group_icon_picker,
             window,
-            |this, _, event: &SelectEvent<BwikiIconPickerDelegate>, _, cx| {
+            |this, _, event: &SelectEvent<BwikiIconPickerItem>, _, cx| {
                 let SelectEvent::Confirm(Some(icon_name)) = event else {
                     return;
                 };
@@ -416,7 +414,7 @@ impl TrackerWorkbench {
         workbench.subscriptions.push(cx.subscribe_in(
             &marker_icon_picker,
             window,
-            |this, _, event: &SelectEvent<BwikiIconPickerDelegate>, _, cx| {
+            |this, _, event: &SelectEvent<BwikiIconPickerItem>, _, cx| {
                 let SelectEvent::Confirm(Some(icon_name)) = event else {
                     return;
                 };
@@ -1440,30 +1438,28 @@ impl TrackerWorkbench {
         }
     }
 
-    fn marker_group_picker_items(&self) -> MarkerGroupPickerDelegate {
-        MarkerGroupPickerDelegate::new(
-            self.route_groups
-                .iter()
-                .map(|group| {
-                    let title = group.display_name().to_owned();
-                    let subtitle = if group.notes.trim().is_empty() {
-                        group.metadata.file_name.clone()
-                    } else {
-                        format!("{} · {}", group.metadata.file_name, group.notes)
-                    };
+    fn marker_group_picker_items(&self) -> Vec<MarkerGroupPickerItem> {
+        self.route_groups
+            .iter()
+            .map(|group| {
+                let title = group.display_name().to_owned();
+                let subtitle = if group.notes.trim().is_empty() {
+                    group.metadata.file_name.clone()
+                } else {
+                    format!("{} · {}", group.metadata.file_name, group.notes)
+                };
 
-                    MarkerGroupPickerItem::new(
-                        group.id.clone(),
-                        title.clone(),
-                        subtitle.clone(),
-                        format!("{title} {} {}", group.metadata.file_name, group.notes),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        )
+                MarkerGroupPickerItem::new(
+                    group.id.clone(),
+                    title.clone(),
+                    subtitle.clone(),
+                    format!("{title} {} {}", group.metadata.file_name, group.notes),
+                )
+            })
+            .collect::<Vec<_>>()
     }
 
-    fn bwiki_icon_picker_items(&self) -> BwikiIconPickerDelegate {
+    fn bwiki_icon_picker_items(&self) -> Vec<BwikiIconPickerItem> {
         let items = self
             .bwiki_resources
             .dataset_snapshot()
@@ -1494,7 +1490,7 @@ impl TrackerWorkbench {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        BwikiIconPickerDelegate::new(items)
+        items
     }
 
     fn sync_marker_group_picker_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
