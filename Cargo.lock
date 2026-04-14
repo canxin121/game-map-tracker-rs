@@ -2204,6 +2204,7 @@ dependencies = [
  "crossbeam-channel",
  "derive_more 2.1.1",
  "directories",
+ "futures-util",
  "gpui",
  "gpui-component",
  "image 0.25.10",

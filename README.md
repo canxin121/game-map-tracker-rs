@@ -14,7 +14,7 @@
   - 瓦片底图：`map-3.0/{z}/tile-{x}_{y}.png`
 - `build.rs` 现在只内置 UI SVG 图标，不再把地图瓦片和点位 PNG 编译进二进制。
 - `src/resources/bootstrap.rs` 在本地缺失 `config.toml` 时，用 `AppConfig::default()` 直接生成默认配置。
-- `src/resources/bwiki.rs` 负责 Rust 侧数据抓取、瓦片/图标缓存、拼接底图和点位坐标转换。
+- `src/resources/bwiki.rs` 负责 Rust 侧数据抓取、瓦片/图标缓存和点位坐标转换。
 - `src/resources/bootstrap.rs` 不再写出地图、图标和默认 routes，只创建数据目录与缓存目录。
 - JS 脚本不是产品运行链路。应用本身只走 Rust 代码路径。
 - 运行时默认数据目录在系统用户数据目录下，不会读写父级旧仓库。
@@ -49,14 +49,14 @@ src/ui/                 GPUI 工作台、分页导航、双地图子页、标记
 
 - 独立数据目录引导
   - 首次启动自动生成默认 `config.toml`
-  - 自动创建 `cache/bwiki/` 目录用于缓存点位、图标、瓦片和拼接底图
+- 自动创建 `cache/bwiki/` 目录用于缓存点位、图标和瓦片
   - 不再内置任何默认 routes，标记组完全由用户导入或创建
 
 - GPUI 工作台
   - 多页面导航：地图、标记、设置
   - 地图二级导航：路线追踪 / BWiki 全图
   - 设置页二级导航：配置、调试信息、资源
-  - 追踪地图页会按需拼接并缓存 BWiki 底图
+- 地图页会按视口和缩放级别按需加载 BWiki 瓦片
   - BWiki 全图页支持按分类展示全部 Wiki 类型，并支持多选开关显示
   - 缩放 / 拖拽相机
   - 路线节点与折线绘制
@@ -115,7 +115,6 @@ data/
     bwiki/
       data/
       icons/
-      stitched/
       tiles/
   routes/
     *.json

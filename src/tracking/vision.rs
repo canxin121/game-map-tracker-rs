@@ -15,7 +15,7 @@ use strum::Display;
 
 use crate::{
     domain::{geometry::WorldPoint, tracker::TrackerEngineKind},
-    resources::{BWIKI_WORLD_ZOOM, WorkspaceSnapshot, load_logic_map_image},
+    resources::{WorkspaceSnapshot, load_logic_map_scaled_image},
     tracking::debug::{DebugField, DebugImage, DebugImageKind, TrackingDebugSnapshot},
 };
 
@@ -129,26 +129,38 @@ pub enum DebugOverlay {
 
 pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyramid, MaskSet)> {
     let config = &workspace.config;
-    let logic_map = load_logic_map_image(&workspace.assets.bwiki_cache_dir, BWIKI_WORLD_ZOOM)
+    let local_scale = config.template.local_downscale.max(1);
+    let global_scale = config.template.global_downscale.max(local_scale);
+    let local_map = load_logic_map_scaled_image(&workspace.assets.bwiki_cache_dir, local_scale)
         .with_context(|| {
             format!(
-                "failed to load stitched BWiki logic map from {}",
+                "failed to load local BWiki logic tiles from {}",
                 workspace.assets.bwiki_cache_dir.display()
             )
         })?;
-    let logic_map = equalize_histogram(&logic_map);
-
-    let local_scale = config.template.local_downscale.max(1);
-    let global_scale = config.template.global_downscale.max(local_scale);
+    let local_map = equalize_histogram(&local_map);
+    let global_map = if global_scale == local_scale {
+        local_map.clone()
+    } else {
+        let global_map =
+            load_logic_map_scaled_image(&workspace.assets.bwiki_cache_dir, global_scale)
+                .with_context(|| {
+                    format!(
+                        "failed to load global BWiki logic tiles from {}",
+                        workspace.assets.bwiki_cache_dir.display()
+                    )
+                })?;
+        equalize_histogram(&global_map)
+    };
 
     let pyramid = MapPyramid {
         local: ScaledMap {
             scale: local_scale,
-            image: downscale_gray(&logic_map, local_scale),
+            image: local_map,
         },
         global: ScaledMap {
             scale: global_scale,
-            image: downscale_gray(&logic_map, global_scale),
+            image: global_map,
         },
     };
 

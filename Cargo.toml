@@ -16,6 +16,7 @@ candle-nn = { version = "0.9.1", optional = true }
 crossbeam-channel = "0.5"
 derive_more = { version = "2.0", features = ["display", "from"] }
 directories = "6.0"
+futures-util = "0.3"
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 image = "0.25"

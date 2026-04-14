@@ -19,7 +19,7 @@ use strum::IntoEnumIterator;
 
 use crate::{
     domain::{marker::MarkerIconStyle, theme::ThemePreference, tracker::TrackingSource},
-    resources::{BWIKI_WORLD_ZOOM, BwikiResourceManager},
+    resources::{BwikiResourceManager, tile_coordinate_to_world_origin, visible_tile_layers},
     ui::map_canvas::{parse_hex_color, route_points, screen_points},
 };
 
@@ -2331,7 +2331,7 @@ fn settings_resources_page(
         .child(section_title("本地数据路径"))
         .child(body_text(
             tokens,
-            "路线文件、配置和 BWiki 运行时缓存都会真实落盘。BWiki 只会缓存整张拼接地图、点位目录和点位图标，不再保留分块瓦片。",
+            "路线文件、配置和 BWiki 运行时缓存都会真实落盘。BWiki 只缓存点位目录、图标和按需下载的瓦片，不再生成或保留整张拼接地图。",
         ))
         .child(resource_path(
             "resource-data-dir",
@@ -2423,7 +2423,7 @@ fn map_panel(
         cx.entity(),
         tokens,
         "路线地图",
-        "滚轮缩放，左键拖拽；首次使用会懒加载并缓存 BWiki 拼接底图",
+        "滚轮缩放，左键拖拽；首次使用会懒加载并缓存当前视口需要的 BWiki 瓦片",
         MapCanvasKind::Tracker,
         this.workspace.report.map_dimensions,
         paint_tracker_map_overlay,
@@ -2803,7 +2803,7 @@ fn bwiki_map_panel(
         cx.entity(),
         tokens,
         "BWiki 大地图",
-        "滚轮缩放，左键拖拽；启动时会确保整张 BWiki 拼接地图已缓存",
+        "滚轮缩放，左键拖拽；会按缩放级别懒加载当前视口所需瓦片",
         MapCanvasKind::Bwiki,
         this.workspace.report.map_dimensions,
         paint_bwiki_map_overlay,
@@ -2972,20 +2972,22 @@ fn map_canvas_panel(
                             map_dimensions,
                         );
 
-                        let (camera, bwiki_resources) = {
+                        let (camera, bwiki_resources, bwiki_tile_cache) = {
                             let this = entity.read(cx);
-                            (this.map_camera(map_kind), this.bwiki_resources.clone())
+                            (
+                                this.map_camera(map_kind),
+                                this.bwiki_resources.clone(),
+                                this.bwiki_tile_cache.clone(),
+                            )
                         };
-                        let stitched_map_path =
-                            bwiki_resources.ensure_stitched_map_path(BWIKI_WORLD_ZOOM);
 
-                        paint_stitched_map_layer(
+                        paint_bwiki_tile_layers(
                             window,
                             bounds,
                             cx,
                             camera,
-                            map_dimensions,
-                            stitched_map_path.as_ref(),
+                            &bwiki_resources,
+                            &bwiki_tile_cache,
                             tokens.map_canvas_backdrop,
                         );
                         overlay_painter(
@@ -3230,38 +3232,97 @@ fn paint_bwiki_map_overlay(
     });
 }
 
-fn paint_stitched_map_layer(
+fn paint_bwiki_tile_layers(
     window: &mut gpui::Window,
     bounds: Bounds<gpui::Pixels>,
     cx: &mut gpui::App,
     camera: crate::domain::geometry::MapCamera,
-    map_dimensions: crate::domain::geometry::MapDimensions,
-    map_path: Option<&std::path::PathBuf>,
+    bwiki_resources: &BwikiResourceManager,
+    bwiki_tile_cache: &gpui::Entity<crate::ui::tile_cache::TileImageCache>,
     backdrop: gpui::Hsla,
 ) {
+    let viewport = crate::domain::geometry::ViewportSize {
+        width: f32::from(bounds.size.width),
+        height: f32::from(bounds.size.height),
+    };
+    let layers = visible_tile_layers(camera, viewport, 1);
+
     window.paint_layer(bounds, |window| {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             window.paint_quad(fill(bounds, backdrop));
 
-            if let Some(path) = map_path {
-                let resource = gpui::Resource::from(path.clone());
-                let image_result = window.use_asset::<ImgResourceLoader>(&resource, cx);
-                if let Some(Ok(image)) = image_result.as_ref() {
-                    let image_bounds = Bounds {
-                        origin: point(
-                            bounds.origin.x + px(camera.offset_x),
-                            bounds.origin.y + px(camera.offset_y),
-                        ),
-                        size: size(
-                            px(map_dimensions.width as f32 * camera.zoom),
-                            px(map_dimensions.height as f32 * camera.zoom),
-                        ),
+            for layer in &layers {
+                for tile in &layer.tiles {
+                    let Some(path) = bwiki_resources.ensure_tile_path(tile.zoom, tile.x, tile.y)
+                    else {
+                        continue;
                     };
-                    let _ = window.paint_image(image_bounds, 0.0.into(), image.clone(), 0, false);
+                    let Some(tile_origin) =
+                        tile_coordinate_to_world_origin(tile.zoom, tile.x, tile.y)
+                    else {
+                        continue;
+                    };
+
+                    let resource = gpui::Resource::from(path);
+                    let image_result =
+                        bwiki_tile_cache.update(cx, |cache, cx| cache.load(&resource, window, cx));
+                    if let Some(Ok(image)) = image_result {
+                        let screen_origin = camera.world_to_screen(tile_origin);
+                        let screen_bottom_right =
+                            camera.world_to_screen(crate::domain::geometry::WorldPoint::new(
+                                tile_origin.x + tile.world_size as f32,
+                                tile_origin.y + tile.world_size as f32,
+                            ));
+                        let image_bounds = snapped_tile_image_bounds(
+                            bounds,
+                            screen_origin.x,
+                            screen_origin.y,
+                            screen_bottom_right.x,
+                            screen_bottom_right.y,
+                            window.scale_factor(),
+                        );
+                        let _ = window.paint_image(image_bounds, 0.0.into(), image, 0, false);
+                    }
                 }
             }
         });
     });
+}
+
+fn snapped_tile_image_bounds(
+    canvas_bounds: Bounds<gpui::Pixels>,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    scale_factor: f32,
+) -> Bounds<gpui::Pixels> {
+    let canvas_left = f32::from(canvas_bounds.origin.x);
+    let canvas_top = f32::from(canvas_bounds.origin.y);
+    let scale_factor = scale_factor.max(0.0001);
+
+    // GPUI snaps image origins with floor() and sizes with ceil(). If adjacent tiles
+    // are painted from independent float origins/sizes, tiny rounding differences turn
+    // into 1px seams or overlaps. Snap shared boundaries first in device pixels so all
+    // neighboring tiles land on the same final edge.
+    let left_device = ((canvas_left + left) * scale_factor).round();
+    let top_device = ((canvas_top + top) * scale_factor).round();
+    let right_device = ((canvas_left + right) * scale_factor).round();
+    let bottom_device = ((canvas_top + bottom) * scale_factor).round();
+
+    let width_device = (right_device - left_device).max(1.0);
+    let height_device = (bottom_device - top_device).max(1.0);
+
+    Bounds {
+        origin: point(
+            px(left_device / scale_factor),
+            px(top_device / scale_factor),
+        ),
+        size: size(
+            px(width_device / scale_factor),
+            px(height_device / scale_factor),
+        ),
+    }
 }
 
 fn sync_map_canvas_viewport(

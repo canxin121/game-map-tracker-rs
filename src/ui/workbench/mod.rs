@@ -21,13 +21,13 @@ use crate::{
         tracker::{PositionEstimate, TrackerEngineKind, TrackerLifecycle, TrackingSource},
     },
     resources::{
-        AssetManifest, BWIKI_WORLD_ZOOM, BwikiResourceManager, RouteImportReport, RouteRepository,
-        UiPreferences, UiPreferencesRepository, WorkspaceLoadReport, WorkspaceSnapshot,
-        default_map_dimensions,
+        AssetManifest, BwikiResourceManager, RouteImportReport, RouteRepository, UiPreferences,
+        UiPreferencesRepository, WorkspaceLoadReport, WorkspaceSnapshot, default_map_dimensions,
     },
     tracking::{
         TrackerSession, TrackingEvent, debug::TrackingDebugSnapshot, spawn_tracker_session,
     },
+    ui::tile_cache::TileImageCache,
 };
 
 use self::{
@@ -61,6 +61,9 @@ pub(super) enum MapCanvasKind {
     Tracker,
     Bwiki,
 }
+
+const BWIKI_TILE_CACHE_MAX_ITEMS: usize = 192;
+const BWIKI_TILE_CACHE_MAX_BYTES: usize = 96 * 1024 * 1024;
 
 fn normalized_list_query(
     input: &gpui::Entity<gpui_component::input::InputState>,
@@ -119,6 +122,7 @@ pub struct TrackerWorkbench {
     marker_group_picker: gpui::Entity<SelectState<MarkerGroupPickerDelegate>>,
     pub(super) ui_preferences_path: PathBuf,
     pub(super) bwiki_resources: BwikiResourceManager,
+    pub(super) bwiki_tile_cache: gpui::Entity<TileImageCache>,
     pub(super) bwiki_version: u64,
     pub(super) bwiki_visible_mark_types: HashSet<u32>,
     pub(super) bwiki_expanded_categories: HashSet<String>,
@@ -140,6 +144,8 @@ impl TrackerWorkbench {
         let marker_group_picker = cx.new(|cx| {
             SelectState::new(MarkerGroupPickerDelegate::new(Vec::new()), None, window, cx)
         });
+        let bwiki_tile_cache =
+            TileImageCache::new(BWIKI_TILE_CACHE_MAX_ITEMS, BWIKI_TILE_CACHE_MAX_BYTES, cx);
         let ui_preferences_path = UiPreferencesRepository::path_for(&project_root);
         let (theme_preference, auto_focus_enabled, preferences_error) =
             match UiPreferencesRepository::load(&project_root) {
@@ -218,6 +224,7 @@ impl TrackerWorkbench {
                     marker_group_picker: marker_group_picker.clone(),
                     ui_preferences_path: ui_preferences_path.clone(),
                     bwiki_resources,
+                    bwiki_tile_cache: bwiki_tile_cache.clone(),
                     bwiki_version,
                     bwiki_visible_mark_types: HashSet::new(),
                     bwiki_expanded_categories: HashSet::new(),
@@ -279,6 +286,7 @@ impl TrackerWorkbench {
                     marker_group_picker,
                     ui_preferences_path: ui_preferences_path.clone(),
                     bwiki_resources,
+                    bwiki_tile_cache,
                     bwiki_version,
                     bwiki_visible_mark_types: HashSet::new(),
                     bwiki_expanded_categories: HashSet::new(),
@@ -453,11 +461,7 @@ impl TrackerWorkbench {
         match BwikiResourceManager::new(cache_dir.clone()) {
             Ok(manager) => {
                 manager.ensure_dataset_loaded();
-                let startup_error = manager
-                    .ensure_stitched_map_ready_blocking(BWIKI_WORLD_ZOOM)
-                    .err()
-                    .map(|error| format!("启动时预构建 BWiki 整图失败：{error:#}"));
-                (manager, startup_error)
+                (manager, None)
             }
             Err(error) => {
                 let fallback = env::temp_dir()
@@ -472,24 +476,13 @@ impl TrackerWorkbench {
                         )
                     });
                 manager.ensure_dataset_loaded();
-                let startup_error = manager
-                    .ensure_stitched_map_ready_blocking(BWIKI_WORLD_ZOOM)
-                    .err()
-                    .map(|map_error| format!("启动时预构建 BWiki 整图失败：{map_error:#}"));
                 (
                     manager,
-                    Some(match startup_error {
-                        Some(startup_error) => format!(
-                            "BWiki 缓存目录 {} 初始化失败，已临时改用 {}：{error:#} {startup_error}",
-                            cache_dir.display(),
-                            fallback.display()
-                        ),
-                        None => format!(
-                            "BWiki 缓存目录 {} 初始化失败，已临时改用 {}：{error:#}",
-                            cache_dir.display(),
-                            fallback.display()
-                        ),
-                    }),
+                    Some(format!(
+                        "BWiki 缓存目录 {} 初始化失败，已临时改用 {}：{error:#}",
+                        cache_dir.display(),
+                        fallback.display()
+                    )),
                 )
             }
         }

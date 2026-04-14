@@ -13,7 +13,10 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use image::{RgbaImage, imageops::replace};
+use image::{
+    GrayImage,
+    imageops::{FilterType, replace, resize},
+};
 use parking_lot::Mutex;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -63,6 +66,11 @@ impl BwikiTileZoom {
     #[must_use]
     pub const fn world_height(self) -> u32 {
         self.height_tiles() * self.world_tile_size()
+    }
+
+    #[must_use]
+    pub const fn source_world_pixel_size(self) -> u32 {
+        1u32 << (BWIKI_WORLD_ZOOM - self.zoom)
     }
 }
 
@@ -164,7 +172,7 @@ pub struct BwikiCachePaths {
     pub root: PathBuf,
     pub data_dir: PathBuf,
     pub icons_dir: PathBuf,
-    pub stitched_dir: PathBuf,
+    pub tiles_dir: PathBuf,
 }
 
 impl BwikiCachePaths {
@@ -174,28 +182,23 @@ impl BwikiCachePaths {
         Self {
             data_dir: root.join("data"),
             icons_dir: root.join("icons"),
-            stitched_dir: root.join("stitched"),
+            tiles_dir: root.join("tiles"),
             root,
         }
     }
 
     pub fn ensure_directories(&self) -> Result<()> {
-        let legacy_tiles_dir = self.root.join("tiles");
-        if legacy_tiles_dir.is_dir() {
-            fs::remove_dir_all(&legacy_tiles_dir).with_context(|| {
+        let legacy_stitched_dir = self.root.join("stitched");
+        if legacy_stitched_dir.is_dir() {
+            fs::remove_dir_all(&legacy_stitched_dir).with_context(|| {
                 format!(
-                    "failed to remove legacy BWiki tile cache directory {}",
-                    legacy_tiles_dir.display()
+                    "failed to remove legacy BWiki stitched cache directory {}",
+                    legacy_stitched_dir.display()
                 )
             })?;
         }
 
-        for path in [
-            &self.root,
-            &self.data_dir,
-            &self.icons_dir,
-            &self.stitched_dir,
-        ] {
+        for path in [&self.root, &self.data_dir, &self.icons_dir, &self.tiles_dir] {
             fs::create_dir_all(path).with_context(|| {
                 format!("failed to create BWiki cache directory {}", path.display())
             })?;
@@ -222,7 +225,6 @@ struct BwikiManagerState {
     dataset: Option<Arc<BwikiDataset>>,
     queued_jobs: HashSet<BwikiJobKey>,
     ready_icons: HashMap<u32, PathBuf>,
-    ready_stitched: HashMap<u8, PathBuf>,
     last_error: Option<String>,
 }
 
@@ -230,14 +232,14 @@ struct BwikiManagerState {
 enum BwikiJobKey {
     RefreshDataset,
     DownloadIcon { mark_type: u32 },
-    StitchMap { zoom: u8 },
+    DownloadTile { zoom: u8, x: i32, y: i32 },
 }
 
 #[derive(Debug, Clone)]
 enum BwikiJob {
     RefreshDataset,
     DownloadIcon { mark_type: u32, icon_url: String },
-    StitchMap { zoom: u8 },
+    DownloadTile { zoom: u8, x: i32, y: i32 },
 }
 
 impl BwikiJob {
@@ -247,7 +249,11 @@ impl BwikiJob {
             Self::DownloadIcon { mark_type, .. } => BwikiJobKey::DownloadIcon {
                 mark_type: *mark_type,
             },
-            Self::StitchMap { zoom } => BwikiJobKey::StitchMap { zoom: *zoom },
+            Self::DownloadTile { zoom, x, y } => BwikiJobKey::DownloadTile {
+                zoom: *zoom,
+                x: *x,
+                y: *y,
+            },
         }
     }
 }
@@ -398,31 +404,21 @@ impl BwikiResourceManager {
     }
 
     #[must_use]
-    pub fn ensure_stitched_map_path(&self, zoom: u8) -> Option<PathBuf> {
-        if let Some(path) = self.inner.state.lock().ready_stitched.get(&zoom).cloned() {
-            return Some(path);
+    pub fn ensure_tile_path(&self, zoom: u8, x: i32, y: i32) -> Option<PathBuf> {
+        if !tile_is_inside_bounds(zoom, x, y) {
+            return None;
         }
 
-        let path = stitched_map_path(&self.inner.cache, zoom);
+        let path = tile_cache_path(&self.inner.cache, zoom, x, y);
         if path.is_file() {
-            self.inner
-                .state
-                .lock()
-                .ready_stitched
-                .insert(zoom, path.clone());
             return Some(path);
         }
-        self.enqueue(BwikiJob::StitchMap { zoom });
+        self.enqueue(BwikiJob::DownloadTile { zoom, x, y });
         None
     }
 
-    pub fn ensure_stitched_map_ready_blocking(&self, zoom: u8) -> Result<PathBuf> {
-        let path = ensure_stitched_map_blocking(&self.inner.cache.root, zoom)?;
-        self.inner
-            .state
-            .lock()
-            .ready_stitched
-            .insert(zoom, path.clone());
+    pub fn ensure_tile_ready_blocking(&self, zoom: u8, x: i32, y: i32) -> Result<PathBuf> {
+        let path = ensure_tile_blocking(&self.inner.cache.root, zoom, x, y)?;
         Ok(path)
     }
 
@@ -476,6 +472,69 @@ pub fn tile_coordinate_to_world_origin(zoom: u8, x: i32, y: i32) -> Option<World
 }
 
 #[must_use]
+pub fn world_to_tile_coordinate(zoom: u8, world: WorldPoint) -> Option<(i32, i32)> {
+    let range = zoom_world_bounds(zoom)?;
+    let origin = world_origin();
+    let world_tile_size = range.world_tile_size() as f32;
+    Some((
+        ((world.x - origin.x) / world_tile_size).floor() as i32,
+        ((world.y - origin.y) / world_tile_size).floor() as i32,
+    ))
+}
+
+#[must_use]
+pub fn preferred_display_tile_zoom(camera_zoom: f32) -> u8 {
+    let min_zoom = BWIKI_TILE_ZOOMS
+        .iter()
+        .map(|item| item.zoom)
+        .min()
+        .unwrap_or(BWIKI_WORLD_ZOOM);
+    let max_zoom = BWIKI_TILE_ZOOMS
+        .iter()
+        .map(|item| item.zoom)
+        .max()
+        .unwrap_or(BWIKI_WORLD_ZOOM);
+    let target = BWIKI_WORLD_ZOOM as i32 + camera_zoom.max(0.0001).log2().round() as i32;
+    target.clamp(i32::from(min_zoom), i32::from(max_zoom)) as u8
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BwikiVisibleTile {
+    pub zoom: u8,
+    pub x: i32,
+    pub y: i32,
+    pub world_size: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct BwikiVisibleTileLayer {
+    pub zoom: u8,
+    pub tiles: Vec<BwikiVisibleTile>,
+}
+
+#[must_use]
+pub fn visible_tile_layers(
+    camera: crate::domain::geometry::MapCamera,
+    viewport: crate::domain::geometry::ViewportSize,
+    prefetch_tiles: i32,
+) -> Vec<BwikiVisibleTileLayer> {
+    if !viewport.is_valid() {
+        return Vec::new();
+    }
+
+    let preferred_zoom = preferred_display_tile_zoom(camera.zoom);
+    let mut zooms = vec![preferred_zoom];
+    if let Some(fallback_zoom) = previous_supported_zoom(preferred_zoom) {
+        zooms.insert(0, fallback_zoom);
+    }
+
+    zooms
+        .into_iter()
+        .filter_map(|zoom| visible_tiles_for_zoom(camera, viewport, zoom, prefetch_tiles))
+        .collect()
+}
+
+#[must_use]
 pub fn raw_coordinate_to_world(raw_lat: i32, raw_lng: i32) -> WorldPoint {
     let scale = (1u32 << (BWIKI_WORLD_ZOOM - 7)) as f32;
     let origin = world_origin();
@@ -485,18 +544,18 @@ pub fn raw_coordinate_to_world(raw_lat: i32, raw_lng: i32) -> WorldPoint {
     )
 }
 
-pub fn ensure_stitched_map_blocking(cache_root: &Path, zoom: u8) -> Result<PathBuf> {
+pub fn ensure_tile_blocking(cache_root: &Path, zoom: u8, x: i32, y: i32) -> Result<PathBuf> {
     let cache = BwikiCachePaths::new(cache_root.to_path_buf());
     cache.ensure_directories()?;
-    build_stitched_map(&cache, zoom)?;
-    Ok(stitched_map_path(&cache, zoom))
+    download_tile(&cache, zoom, x, y)
 }
 
-pub fn load_logic_map_image(cache_root: &Path, zoom: u8) -> Result<image::GrayImage> {
-    let path = ensure_stitched_map_blocking(cache_root, zoom)?;
-    image::open(&path)
-        .with_context(|| format!("failed to open stitched map {}", path.display()))
-        .map(|image| image.into_luma8())
+pub fn load_logic_map_scaled_image(cache_root: &Path, scale: u32) -> Result<GrayImage> {
+    let cache = BwikiCachePaths::new(cache_root.to_path_buf());
+    cache.ensure_directories()?;
+    let range = preferred_logic_zoom(scale);
+    let output_tile_size = (range.world_tile_size() / scale.max(1)).max(1);
+    assemble_gray_map(&cache, range, output_tile_size)
 }
 
 fn run_bwiki_worker(inner: Arc<BwikiManagerInner>, job_rx: Receiver<BwikiJob>) {
@@ -508,7 +567,7 @@ fn run_bwiki_worker(inner: Arc<BwikiManagerInner>, job_rx: Receiver<BwikiJob>) {
                 mark_type,
                 icon_url,
             } => download_icon_job(&inner.cache, mark_type, &icon_url),
-            BwikiJob::StitchMap { zoom } => build_stitched_map(&inner.cache, zoom),
+            BwikiJob::DownloadTile { zoom, x, y } => download_tile_job(&inner.cache, zoom, x, y),
         };
 
         let mut state = inner.state.lock();
@@ -557,6 +616,16 @@ fn download_icon_job(
     icon_url: &str,
 ) -> Result<Option<BwikiDataset>> {
     download_icon(cache, mark_type, icon_url)?;
+    Ok(None)
+}
+
+fn download_tile_job(
+    cache: &BwikiCachePaths,
+    zoom: u8,
+    x: i32,
+    y: i32,
+) -> Result<Option<BwikiDataset>> {
+    download_tile(cache, zoom, x, y)?;
     Ok(None)
 }
 
@@ -685,18 +754,6 @@ fn dataset_cache_path(cache: &BwikiCachePaths) -> PathBuf {
     cache.data_dir.join("dataset.json")
 }
 
-fn stitched_map_path(cache: &BwikiCachePaths, zoom: u8) -> PathBuf {
-    let suffix = zoom_world_bounds(zoom)
-        .map(|range| {
-            format!(
-                "z{zoom}_x{}-{}_y{}-{}.png",
-                range.min_x, range.max_x, range.min_y, range.max_y
-            )
-        })
-        .unwrap_or_else(|| format!("z{zoom}.png"));
-    cache.stitched_dir.join(suffix)
-}
-
 fn icon_cache_path(cache: &BwikiCachePaths, mark_type: u32, icon_url: &str) -> PathBuf {
     let extension = Path::new(icon_url)
         .extension()
@@ -706,21 +763,67 @@ fn icon_cache_path(cache: &BwikiCachePaths, mark_type: u32, icon_url: &str) -> P
     cache.icons_dir.join(format!("{mark_type}.{extension}"))
 }
 
-fn download_tile_image(zoom: u8, x: i32, y: i32) -> Result<image::RgbaImage> {
-    let range =
-        zoom_world_bounds(zoom).ok_or_else(|| anyhow!("unsupported BWiki tile zoom {zoom}"))?;
-    if x < range.min_x || x > range.max_x || y < range.min_y || y > range.max_y {
+fn tile_cache_path(cache: &BwikiCachePaths, zoom: u8, x: i32, y: i32) -> PathBuf {
+    cache
+        .tiles_dir
+        .join(format!("z{zoom}"))
+        .join(format!("tile-{x}_{y}.png"))
+}
+
+fn tile_url(zoom: u8, x: i32, y: i32) -> String {
+    TILE_URL_TEMPLATE
+        .replace("{z}", &zoom.to_string())
+        .replace("{x}", &x.to_string())
+        .replace("{y}", &y.to_string())
+}
+
+fn tile_is_inside_bounds(zoom: u8, x: i32, y: i32) -> bool {
+    zoom_world_bounds(zoom).is_some_and(|range| {
+        x >= range.min_x && x <= range.max_x && y >= range.min_y && y <= range.max_y
+    })
+}
+
+fn download_tile(cache: &BwikiCachePaths, zoom: u8, x: i32, y: i32) -> Result<PathBuf> {
+    if !tile_is_inside_bounds(zoom, x, y) {
         bail!("requested tile z={zoom} x={x} y={y} is outside configured bounds");
     }
 
-    let url = TILE_URL_TEMPLATE
-        .replace("{z}", &zoom.to_string())
-        .replace("{x}", &x.to_string())
-        .replace("{y}", &y.to_string());
-    let bytes = download_binary(&url)?;
-    image::load_from_memory(&bytes)
-        .with_context(|| format!("failed to decode remote tile image {url}"))
-        .map(|image| image.into_rgba8())
+    let target = tile_cache_path(cache, zoom, x, y);
+    if target.is_file() {
+        return Ok(target);
+    }
+
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create BWiki tile cache directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let bytes = download_binary(&tile_url(zoom, x, y))?;
+    let temp = target.with_extension(format!("{}.part", std::process::id()));
+    fs::write(&temp, bytes)
+        .with_context(|| format!("failed to write BWiki tile temp file {}", temp.display()))?;
+    match fs::rename(&temp, &target) {
+        Ok(()) => {}
+        Err(error) if target.is_file() => {
+            let _ = fs::remove_file(&temp);
+            let _ = error;
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to finalize BWiki tile {} from {}",
+                    target.display(),
+                    temp.display()
+                )
+            });
+        }
+    }
+    Ok(target)
 }
 
 fn download_icon(cache: &BwikiCachePaths, mark_type: u32, icon_url: &str) -> Result<PathBuf> {
@@ -760,39 +863,94 @@ fn download_binary(url: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn build_stitched_map(cache: &BwikiCachePaths, zoom: u8) -> Result<Option<BwikiDataset>> {
-    let world =
-        zoom_world_bounds(zoom).ok_or_else(|| anyhow!("unsupported stitched map zoom {zoom}"))?;
-    let output = stitched_map_path(cache, zoom);
-    if output.is_file() {
-        return Ok(None);
-    }
+fn assemble_gray_map(
+    cache: &BwikiCachePaths,
+    range: BwikiTileZoom,
+    output_tile_size: u32,
+) -> Result<GrayImage> {
+    let width = range.width_tiles() * output_tile_size.max(1);
+    let height = range.height_tiles() * output_tile_size.max(1);
+    let mut canvas = GrayImage::new(width, height);
 
-    let width = world.world_width();
-    let height = world.world_height();
-    let mut canvas = RgbaImage::new(width, height);
-
-    for tile_y in world.min_y..=world.max_y {
-        for tile_x in world.min_x..=world.max_x {
-            let tile = download_tile_image(zoom, tile_x, tile_y)?;
-            let dx = (tile_x - world.min_x) as i64 * TILE_SIZE as i64;
-            let dy = (tile_y - world.min_y) as i64 * TILE_SIZE as i64;
+    for tile_y in range.min_y..=range.max_y {
+        for tile_x in range.min_x..=range.max_x {
+            let tile_path = download_tile(cache, range.zoom, tile_x, tile_y)?;
+            let tile = image::open(&tile_path)
+                .with_context(|| format!("failed to open BWiki tile {}", tile_path.display()))?
+                .into_luma8();
+            let tile = if output_tile_size == TILE_SIZE {
+                tile
+            } else {
+                resize(
+                    &tile,
+                    output_tile_size.max(1),
+                    output_tile_size.max(1),
+                    FilterType::Triangle,
+                )
+            };
+            let dx = (tile_x - range.min_x) as i64 * output_tile_size as i64;
+            let dy = (tile_y - range.min_y) as i64 * output_tile_size as i64;
             replace(&mut canvas, &tile, dx, dy);
         }
     }
 
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create stitched map cache directory {}",
-                parent.display()
-            )
-        })?;
+    Ok(canvas)
+}
+
+fn preferred_logic_zoom(scale: u32) -> BwikiTileZoom {
+    let scale = scale.max(1);
+    BWIKI_TILE_ZOOMS
+        .iter()
+        .copied()
+        .filter(|item| item.source_world_pixel_size() <= scale)
+        .max_by_key(|item| item.zoom)
+        .unwrap_or_else(|| BWIKI_TILE_ZOOMS[0])
+}
+
+fn previous_supported_zoom(zoom: u8) -> Option<u8> {
+    BWIKI_TILE_ZOOMS
+        .iter()
+        .filter_map(|item| (item.zoom < zoom).then_some(item.zoom))
+        .max()
+}
+
+fn visible_tiles_for_zoom(
+    camera: crate::domain::geometry::MapCamera,
+    viewport: crate::domain::geometry::ViewportSize,
+    zoom: u8,
+    prefetch_tiles: i32,
+) -> Option<BwikiVisibleTileLayer> {
+    let range = zoom_world_bounds(zoom)?;
+    let top_left = camera.screen_to_world(WorldPoint::new(0.0, 0.0));
+    let bottom_right = camera.screen_to_world(WorldPoint::new(viewport.width, viewport.height));
+    let min_world = WorldPoint::new(
+        top_left.x.min(bottom_right.x),
+        top_left.y.min(bottom_right.y),
+    );
+    let max_world = WorldPoint::new(
+        top_left.x.max(bottom_right.x),
+        top_left.y.max(bottom_right.y),
+    );
+    let (mut min_x, mut min_y) = world_to_tile_coordinate(zoom, min_world)?;
+    let (mut max_x, mut max_y) = world_to_tile_coordinate(zoom, max_world)?;
+    min_x = (min_x - prefetch_tiles).clamp(range.min_x, range.max_x);
+    max_x = (max_x + prefetch_tiles).clamp(range.min_x, range.max_x);
+    min_y = (min_y - prefetch_tiles).clamp(range.min_y, range.max_y);
+    max_y = (max_y + prefetch_tiles).clamp(range.min_y, range.max_y);
+
+    let mut tiles = Vec::with_capacity(((max_x - min_x + 1) * (max_y - min_y + 1)) as usize);
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            tiles.push(BwikiVisibleTile {
+                zoom,
+                x,
+                y,
+                world_size: range.world_tile_size(),
+            });
+        }
     }
-    canvas
-        .save(&output)
-        .with_context(|| format!("failed to write stitched BWiki map {}", output.display()))?;
-    Ok(None)
+
+    Some(BwikiVisibleTileLayer { zoom, tiles })
 }
 
 fn strip_html_tags(input: &str) -> String {
@@ -855,8 +1013,8 @@ fn recalculate_dataset_world_points(dataset: &mut BwikiDataset) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BWIKI_WORLD_ZOOM, default_map_dimensions, raw_coordinate_to_world,
-        tile_coordinate_to_world_origin,
+        BWIKI_WORLD_ZOOM, default_map_dimensions, preferred_display_tile_zoom,
+        raw_coordinate_to_world, tile_coordinate_to_world_origin, world_to_tile_coordinate,
     };
 
     #[test]
@@ -867,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn origin_matches_current_stitched_tile_bounds() {
+    fn origin_matches_world_tile_anchor() {
         let world = raw_coordinate_to_world(0, 0);
         assert_eq!(world.x, 6144.0);
         assert_eq!(world.y, 4608.0);
@@ -892,6 +1050,10 @@ mod tests {
             tile_coordinate_to_world_origin(BWIKI_WORLD_ZOOM, -12, 10).expect("z8 tile origin");
         assert_eq!(point.x - tile.x, 158.0);
         assert_eq!(point.y - tile.y, 214.0);
+        assert_eq!(
+            world_to_tile_coordinate(BWIKI_WORLD_ZOOM, point),
+            Some((-12, 10))
+        );
     }
 
     #[test]
@@ -902,5 +1064,13 @@ mod tests {
             assert!(world.x >= 0.0 && world.x <= dims.width as f32);
             assert!(world.y >= 0.0 && world.y <= dims.height as f32);
         }
+    }
+
+    #[test]
+    fn preferred_display_zoom_tracks_screen_density() {
+        assert_eq!(preferred_display_tile_zoom(1.0), 8);
+        assert_eq!(preferred_display_tile_zoom(0.5), 7);
+        assert_eq!(preferred_display_tile_zoom(0.25), 6);
+        assert_eq!(preferred_display_tile_zoom(0.125), 5);
     }
 }
