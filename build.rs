@@ -7,27 +7,13 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("missing manifest dir"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));
     let generated_path = out_dir.join("embedded_assets.rs");
-    let map_assets_root = manifest_dir.join("assets").join("map");
-    let point_assets_root = manifest_dir.join("assets").join("points");
     let icon_assets_root = manifest_dir.join("assets").join("icons");
 
-    for root in [&map_assets_root, &point_assets_root, &icon_assets_root] {
+    for root in [&icon_assets_root] {
         println!("cargo:rerun-if-changed={}", root.display());
     }
 
     let mut files = Vec::new();
-    collect_files(
-        &map_assets_root,
-        &map_assets_root,
-        Path::new("assets").join("map").as_path(),
-        &mut files,
-    );
-    collect_files(
-        &point_assets_root,
-        &point_assets_root,
-        Path::new("assets").join("points").as_path(),
-        &mut files,
-    );
     collect_files(
         &icon_assets_root,
         &icon_assets_root,

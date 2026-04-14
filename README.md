@@ -2,17 +2,21 @@
 
 完全独立的纯 Rust / GPUI 桌面版 Game Map Tracker。
 
-这个 repo 不再依赖上级 `Game-Map-Tracker` 仓库，也不再依赖本机相邻目录里的 `gpui-component` 源码。地图和点位图标会直接内置进二进制；默认配置不再来自模板文件，而是由 Rust `Default` 直接生成并写入用户数据目录，标记组 routes 完全由用户自行导入或创建。
+这个 repo 不再依赖上级 `Game-Map-Tracker` 仓库，也不再依赖本机相邻目录里的 `gpui-component` 源码。运行时地图瓦片、Wiki 图标和点位目录全部由 Rust 直接从 Bilibili Wiki 拉取并缓存；默认配置不再来自模板文件，而是由 Rust `Default` 直接生成并写入用户数据目录，标记组 routes 完全由用户自行导入或创建。
 
 ## Standalone 设计
 
 - `gpui` 使用 crates.io 依赖。
 - `gpui-component` 使用 crates.io 依赖，不再读取本机 `gpui-component` 子目录。
-- `assets/map` / `assets/points` 存放编译期内置的地图和点位图标资源。
-- `build.rs` 只会把静态地图和点位图标生成到编译期静态资源表。
+- BWiki 是运行时真实数据源：
+  - 点位类型目录：`Data:Mapnew/type/json`
+  - 点位总表：`Data:Mapnew/point.json`
+  - 瓦片底图：`map-3.0/{z}/tile-{x}_{y}.png`
+- `build.rs` 现在只内置 UI SVG 图标，不再把地图瓦片和点位 PNG 编译进二进制。
 - `src/resources/bootstrap.rs` 在本地缺失 `config.toml` 时，用 `AppConfig::default()` 直接生成默认配置。
-- `src/resources/bootstrap.rs` 不再写出地图、图标和默认 routes。
-- `src/embedded_assets.rs` 负责给 GPUI 和追踪运行时提供二进制内置资源。
+- `src/resources/bwiki.rs` 负责 Rust 侧数据抓取、瓦片/图标缓存、拼接底图和点位坐标转换。
+- `src/resources/bootstrap.rs` 不再写出地图、图标和默认 routes，只创建数据目录与缓存目录。
+- JS 脚本不是产品运行链路。应用本身只走 Rust 代码路径。
 - 运行时默认数据目录在系统用户数据目录下，不会读写父级旧仓库。
 - 唯一支持的运行时环境变量是 `GAME_MAP_TRACKER_RS_DATA_DIR`，仅用于覆盖数据目录。
 
@@ -32,28 +36,28 @@ cargo run --features ai-candle
 ## 当前结构
 
 ```text
-build.rs                编译期扫描 assets 并生成 include_bytes! 表
-assets/map/             内置逻辑地图与显示地图资源
-assets/points/          内置点位图标资源
+build.rs                编译期扫描 UI 静态资源并生成 include_bytes! 表
 src/app/                GPUI 启动、窗口初始化、资产加载源
 src/config/             config.toml 的强类型映射与默认值
 src/domain/             地图几何、路线、标记点、主题、追踪状态等领域模型
-src/resources/          数据目录引导、资源扫描、标记点与 UI 偏好持久化
+src/resources/          数据目录引导、BWiki 抓取缓存、标记点与 UI 偏好持久化
 src/tracking/           截图、模板匹配、Candle 后端、运行时线程、调试快照
-src/ui/                 GPUI 工作台、分页导航、地图画布、标记点编辑界面
+src/ui/                 GPUI 工作台、分页导航、双地图子页、标记点编辑界面
 ```
 
 ## 已实现能力
 
 - 独立数据目录引导
   - 首次启动自动生成默认 `config.toml`
-  - 地图和标记图标直接由二进制内置提供，不再写入用户目录
+  - 自动创建 `cache/bwiki/` 目录用于缓存点位、图标、瓦片和拼接底图
   - 不再内置任何默认 routes，标记组完全由用户导入或创建
 
 - GPUI 工作台
   - 多页面导航：地图、标记、设置
+  - 地图二级导航：路线追踪 / BWiki 全图
   - 设置页二级导航：配置、调试信息、资源
-  - 地图页独立占满主内容区，避免被其它面板挤压
+  - 追踪地图页会按需拼接并缓存 BWiki 底图
+  - BWiki 全图页支持按分类展示全部 Wiki 类型，并支持多选开关显示
   - 缩放 / 拖拽相机
   - 路线节点与折线绘制
   - 实时追踪点与轨迹回显
@@ -92,7 +96,7 @@ src/ui/                 GPUI 工作台、分页导航、地图画布、标记点
 
 ## 运行时数据目录
 
-默认数据目录位置由 `directories` crate 按平台解析，例如 Windows 下会落到本机用户数据目录。程序会在 `config.toml` 缺失时用 Rust 默认值生成一份新的配置，不会覆盖已有的用户编辑结果；地图和点位图标始终直接使用二进制内置资源，`routes/`、`config.toml`、`.game-map-tracker-rs.toml` 都固定从该数据目录读取。
+默认数据目录位置由 `directories` crate 按平台解析，例如 Windows 下会落到本机用户数据目录。程序会在 `config.toml` 缺失时用 Rust 默认值生成一份新的配置，不会覆盖已有的用户编辑结果；`routes/`、`config.toml`、`.game-map-tracker-rs.toml` 和 `cache/bwiki/` 都固定从该数据目录读取。
 
 覆盖数据目录路径：
 
@@ -107,6 +111,12 @@ cargo run
 data/
   config.toml
   .game-map-tracker-rs.toml
+  cache/
+    bwiki/
+      data/
+      icons/
+      stitched/
+      tiles/
   routes/
     *.json
 ```

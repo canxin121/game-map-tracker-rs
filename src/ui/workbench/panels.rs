@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use gpui::{
     AnyElement, Bounds, ClickEvent, ClipboardItem, ContentMask, Context, ImgResourceLoader,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -16,17 +18,20 @@ use gpui_component::{
 use strum::IntoEnumIterator;
 
 use crate::{
-    domain::{marker::MarkerIconStyle, theme::ThemePreference, tracker::TrackingSource},
+    domain::{
+        geometry::WorldPoint, marker::MarkerIconStyle, theme::ThemePreference,
+        tracker::TrackingSource,
+    },
+    resources::{BWIKI_WORLD_ZOOM, zoom_world_bounds},
     ui::map_canvas::{
-        bounds_corner_radius, inflate_bounds, marker_image_bounds, parse_hex_color, route_points,
-        screen_points,
+        bounds_corner_radius, marker_image_bounds, parse_hex_color, route_points, screen_points,
     },
 };
 
 use super::{
     TrackerWorkbench,
     forms::read_input_value,
-    page::{MarkersPage, SettingsPage, WorkbenchPage},
+    page::{MapPage, MarkersPage, SettingsPage, WorkbenchPage},
     theme::WorkbenchThemeTokens,
 };
 
@@ -34,6 +39,8 @@ pub(super) fn render_workbench(
     this: &mut TrackerWorkbench,
     cx: &mut Context<TrackerWorkbench>,
 ) -> impl IntoElement {
+    this.bwiki_resources.ensure_dataset_loaded();
+    this.sync_bwiki_visibility_defaults();
     let tokens = WorkbenchThemeTokens::from_theme(cx.theme());
     let page_content = match this.active_page {
         WorkbenchPage::Map => map_page(this, cx, tokens).into_any_element(),
@@ -72,6 +79,8 @@ fn navigation_sidebar(
     cx: &mut Context<TrackerWorkbench>,
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
+    let map_is_active = this.active_page == WorkbenchPage::Map;
+    let map_is_open = this.map_nav_expanded;
     let markers_is_active = this.active_page == WorkbenchPage::Markers;
     let markers_is_open = this.markers_nav_expanded;
     let settings_is_active = this.active_page == WorkbenchPage::Settings;
@@ -98,14 +107,52 @@ fn navigation_sidebar(
                     "sidebar-nav-map",
                     tokens,
                     "地图",
-                    this.active_page == WorkbenchPage::Map,
+                    map_is_active,
                     tokens.nav_item_active_bg,
-                    None,
+                    Some(if map_is_open { "v" } else { ">" }),
                     cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.select_page(WorkbenchPage::Map);
+                        this.toggle_map_navigation();
                         cx.notify();
                     }),
                 ))
+                .when(map_is_open, |column| {
+                    column.child(
+                        div()
+                            .ml_4()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .rounded_lg()
+                            .bg(tokens.nav_branch_bg)
+                            .border_1()
+                            .border_color(tokens.border)
+                            .p_2()
+                            .child(sidebar_nav_item(
+                                "sidebar-nav-map-tracker",
+                                tokens,
+                                "路线追踪",
+                                map_is_active && this.map_page == MapPage::Tracker,
+                                tokens.nav_subitem_active_bg,
+                                None,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.select_map_page(MapPage::Tracker);
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(sidebar_nav_item(
+                                "sidebar-nav-map-bwiki",
+                                tokens,
+                                "BWiki 全图",
+                                map_is_active && this.map_page == MapPage::Bwiki,
+                                tokens.nav_subitem_active_bg,
+                                None,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.select_map_page(MapPage::Bwiki);
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                })
                 .child(sidebar_nav_item(
                     "sidebar-nav-markers",
                     tokens,
@@ -1273,8 +1320,8 @@ fn page_header(
         }),
     )
     .into_any_element();
-    let controls = if this.active_page == WorkbenchPage::Map {
-        vec![
+    let controls = match (this.active_page, this.map_page) {
+        (WorkbenchPage::Map, MapPage::Tracker) => vec![
             toolbar_cluster(vec![
                 status_chip(tokens, "G", format!("当前组 {}", this.active_group_name()))
                     .into_any_element(),
@@ -1378,9 +1425,73 @@ fn page_header(
                 theme_button,
             ])
             .into_any_element(),
-        ]
-    } else {
-        vec![toolbar_cluster(vec![theme_button]).into_any_element()]
+        ],
+        (WorkbenchPage::Map, MapPage::Bwiki) => {
+            let (total_types, total_points) = this
+                .bwiki_resources
+                .dataset_snapshot()
+                .map(|dataset| (dataset.types.len(), dataset.total_point_count()))
+                .unwrap_or_default();
+            vec![
+                toolbar_cluster(vec![
+                    status_chip(tokens, "T", format!("类型 {}", total_types)).into_any_element(),
+                    status_chip(
+                        tokens,
+                        "V",
+                        format!("显示 {} 类", this.bwiki_visible_type_count()),
+                    )
+                    .into_any_element(),
+                    status_chip(
+                        tokens,
+                        "P",
+                        format!("点位 {}/{}", this.bwiki_visible_point_count(), total_points),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+                toolbar_cluster(vec![
+                    toolbar_button(
+                        "bwiki-show-all",
+                        tokens,
+                        "A",
+                        "显示全部",
+                        ToolbarButtonTone::Primary,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.show_all_bwiki_types();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                    toolbar_button(
+                        "bwiki-hide-all",
+                        tokens,
+                        "H",
+                        "全部隐藏",
+                        ToolbarButtonTone::Danger,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.hide_all_bwiki_types();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                    toolbar_button(
+                        "bwiki-refresh",
+                        tokens,
+                        "R",
+                        "刷新数据",
+                        ToolbarButtonTone::Neutral,
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.refresh_bwiki_dataset();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                    theme_button,
+                ])
+                .into_any_element(),
+            ]
+        }
+        _ => vec![toolbar_cluster(vec![theme_button]).into_any_element()],
     };
 
     div()
@@ -1407,14 +1518,26 @@ fn map_page(
     cx: &mut Context<TrackerWorkbench>,
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
-    div()
-        .flex_1()
-        .min_h(px(0.0))
-        .flex()
-        .gap_4()
-        .overflow_hidden()
-        .child(map_sidebar(this, cx, tokens))
-        .child(map_panel(this, cx, tokens))
+    match this.map_page {
+        MapPage::Tracker => div()
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .gap_4()
+            .overflow_hidden()
+            .child(map_sidebar(this, cx, tokens))
+            .child(map_panel(this, cx, tokens))
+            .into_any_element(),
+        MapPage::Bwiki => div()
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .gap_4()
+            .overflow_hidden()
+            .child(bwiki_types_sidebar(this, cx, tokens))
+            .child(bwiki_map_panel(this, cx, tokens))
+            .into_any_element(),
+    }
 }
 
 fn markers_page(
@@ -2275,7 +2398,7 @@ fn settings_resources_page(
         .child(section_title("本地数据路径"))
         .child(body_text(
             tokens,
-            "这里只显示真实落盘路径。内置地图、图标等内存资源不会在这里列出。",
+            "路线文件、配置和 BWiki 运行时缓存都会真实落盘。地图瓦片、拼接底图和点位图标只会在首次需要时下载到缓存目录。",
         ))
         .child(resource_path(
             "resource-data-dir",
@@ -2290,6 +2413,13 @@ fn settings_resources_page(
             tokens,
             "标记组目录",
             &this.workspace.assets.routes_dir.display().to_string(),
+        ))
+        .child(resource_path(
+            "resource-bwiki-cache-dir",
+            cx,
+            tokens,
+            "BWiki 缓存目录",
+            &this.workspace.assets.bwiki_cache_dir.display().to_string(),
         ))
         .child(resource_path(
             "resource-models-dir",
@@ -2346,7 +2476,6 @@ fn map_panel(
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
     let entity = cx.entity();
-    let logic_map = gpui::Resource::Embedded(SharedString::from("assets/map/logic_map.png"));
     let map_dimensions = this.workspace.report.map_dimensions;
 
     div()
@@ -2366,31 +2495,32 @@ fn map_panel(
                 .items_center()
                 .justify_between()
                 .mb_3()
-                .child(section_title("地图"))
+                .child(section_title("路线地图"))
                 .child(
                     div()
                         .text_xs()
                         .text_color(tokens.text_muted)
-                        .child("滚轮缩放，左键拖拽；仅展示当前选中的标记组"),
+                        .child("滚轮缩放，左键拖拽；首次使用会懒加载并缓存 BWiki 拼接底图"),
                 ),
         )
         .child(
             div().flex_1().overflow_hidden().child(
                 canvas(
-                    move |_, window, cx| window.use_asset::<ImgResourceLoader>(&logic_map, cx),
-                    move |bounds, image_result, window, cx| {
+                    move |_, _, _| (),
+                    move |bounds, _, window, cx| {
                         let bounds_width = f32::from(bounds.size.width);
                         let bounds_height = f32::from(bounds.size.height);
                         _ = entity.update(cx, |this, cx| {
-                            this.map_view.update_viewport(bounds_width, bounds_height);
-                            let needs_fit = this.map_view.needs_fit;
+                            this.tracker_map_view
+                                .update_viewport(bounds_width, bounds_height);
+                            let needs_fit = this.tracker_map_view.needs_fit;
                             let active_group = this.active_group().cloned();
-                            this.map_view.fit_to_route_or_map(
+                            this.tracker_map_view.fit_to_route_or_map(
                                 active_group.as_ref(),
                                 map_dimensions,
                                 24.0,
                             );
-                            let centered = this.map_view.apply_pending_center();
+                            let centered = this.tracker_map_view.apply_pending_center();
                             if needs_fit || centered {
                                 cx.notify();
                             }
@@ -2404,16 +2534,19 @@ fn map_panel(
                             point_visuals,
                             selected_group_id,
                             selected_point_id,
+                            logic_map_path,
                         ) = {
                             let this = entity.read(cx);
                             (
-                                this.map_view.camera,
+                                this.tracker_map_view.camera,
                                 this.active_group().cloned(),
                                 this.trail.clone(),
                                 this.preview_position.clone(),
                                 this.active_group_points(),
                                 this.selected_group_id.clone(),
                                 this.selected_point_id.clone(),
+                                this.bwiki_resources
+                                    .ensure_stitched_map_path(BWIKI_WORLD_ZOOM),
                             )
                         };
 
@@ -2421,25 +2554,30 @@ fn map_panel(
                             window.with_content_mask(Some(ContentMask { bounds }), |window| {
                                 window.paint_quad(fill(bounds, tokens.map_canvas_backdrop));
 
-                                if let Some(Ok(image)) = image_result.as_ref() {
-                                    let image_bounds = Bounds {
-                                        origin: point(
-                                            bounds.origin.x + px(camera.offset_x),
-                                            bounds.origin.y + px(camera.offset_y),
-                                        ),
-                                        size: size(
-                                            px(map_dimensions.width as f32 * camera.zoom),
-                                            px(map_dimensions.height as f32 * camera.zoom),
-                                        ),
-                                    };
+                                if let Some(path) = logic_map_path {
+                                    let resource = gpui::Resource::from(path);
+                                    let image_result =
+                                        window.use_asset::<ImgResourceLoader>(&resource, cx);
+                                    if let Some(Ok(image)) = image_result.as_ref() {
+                                        let image_bounds = Bounds {
+                                            origin: point(
+                                                bounds.origin.x + px(camera.offset_x),
+                                                bounds.origin.y + px(camera.offset_y),
+                                            ),
+                                            size: size(
+                                                px(map_dimensions.width as f32 * camera.zoom),
+                                                px(map_dimensions.height as f32 * camera.zoom),
+                                            ),
+                                        };
 
-                                    let _ = window.paint_image(
-                                        image_bounds,
-                                        0.0.into(),
-                                        image.clone(),
-                                        0,
-                                        false,
-                                    );
+                                        let _ = window.paint_image(
+                                            image_bounds,
+                                            0.0.into(),
+                                            image.clone(),
+                                            0,
+                                            false,
+                                        );
+                                    }
                                 }
                             });
                         });
@@ -2518,46 +2656,15 @@ fn map_panel(
                                         bounds.origin.x + px(screen.x),
                                         bounds.origin.y + px(screen.y),
                                     );
-                                    let icon_bounds =
-                                        marker_image_bounds(anchor, marker.style.size_px);
                                     let accent = parse_hex_color(&marker.style.color_hex, 0x4ecdc4);
-                                    let accent_bounds = inflate_bounds(icon_bounds, 3.0);
-                                    if !highlighted {
-                                        window.paint_quad(
-                                            fill(accent_bounds, gpui::rgba((accent << 8) | 0x2a))
-                                                .corner_radii(bounds_corner_radius(
-                                                    accent_bounds,
-                                                    14.0,
-                                                )),
-                                        );
-                                    }
-
-                                    let image_bounds = icon_bounds;
-                                    if highlighted {
-                                        let frame_bounds = inflate_bounds(icon_bounds, 5.0);
-                                        window.paint_quad(
-                                            fill(frame_bounds, tokens.selected_marker_border)
-                                                .corner_radii(bounds_corner_radius(
-                                                    frame_bounds,
-                                                    18.0,
-                                                )),
-                                        );
-                                    }
-
-                                    let icon_resource = gpui::Resource::Embedded(
-                                        SharedString::from(marker.style.icon.asset_path()),
+                                    paint_route_marker(
+                                        window,
+                                        anchor,
+                                        marker.style.size_px,
+                                        accent,
+                                        highlighted,
+                                        tokens,
                                     );
-                                    let icon_result =
-                                        window.use_asset::<ImgResourceLoader>(&icon_resource, cx);
-                                    if let Some(Ok(image)) = icon_result.as_ref() {
-                                        let _ = window.paint_image(
-                                            image_bounds,
-                                            0.0.into(),
-                                            image.clone(),
-                                            0,
-                                            false,
-                                        );
-                                    }
                                 }
 
                                 if let Some(position) =
@@ -2605,7 +2712,7 @@ fn map_panel(
                                 }
 
                                 _ = entity.update(cx, |this, _| {
-                                    this.map_view.dragging_from =
+                                    this.tracker_map_view.dragging_from =
                                         Some(crate::domain::geometry::WorldPoint::new(
                                             f32::from(event.position.x),
                                             f32::from(event.position.y),
@@ -2617,14 +2724,15 @@ fn map_panel(
                             let entity = entity.clone();
                             move |event: &MouseMoveEvent, _, _, cx| {
                                 _ = entity.update(cx, |this, cx| {
-                                    let Some(from) = this.map_view.dragging_from.take() else {
+                                    let Some(from) = this.tracker_map_view.dragging_from.take()
+                                    else {
                                         return;
                                     };
                                     let dx = f32::from(event.position.x) - from.x;
                                     let dy = f32::from(event.position.y) - from.y;
-                                    this.map_view.camera.offset_x += dx;
-                                    this.map_view.camera.offset_y += dy;
-                                    this.map_view.dragging_from =
+                                    this.tracker_map_view.camera.offset_x += dx;
+                                    this.tracker_map_view.camera.offset_y += dy;
+                                    this.tracker_map_view.dragging_from =
                                         Some(crate::domain::geometry::WorldPoint::new(
                                             f32::from(event.position.x),
                                             f32::from(event.position.y),
@@ -2637,7 +2745,7 @@ fn map_panel(
                             let entity = entity.clone();
                             move |_: &MouseUpEvent, _, _, cx| {
                                 _ = entity.update(cx, |this, _| {
-                                    this.map_view.dragging_from = None;
+                                    this.tracker_map_view.dragging_from = None;
                                 });
                             }
                         });
@@ -2659,11 +2767,502 @@ fn map_panel(
                                 let anchor_y =
                                     f32::from(event.position.y) - f32::from(bounds.origin.y);
                                 _ = entity.update(cx, |this, cx| {
-                                    this.map_view.camera.zoom_at(anchor_x, anchor_y, delta);
+                                    this.tracker_map_view
+                                        .camera
+                                        .zoom_at(anchor_x, anchor_y, delta);
                                     cx.notify();
                                 });
                             }
                         });
+                    },
+                )
+                .size_full(),
+            ),
+        )
+}
+
+fn bwiki_types_sidebar(
+    this: &TrackerWorkbench,
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    let dataset = this.bwiki_resources.dataset_snapshot();
+    let mut grouped = BTreeMap::<String, Vec<(u32, String, String, usize)>>::new();
+    if let Some(dataset) = dataset.as_ref() {
+        for definition in &dataset.types {
+            grouped
+                .entry(definition.category.clone())
+                .or_default()
+                .push((
+                    definition.mark_type,
+                    definition.name.clone(),
+                    definition.icon_url.clone(),
+                    definition.point_count,
+                ));
+        }
+    }
+
+    let category_cards = grouped
+        .into_iter()
+        .enumerate()
+        .map(|(category_index, (category, definitions))| {
+            let visible_type_count = definitions
+                .iter()
+                .filter(|(mark_type, _, _, _)| this.bwiki_visible_mark_types.contains(mark_type))
+                .count();
+            let total_point_count = definitions
+                .iter()
+                .map(|(_, _, _, count)| count)
+                .sum::<usize>();
+            let expanded = this.bwiki_expanded_categories.contains(&category);
+            let category_for_expand = category.clone();
+            let category_for_show = category.clone();
+            let category_for_hide = category.clone();
+
+            div()
+                .rounded_lg()
+                .bg(tokens.panel_sunken_bg)
+                .border_1()
+                .border_color(tokens.border)
+                .p_3()
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .id(("bwiki-category-toggle", category_index))
+                                .flex_1()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.toggle_bwiki_category_expanded(&category_for_expand);
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(tokens.app_fg)
+                                                .child(format!(
+                                                    "{} {}",
+                                                    if expanded { "v" } else { ">" },
+                                                    category
+                                                )),
+                                        )
+                                        .child(
+                                            div().text_xs().text_color(tokens.text_muted).child(
+                                                format!(
+                                                    "{} / {} 类型可见 · {} 点位",
+                                                    visible_type_count,
+                                                    definitions.len(),
+                                                    total_point_count
+                                                ),
+                                            ),
+                                        ),
+                                ),
+                        )
+                        .child(toolbar_cluster(vec![
+                            toolbar_icon_button(
+                                format!("bwiki-category-show-{category_for_show}"),
+                                tokens,
+                                "+",
+                                format!("显示分类 {}", category_for_show),
+                                ToolbarButtonTone::Primary,
+                                false,
+                                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.set_bwiki_category_visibility(&category_for_show, true);
+                                    cx.notify();
+                                }),
+                            )
+                            .into_any_element(),
+                            toolbar_icon_button(
+                                format!("bwiki-category-hide-{category_for_hide}"),
+                                tokens,
+                                "-",
+                                format!("隐藏分类 {}", category_for_hide),
+                                ToolbarButtonTone::Danger,
+                                false,
+                                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.set_bwiki_category_visibility(&category_for_hide, false);
+                                    cx.notify();
+                                }),
+                            )
+                            .into_any_element(),
+                        ])),
+                )
+                .when(expanded, |card| {
+                    let type_rows = definitions
+                        .into_iter()
+                        .map(|(mark_type, name, _icon_url, point_count)| {
+                            let title = if point_count == 0 {
+                                format!("{name} (空)")
+                            } else {
+                                name.clone()
+                            };
+                            let subtitle = format!("markType {mark_type} · {point_count} 点");
+                            let visible = this.bwiki_visible_mark_types.contains(&mark_type);
+                            let label = name.clone();
+                            selectable_list_row(
+                                format!("bwiki-type-{mark_type}"),
+                                tokens,
+                                title,
+                                subtitle,
+                                visible,
+                                Some(if visible { "显示中" } else { "已隐藏" }.into()),
+                                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.toggle_bwiki_type_visibility(mark_type, &label);
+                                    cx.notify();
+                                }),
+                            )
+                            .into_any_element()
+                        })
+                        .collect::<Vec<_>>();
+                    card.child(div().mt_3().flex().flex_col().gap_2().children(type_rows))
+                })
+                .into_any_element()
+        })
+        .collect::<Vec<_>>();
+
+    let last_error = this.bwiki_resources.last_error();
+    div()
+        .w(px(420.0))
+        .min_h(px(0.0))
+        .flex()
+        .flex_col()
+        .gap_4()
+        .overflow_y_scrollbar()
+        .rounded_xl()
+        .bg(tokens.panel_bg)
+        .border_1()
+        .border_color(tokens.border)
+        .p_4()
+        .child(section_title("BWiki 类型过滤"))
+        .child(body_text(
+            tokens,
+            "这里按 Wiki 原始分类列出全部类型。点击分类可展开，点击类型可切换地图显示；图标会在地图上首次需要时懒下载并缓存。",
+        ))
+        .when_some(last_error, |panel, error| {
+            panel.child(config_section("最近一次缓存错误", vec![error], tokens))
+        })
+        .when(dataset.is_none(), |panel| {
+            panel.child(config_section(
+                "正在同步 BWiki 数据",
+                vec![
+                    "首次启动会请求点位目录与类型目录。".to_owned(),
+                    "缓存准备好以后，这里会自动列出所有分类与类型。".to_owned(),
+                ],
+                tokens,
+            ))
+        })
+        .when(!category_cards.is_empty(), |panel| panel.children(category_cards))
+}
+
+fn bwiki_map_panel(
+    this: &TrackerWorkbench,
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    let entity = cx.entity();
+    let map_dimensions = this.workspace.report.map_dimensions;
+
+    div()
+        .flex_1()
+        .min_h(px(0.0))
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .rounded_xl()
+        .bg(tokens.panel_deep_bg)
+        .border_1()
+        .border_color(tokens.border)
+        .p_3()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .mb_3()
+                .child(section_title("BWiki 大地图"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(tokens.text_muted)
+                        .child("按视野懒加载瓦片与图标；滚轮缩放，左键拖拽"),
+                ),
+        )
+        .child(
+            div().flex_1().overflow_hidden().child(
+                canvas(
+                    move |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        let bounds_width = f32::from(bounds.size.width);
+                        let bounds_height = f32::from(bounds.size.height);
+                        _ = entity.update(cx, |this, cx| {
+                            this.bwiki_map_view
+                                .update_viewport(bounds_width, bounds_height);
+                            let needs_fit = this.bwiki_map_view.needs_fit;
+                            this.bwiki_map_view
+                                .fit_to_route_or_map(None, map_dimensions, 24.0);
+                            let centered = this.bwiki_map_view.apply_pending_center();
+                            if needs_fit || centered {
+                                cx.notify();
+                            }
+                        });
+
+                        let (camera, dataset, visible_mark_types, last_error) = {
+                            let this = entity.read(cx);
+                            (
+                                this.bwiki_map_view.camera,
+                                this.bwiki_resources.dataset_snapshot(),
+                                this.bwiki_visible_mark_types.clone(),
+                                this.bwiki_resources.last_error(),
+                            )
+                        };
+
+                        window.paint_layer(bounds, |window| {
+                            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                                window.paint_quad(fill(bounds, tokens.map_canvas_backdrop));
+
+                                let tile_zoom = preferred_bwiki_tile_zoom(camera.zoom);
+                                if let Some(range) = zoom_world_bounds(tile_zoom) {
+                                    let world_tile_size = range.world_tile_size() as f32;
+                                    let top_left =
+                                        camera.screen_to_world(WorldPoint::new(0.0, 0.0));
+                                    let bottom_right = camera.screen_to_world(WorldPoint::new(
+                                        bounds_width,
+                                        bounds_height,
+                                    ));
+                                    let min_world_x = top_left.x.min(bottom_right.x).max(0.0);
+                                    let min_world_y = top_left.y.min(bottom_right.y).max(0.0);
+                                    let max_world_x = top_left
+                                        .x
+                                        .max(bottom_right.x)
+                                        .min(map_dimensions.width as f32);
+                                    let max_world_y = top_left
+                                        .y
+                                        .max(bottom_right.y)
+                                        .min(map_dimensions.height as f32);
+
+                                    let width_tiles = range.width_tiles() as i32;
+                                    let height_tiles = range.height_tiles() as i32;
+                                    let start_col =
+                                        ((min_world_x / world_tile_size).floor() as i32 - 1)
+                                            .clamp(0, width_tiles.saturating_sub(1));
+                                    let end_col = ((max_world_x / world_tile_size).ceil() as i32
+                                        + 1)
+                                    .clamp(0, width_tiles.saturating_sub(1));
+                                    let start_row =
+                                        ((min_world_y / world_tile_size).floor() as i32 - 1)
+                                            .clamp(0, height_tiles.saturating_sub(1));
+                                    let end_row = ((max_world_y / world_tile_size).ceil() as i32
+                                        + 1)
+                                    .clamp(0, height_tiles.saturating_sub(1));
+
+                                    for local_y in start_row..=end_row {
+                                        for local_x in start_col..=end_col {
+                                            let tile_x = range.min_x + local_x;
+                                            let tile_y = range.min_y + local_y;
+                                            let world_x = local_x as f32 * world_tile_size;
+                                            let world_y = local_y as f32 * world_tile_size;
+                                            let tile_bounds =
+                                                Bounds {
+                                                    origin: point(
+                                                        bounds.origin.x
+                                                            + px(world_x * camera.zoom
+                                                                + camera.offset_x),
+                                                        bounds.origin.y
+                                                            + px(world_y * camera.zoom
+                                                                + camera.offset_y),
+                                                    ),
+                                                    size: size(
+                                                        px(world_tile_size * camera.zoom),
+                                                        px(world_tile_size * camera.zoom),
+                                                    ),
+                                                };
+                                            window.paint_quad(
+                                                fill(tile_bounds, tokens.panel_alt_bg)
+                                                    .corner_radii(bounds_corner_radius(
+                                                        tile_bounds,
+                                                        10.0,
+                                                    )),
+                                            );
+                                            if let Some(path) = entity
+                                                .read(cx)
+                                                .bwiki_resources
+                                                .ensure_tile_path(tile_zoom, tile_x, tile_y)
+                                            {
+                                                let resource = gpui::Resource::from(path);
+                                                let image_result = window
+                                                    .use_asset::<ImgResourceLoader>(&resource, cx);
+                                                if let Some(Ok(image)) = image_result.as_ref() {
+                                                    let _ = window.paint_image(
+                                                        tile_bounds,
+                                                        0.0.into(),
+                                                        image.clone(),
+                                                        0,
+                                                        false,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if let Some(dataset) = dataset.as_ref() {
+                                    let icon_paths = dataset
+                                        .types
+                                        .iter()
+                                        .filter(|item| visible_mark_types.contains(&item.mark_type))
+                                        .map(|item| {
+                                            (
+                                                item.mark_type,
+                                                entity.read(cx).bwiki_resources.ensure_icon_path(
+                                                    item.mark_type,
+                                                    &item.icon_url,
+                                                ),
+                                            )
+                                        })
+                                        .collect::<BTreeMap<_, _>>();
+
+                                    for definition in dataset
+                                        .types
+                                        .iter()
+                                        .filter(|item| visible_mark_types.contains(&item.mark_type))
+                                    {
+                                        let Some(points) =
+                                            dataset.points_by_type.get(&definition.mark_type)
+                                        else {
+                                            continue;
+                                        };
+
+                                        for point_record in points {
+                                            let screen = camera.world_to_screen(point_record.world);
+                                            if screen.x < -48.0
+                                                || screen.y < -48.0
+                                                || screen.x > bounds_width + 48.0
+                                                || screen.y > bounds_height + 48.0
+                                            {
+                                                continue;
+                                            }
+
+                                            let anchor = point(
+                                                bounds.origin.x + px(screen.x),
+                                                bounds.origin.y + px(screen.y),
+                                            );
+                                            if let Some(Some(path)) =
+                                                icon_paths.get(&definition.mark_type)
+                                            {
+                                                let resource = gpui::Resource::from(path.clone());
+                                                let image_result = window
+                                                    .use_asset::<ImgResourceLoader>(&resource, cx);
+                                                if let Some(Ok(image)) = image_result.as_ref() {
+                                                    let image_bounds =
+                                                        marker_image_bounds(anchor, 18.0);
+                                                    let _ = window.paint_image(
+                                                        image_bounds,
+                                                        0.0.into(),
+                                                        image.clone(),
+                                                        0,
+                                                        false,
+                                                    );
+                                                    continue;
+                                                }
+                                            }
+
+                                            paint_bwiki_placeholder_marker(
+                                                window,
+                                                anchor,
+                                                definition.mark_type,
+                                                tokens,
+                                            );
+                                        }
+                                    }
+                                }
+                            });
+                        });
+
+                        window.on_mouse_event({
+                            let entity = entity.clone();
+                            move |event: &MouseDownEvent, _, _, cx| {
+                                if event.button != MouseButton::Left
+                                    || !bounds.contains(&event.position)
+                                {
+                                    return;
+                                }
+
+                                _ = entity.update(cx, |this, _| {
+                                    this.bwiki_map_view.dragging_from =
+                                        Some(crate::domain::geometry::WorldPoint::new(
+                                            f32::from(event.position.x),
+                                            f32::from(event.position.y),
+                                        ));
+                                });
+                            }
+                        });
+                        window.on_mouse_event({
+                            let entity = entity.clone();
+                            move |event: &MouseMoveEvent, _, _, cx| {
+                                _ = entity.update(cx, |this, cx| {
+                                    let Some(from) = this.bwiki_map_view.dragging_from.take()
+                                    else {
+                                        return;
+                                    };
+                                    let dx = f32::from(event.position.x) - from.x;
+                                    let dy = f32::from(event.position.y) - from.y;
+                                    this.bwiki_map_view.camera.pan_by(dx, dy);
+                                    this.bwiki_map_view.dragging_from =
+                                        Some(crate::domain::geometry::WorldPoint::new(
+                                            f32::from(event.position.x),
+                                            f32::from(event.position.y),
+                                        ));
+                                    cx.notify();
+                                });
+                            }
+                        });
+                        window.on_mouse_event({
+                            let entity = entity.clone();
+                            move |_: &MouseUpEvent, _, _, cx| {
+                                _ = entity.update(cx, |this, _| {
+                                    this.bwiki_map_view.dragging_from = None;
+                                });
+                            }
+                        });
+                        window.on_mouse_event({
+                            let entity = entity.clone();
+                            move |event: &ScrollWheelEvent, _, _, cx| {
+                                if !bounds.contains(&event.position) {
+                                    return;
+                                }
+
+                                let delta = match event.delta {
+                                    ScrollDelta::Pixels(delta) => {
+                                        (f32::from(delta.y) / 320.0).clamp(-0.35, 0.35)
+                                    }
+                                    ScrollDelta::Lines(delta) => (delta.y / 8.0).clamp(-0.35, 0.35),
+                                };
+                                let anchor_x =
+                                    f32::from(event.position.x) - f32::from(bounds.origin.x);
+                                let anchor_y =
+                                    f32::from(event.position.y) - f32::from(bounds.origin.y);
+                                _ = entity.update(cx, |this, cx| {
+                                    this.bwiki_map_view
+                                        .camera
+                                        .zoom_at(anchor_x, anchor_y, delta);
+                                    cx.notify();
+                                });
+                            }
+                        });
+
+                        if dataset.is_none() || last_error.is_some() {
+                            _ = window;
+                        }
                     },
                 )
                 .size_full(),
@@ -2827,6 +3426,74 @@ fn paint_route_arrow(
     if let Ok(path) = builder.build() {
         window.paint_path(path, color);
     }
+}
+
+fn preferred_bwiki_tile_zoom(camera_zoom: f32) -> u8 {
+    if camera_zoom <= 0.10 {
+        4
+    } else if camera_zoom <= 0.18 {
+        5
+    } else if camera_zoom <= 0.35 {
+        6
+    } else if camera_zoom <= 0.75 {
+        7
+    } else {
+        BWIKI_WORLD_ZOOM
+    }
+}
+
+fn paint_route_marker(
+    window: &mut gpui::Window,
+    anchor: gpui::Point<gpui::Pixels>,
+    size_px: f32,
+    accent: u32,
+    highlighted: bool,
+    tokens: WorkbenchThemeTokens,
+) {
+    let radius = size_px.clamp(14.0, 64.0) * 0.34;
+    let outer_bounds = Bounds {
+        origin: point(anchor.x - px(radius + 4.0), anchor.y - px(radius + 4.0)),
+        size: size(px((radius + 4.0) * 2.0), px((radius + 4.0) * 2.0)),
+    };
+    let inner_bounds = Bounds {
+        origin: point(anchor.x - px(radius), anchor.y - px(radius)),
+        size: size(px(radius * 2.0), px(radius * 2.0)),
+    };
+    let core_bounds = Bounds {
+        origin: point(anchor.x - px(radius * 0.38), anchor.y - px(radius * 0.38)),
+        size: size(px(radius * 0.76), px(radius * 0.76)),
+    };
+
+    if highlighted {
+        window.paint_quad(
+            fill(outer_bounds, tokens.selected_marker_border).corner_radii(px(radius + 4.0)),
+        );
+    } else {
+        window.paint_quad(
+            fill(outer_bounds, gpui::rgba((accent << 8) | 0x55)).corner_radii(px(radius + 4.0)),
+        );
+    }
+    window.paint_quad(fill(inner_bounds, gpui::rgb(accent)).corner_radii(px(radius)));
+    window.paint_quad(fill(core_bounds, gpui::rgb(0xFFFFFF)).corner_radii(px(radius * 0.38)));
+}
+
+fn paint_bwiki_placeholder_marker(
+    window: &mut gpui::Window,
+    anchor: gpui::Point<gpui::Pixels>,
+    mark_type: u32,
+    tokens: WorkbenchThemeTokens,
+) {
+    let radius = 6.0 + (mark_type % 3) as f32;
+    let outer = Bounds {
+        origin: point(anchor.x - px(radius + 2.0), anchor.y - px(radius + 2.0)),
+        size: size(px((radius + 2.0) * 2.0), px((radius + 2.0) * 2.0)),
+    };
+    let inner = Bounds {
+        origin: point(anchor.x - px(radius), anchor.y - px(radius)),
+        size: size(px(radius * 2.0), px(radius * 2.0)),
+    };
+    window.paint_quad(fill(outer, tokens.preview_ring).corner_radii(px(radius + 2.0)));
+    window.paint_quad(fill(inner, tokens.preview_live).corner_radii(px(radius)));
 }
 
 fn resource_path(

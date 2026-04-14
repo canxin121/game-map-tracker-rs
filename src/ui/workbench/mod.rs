@@ -3,7 +3,7 @@ mod page;
 mod panels;
 mod theme;
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashSet, env, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{AppContext, Context, PathPromptOptions, Render, SharedString, Subscription, Window};
 use gpui_component::{
@@ -14,16 +14,15 @@ use gpui_component::{
 use crate::{
     config::{AppConfig, CONFIG_FILE_NAME},
     domain::{
-        geometry::{MapDimensions, WorldPoint},
+        geometry::WorldPoint,
         marker::{MarkerIconStyle, MarkerStyle},
         route::{RouteDocument, RouteId, RouteMetadata, RoutePoint, RoutePointId},
         theme::ThemePreference,
         tracker::{PositionEstimate, TrackerEngineKind, TrackerLifecycle, TrackingSource},
     },
-    embedded_assets,
     resources::{
-        AssetManifest, RouteImportReport, RouteRepository, UiPreferences, UiPreferencesRepository,
-        WorkspaceLoadReport, WorkspaceSnapshot,
+        AssetManifest, BwikiResourceManager, RouteImportReport, RouteRepository, UiPreferences,
+        UiPreferencesRepository, WorkspaceLoadReport, WorkspaceSnapshot, default_map_dimensions,
     },
     tracking::{
         TrackerSession, TrackingEvent, debug::TrackingDebugSnapshot, spawn_tracker_session,
@@ -36,7 +35,7 @@ use self::{
         MarkerGroupPickerDelegate, MarkerGroupPickerItem, PagedListState, read_input_value,
         set_input_value,
     },
-    page::{MarkersPage, SettingsPage, WorkbenchPage},
+    page::{MapPage, MarkersPage, SettingsPage, WorkbenchPage},
     panels::render_workbench,
     theme::apply_theme_preference,
 };
@@ -84,7 +83,8 @@ pub struct TrackerWorkbench {
     pub(super) preview_position: Option<PositionEstimate>,
     pub(super) preview_cursor: Option<usize>,
     pub(super) trail: Vec<WorldPoint>,
-    pub(super) map_view: crate::ui::map_canvas::MapViewportState,
+    pub(super) tracker_map_view: crate::ui::map_canvas::MapViewportState,
+    pub(super) bwiki_map_view: crate::ui::map_canvas::MapViewportState,
     pub(super) frame_index: u64,
     pub(super) last_source: Option<TrackingSource>,
     pub(super) last_match_score: Option<f32>,
@@ -100,6 +100,8 @@ pub struct TrackerWorkbench {
     pub(super) pending_new_group_id: Option<RouteId>,
     pub(super) confirming_delete_group_id: Option<RouteId>,
     active_page: WorkbenchPage,
+    map_page: MapPage,
+    pub(super) map_nav_expanded: bool,
     markers_page: MarkersPage,
     pub(super) markers_nav_expanded: bool,
     settings_page: SettingsPage,
@@ -109,6 +111,11 @@ pub struct TrackerWorkbench {
     point_list: PagedListState,
     marker_group_picker: gpui::Entity<SelectState<MarkerGroupPickerDelegate>>,
     pub(super) ui_preferences_path: PathBuf,
+    pub(super) bwiki_resources: BwikiResourceManager,
+    pub(super) bwiki_version: u64,
+    pub(super) bwiki_visible_mark_types: HashSet<u32>,
+    pub(super) bwiki_expanded_categories: HashSet<String>,
+    bwiki_visibility_initialized: bool,
     group_form: GroupFormInputs,
     group_inline_edit: GroupInlineEditInputs,
     marker_form: MarkerFormInputs,
@@ -140,6 +147,9 @@ impl TrackerWorkbench {
         let mut workbench = match WorkspaceSnapshot::load(project_root.clone()) {
             Ok(workspace) => {
                 let workspace = Arc::new(workspace);
+                let (bwiki_resources, bwiki_manager_error) =
+                    Self::new_bwiki_resource_manager(workspace.assets.bwiki_cache_dir.clone());
+                let bwiki_version = bwiki_resources.version();
                 let route_groups = workspace.groups.clone();
                 let selected_group_id = route_groups.first().map(|group| group.id.clone());
                 let selected_point_id = selected_group_id
@@ -166,7 +176,11 @@ impl TrackerWorkbench {
                         .as_ref()
                         .map(|position| vec![position.world])
                         .unwrap_or_default(),
-                    map_view: crate::ui::map_canvas::MapViewportState {
+                    tracker_map_view: crate::ui::map_canvas::MapViewportState {
+                        needs_fit: true,
+                        ..Default::default()
+                    },
+                    bwiki_map_view: crate::ui::map_canvas::MapViewportState {
                         needs_fit: true,
                         ..Default::default()
                     },
@@ -185,6 +199,8 @@ impl TrackerWorkbench {
                     pending_new_group_id: None,
                     confirming_delete_group_id: None,
                     active_page: WorkbenchPage::Map,
+                    map_page: MapPage::Tracker,
+                    map_nav_expanded: true,
                     markers_page: MarkersPage::default(),
                     markers_nav_expanded: false,
                     settings_page: SettingsPage::default(),
@@ -194,55 +210,79 @@ impl TrackerWorkbench {
                     point_list: point_list.clone(),
                     marker_group_picker: marker_group_picker.clone(),
                     ui_preferences_path: ui_preferences_path.clone(),
+                    bwiki_resources,
+                    bwiki_version,
+                    bwiki_visible_mark_types: HashSet::new(),
+                    bwiki_expanded_categories: HashSet::new(),
+                    bwiki_visibility_initialized: false,
                     group_form,
                     group_inline_edit,
                     marker_form,
                     subscriptions: Vec::new(),
                 }
+                .with_optional_status_suffix(bwiki_manager_error)
             }
-            Err(error) => Self {
-                project_root: project_root.to_string_lossy().into_owned().into(),
-                workspace: Arc::new(Self::empty_workspace(project_root)),
-                tracker_session: None,
-                tracker_lifecycle: TrackerLifecycle::Failed,
-                selected_engine: TrackerEngineKind::RustTemplate,
-                status_text: format!("载入数据目录失败：{error:#}").into(),
-                preview_position: None,
-                preview_cursor: None,
-                trail: Vec::new(),
-                map_view: crate::ui::map_canvas::MapViewportState {
-                    needs_fit: true,
-                    ..Default::default()
-                },
-                frame_index: 0,
-                last_source: None,
-                last_match_score: None,
-                debug_snapshot: None,
-                route_groups: Vec::new(),
-                selected_group_id: None,
-                selected_point_id: None,
-                group_icon: MarkerIconStyle::default(),
-                marker_icon: MarkerIconStyle::default(),
-                theme_preference,
-                auto_focus_enabled,
-                editing_group_id: None,
-                pending_new_group_id: None,
-                confirming_delete_group_id: None,
-                active_page: WorkbenchPage::Map,
-                markers_page: MarkersPage::default(),
-                markers_nav_expanded: false,
-                settings_page: SettingsPage::default(),
-                settings_nav_expanded: false,
-                map_group_list,
-                marker_group_list,
-                point_list,
-                marker_group_picker,
-                ui_preferences_path: ui_preferences_path.clone(),
-                group_form,
-                group_inline_edit,
-                marker_form,
-                subscriptions: Vec::new(),
-            },
+            Err(error) => {
+                let workspace = Arc::new(Self::empty_workspace(project_root.clone()));
+                let (bwiki_resources, bwiki_manager_error) =
+                    Self::new_bwiki_resource_manager(workspace.assets.bwiki_cache_dir.clone());
+                let bwiki_version = bwiki_resources.version();
+                Self {
+                    project_root: project_root.to_string_lossy().into_owned().into(),
+                    workspace,
+                    tracker_session: None,
+                    tracker_lifecycle: TrackerLifecycle::Failed,
+                    selected_engine: TrackerEngineKind::RustTemplate,
+                    status_text: format!("载入数据目录失败：{error:#}").into(),
+                    preview_position: None,
+                    preview_cursor: None,
+                    trail: Vec::new(),
+                    tracker_map_view: crate::ui::map_canvas::MapViewportState {
+                        needs_fit: true,
+                        ..Default::default()
+                    },
+                    bwiki_map_view: crate::ui::map_canvas::MapViewportState {
+                        needs_fit: true,
+                        ..Default::default()
+                    },
+                    frame_index: 0,
+                    last_source: None,
+                    last_match_score: None,
+                    debug_snapshot: None,
+                    route_groups: Vec::new(),
+                    selected_group_id: None,
+                    selected_point_id: None,
+                    group_icon: MarkerIconStyle::default(),
+                    marker_icon: MarkerIconStyle::default(),
+                    theme_preference,
+                    auto_focus_enabled,
+                    editing_group_id: None,
+                    pending_new_group_id: None,
+                    confirming_delete_group_id: None,
+                    active_page: WorkbenchPage::Map,
+                    map_page: MapPage::Tracker,
+                    map_nav_expanded: true,
+                    markers_page: MarkersPage::default(),
+                    markers_nav_expanded: false,
+                    settings_page: SettingsPage::default(),
+                    settings_nav_expanded: false,
+                    map_group_list,
+                    marker_group_list,
+                    point_list,
+                    marker_group_picker,
+                    ui_preferences_path: ui_preferences_path.clone(),
+                    bwiki_resources,
+                    bwiki_version,
+                    bwiki_visible_mark_types: HashSet::new(),
+                    bwiki_expanded_categories: HashSet::new(),
+                    bwiki_visibility_initialized: false,
+                    group_form,
+                    group_inline_edit,
+                    marker_form,
+                    subscriptions: Vec::new(),
+                }
+                .with_optional_status_suffix(bwiki_manager_error)
+            }
         };
 
         apply_theme_preference(workbench.theme_preference, window, cx);
@@ -356,6 +396,7 @@ impl TrackerWorkbench {
         ));
         workbench.sync_editor_from_selection(window, cx);
         workbench.request_center_on_current_point();
+        workbench.sync_bwiki_visibility_defaults();
         if let Some(message) = preferences_error {
             workbench.status_text = format!("{} {message}", workbench.status_text).into();
         }
@@ -363,7 +404,7 @@ impl TrackerWorkbench {
         cx.spawn(async move |this, cx| {
             loop {
                 let updated = this.update(cx, |this, cx| {
-                    if this.poll_tracking_events() {
+                    if this.poll_tracking_events() || this.poll_bwiki_resources() {
                         cx.notify();
                     }
                 });
@@ -382,30 +423,61 @@ impl TrackerWorkbench {
     }
 
     fn empty_workspace(project_root: PathBuf) -> WorkspaceSnapshot {
+        let map_dimensions = default_map_dimensions();
         WorkspaceSnapshot {
             project_root: project_root.clone(),
             config: AppConfig::default(),
             assets: AssetManifest {
                 config_path: project_root.join(CONFIG_FILE_NAME),
-                logic_map_asset_path: embedded_assets::LOGIC_MAP_ASSET_PATH,
-                display_map_asset_path: embedded_assets::DISPLAY_MAP_ASSET_PATH,
-                marker_icon_asset_dir: embedded_assets::POINT_ICON_ASSET_DIR,
                 routes_dir: project_root.join("routes"),
-                map_dimensions: MapDimensions {
-                    width: 0,
-                    height: 0,
-                },
+                bwiki_cache_dir: project_root.join("cache").join("bwiki"),
+                map_dimensions,
             },
             groups: Vec::new(),
             report: WorkspaceLoadReport {
                 group_count: 0,
                 point_count: 0,
-                map_dimensions: MapDimensions {
-                    width: 0,
-                    height: 0,
-                },
+                map_dimensions,
             },
         }
+    }
+
+    fn new_bwiki_resource_manager(cache_dir: PathBuf) -> (BwikiResourceManager, Option<String>) {
+        match BwikiResourceManager::new(cache_dir.clone()) {
+            Ok(manager) => {
+                manager.ensure_dataset_loaded();
+                (manager, None)
+            }
+            Err(error) => {
+                let fallback = env::temp_dir()
+                    .join("game-map-tracker-rs")
+                    .join("bwiki-cache");
+                let manager = BwikiResourceManager::new(fallback.clone())
+                    .unwrap_or_else(|fallback_error| {
+                        panic!(
+                            "failed to initialize BWiki cache at {} ({error:#}) or fallback {} ({fallback_error:#})",
+                            cache_dir.display(),
+                            fallback.display()
+                        )
+                    });
+                manager.ensure_dataset_loaded();
+                (
+                    manager,
+                    Some(format!(
+                        "BWiki 缓存目录 {} 初始化失败，已临时改用 {}：{error:#}",
+                        cache_dir.display(),
+                        fallback.display()
+                    )),
+                )
+            }
+        }
+    }
+
+    fn with_optional_status_suffix(mut self, suffix: Option<String>) -> Self {
+        if let Some(suffix) = suffix {
+            self.status_text = format!("{} {}", self.status_text, suffix).into();
+        }
+        self
     }
 
     pub(super) fn is_tracking_active(&self) -> bool {
@@ -486,15 +558,14 @@ impl TrackerWorkbench {
         )
     }
 
-    fn select_page(&mut self, page: WorkbenchPage) {
-        self.active_page = page;
-        if page == WorkbenchPage::Markers {
-            self.markers_nav_expanded = true;
+    fn select_map_page(&mut self, page: MapPage) {
+        self.active_page = WorkbenchPage::Map;
+        self.map_page = page;
+        self.map_nav_expanded = true;
+        if matches!(page, MapPage::Tracker) {
+            self.request_center_on_current_point();
         }
-        if page == WorkbenchPage::Settings {
-            self.settings_nav_expanded = true;
-        }
-        self.status_text = format!("已切换到{}页面。", page).into();
+        self.status_text = format!("地图页面已切换到{}。", page).into();
     }
 
     fn select_markers_page(&mut self, page: MarkersPage) {
@@ -509,6 +580,22 @@ impl TrackerWorkbench {
         self.settings_page = page;
         self.settings_nav_expanded = true;
         self.status_text = format!("设置页面已切换到{}。", page).into();
+    }
+
+    fn toggle_map_navigation(&mut self) {
+        if self.active_page != WorkbenchPage::Map {
+            self.active_page = WorkbenchPage::Map;
+            self.map_nav_expanded = true;
+            self.status_text = "已切换到地图页面。".into();
+            return;
+        }
+
+        self.map_nav_expanded = !self.map_nav_expanded;
+        self.status_text = if self.map_nav_expanded {
+            "已展开地图导航。".into()
+        } else {
+            "已收起地图导航。".into()
+        };
     }
 
     fn toggle_marker_navigation(&mut self) {
@@ -541,6 +628,127 @@ impl TrackerWorkbench {
         } else {
             "已收起设置导航。".into()
         };
+    }
+
+    fn poll_bwiki_resources(&mut self) -> bool {
+        let version = self.bwiki_resources.version();
+        let mut changed = version != self.bwiki_version;
+        if changed {
+            self.bwiki_version = version;
+        }
+        if self.sync_bwiki_visibility_defaults() {
+            changed = true;
+        }
+        changed
+    }
+
+    pub(super) fn sync_bwiki_visibility_defaults(&mut self) -> bool {
+        let Some(dataset) = self.bwiki_resources.dataset_snapshot() else {
+            return false;
+        };
+
+        let mut changed = false;
+        if self.bwiki_expanded_categories.is_empty() {
+            self.bwiki_expanded_categories = dataset.sorted_category_names().into_iter().collect();
+            changed = true;
+        }
+        if !self.bwiki_visibility_initialized {
+            self.bwiki_visible_mark_types = dataset
+                .types
+                .iter()
+                .filter(|item| item.point_count > 0)
+                .map(|item| item.mark_type)
+                .collect();
+            self.bwiki_visibility_initialized = true;
+            changed = true;
+        }
+        changed
+    }
+
+    pub(super) fn refresh_bwiki_dataset(&mut self) {
+        self.bwiki_resources.refresh_dataset();
+        self.status_text = "已请求刷新 BWiki 点位与图标目录。".into();
+    }
+
+    pub(super) fn show_all_bwiki_types(&mut self) {
+        if let Some(dataset) = self.bwiki_resources.dataset_snapshot() {
+            self.bwiki_visibility_initialized = true;
+            self.bwiki_visible_mark_types = dataset
+                .types
+                .iter()
+                .filter(|item| item.point_count > 0)
+                .map(|item| item.mark_type)
+                .collect();
+            self.status_text = "已显示所有有点位的 BWiki 类型。".into();
+        }
+    }
+
+    pub(super) fn hide_all_bwiki_types(&mut self) {
+        self.bwiki_visibility_initialized = true;
+        self.bwiki_visible_mark_types.clear();
+        self.status_text = "已隐藏所有 BWiki 类型。".into();
+    }
+
+    pub(super) fn toggle_bwiki_type_visibility(&mut self, mark_type: u32, label: &str) {
+        self.bwiki_visibility_initialized = true;
+        if !self.bwiki_visible_mark_types.remove(&mark_type) {
+            self.bwiki_visible_mark_types.insert(mark_type);
+            self.status_text = format!("已显示 BWiki 类型「{}」。", label).into();
+        } else {
+            self.status_text = format!("已隐藏 BWiki 类型「{}」。", label).into();
+        }
+    }
+
+    pub(super) fn set_bwiki_category_visibility(&mut self, category: &str, visible: bool) {
+        let Some(dataset) = self.bwiki_resources.dataset_snapshot() else {
+            return;
+        };
+
+        self.bwiki_visibility_initialized = true;
+        let mut affected = 0usize;
+        for definition in dataset
+            .types
+            .iter()
+            .filter(|item| item.category == category)
+        {
+            if definition.point_count == 0 {
+                continue;
+            }
+            affected += 1;
+            if visible {
+                self.bwiki_visible_mark_types.insert(definition.mark_type);
+            } else {
+                self.bwiki_visible_mark_types.remove(&definition.mark_type);
+            }
+        }
+
+        self.status_text = if visible {
+            format!("已显示分类「{}」下的 {} 个类型。", category, affected).into()
+        } else {
+            format!("已隐藏分类「{}」下的 {} 个类型。", category, affected).into()
+        };
+    }
+
+    pub(super) fn toggle_bwiki_category_expanded(&mut self, category: &str) {
+        if !self.bwiki_expanded_categories.remove(category) {
+            self.bwiki_expanded_categories.insert(category.to_owned());
+        }
+    }
+
+    pub(super) fn bwiki_visible_point_count(&self) -> usize {
+        let Some(dataset) = self.bwiki_resources.dataset_snapshot() else {
+            return 0;
+        };
+        dataset
+            .points_by_type
+            .iter()
+            .filter(|(mark_type, _)| self.bwiki_visible_mark_types.contains(mark_type))
+            .map(|(_, points)| points.len())
+            .sum()
+    }
+
+    pub(super) fn bwiki_visible_type_count(&self) -> usize {
+        self.bwiki_visible_mark_types.len()
     }
 
     fn paged_list_state(&self, kind: PagedListKind) -> &PagedListState {
@@ -1151,7 +1359,7 @@ impl TrackerWorkbench {
             self.request_center_on_current_point();
             self.persist_ui_preferences("自动聚焦已开启");
         } else {
-            self.map_view.pending_center = None;
+            self.tracker_map_view.pending_center = None;
             self.persist_ui_preferences("自动聚焦已关闭");
         }
     }
@@ -1883,10 +2091,13 @@ impl TrackerWorkbench {
     }
 
     pub(super) fn use_map_center_for_point(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let world = self.map_view.camera.screen_to_world(WorldPoint::new(
-            self.map_view.viewport.width * 0.5,
-            self.map_view.viewport.height * 0.5,
-        ));
+        let world = self
+            .tracker_map_view
+            .camera
+            .screen_to_world(WorldPoint::new(
+                self.tracker_map_view.viewport.width * 0.5,
+                self.tracker_map_view.viewport.height * 0.5,
+            ));
         set_input_value(&self.marker_form.x, format!("{:.0}", world.x), window, cx);
         set_input_value(&self.marker_form.y, format!("{:.0}", world.y), window, cx);
         self.status_text = "已用当前画布中心填充节点位置。".into();
@@ -1897,7 +2108,7 @@ impl TrackerWorkbench {
             .selected_point()
             .map(|point| (point.world(), point.display_label().to_owned()))
         {
-            self.map_view.center_on_or_queue(world);
+            self.tracker_map_view.center_on_or_queue(world);
             self.status_text = format!("地图已居中到节点「{}」。", label).into();
         } else {
             self.status_text = "当前没有选中的节点。".into();
@@ -1951,7 +2162,7 @@ impl TrackerWorkbench {
             return;
         }
         if let Some(point) = self.selected_point().map(RoutePoint::world) {
-            self.map_view.center_on_or_queue(point);
+            self.tracker_map_view.center_on_or_queue(point);
         }
     }
 

@@ -5,17 +5,14 @@ use anyhow::Result;
 use crate::{
     config::{AppConfig, CONFIG_FILE_NAME, load_existing_config},
     domain::{geometry::MapDimensions, route::RouteDocument},
-    embedded_assets,
-    resources::RouteRepository,
+    resources::{BwikiCachePaths, RouteRepository, default_map_dimensions},
 };
 
 #[derive(Debug, Clone)]
 pub struct AssetManifest {
     pub config_path: PathBuf,
-    pub logic_map_asset_path: &'static str,
-    pub display_map_asset_path: &'static str,
-    pub marker_icon_asset_dir: &'static str,
     pub routes_dir: PathBuf,
+    pub bwiki_cache_dir: PathBuf,
     pub map_dimensions: MapDimensions,
 }
 
@@ -61,14 +58,14 @@ impl WorkspaceSnapshot {
 fn discover_assets(project_root: &Path) -> Result<AssetManifest> {
     let config_path = project_root.join(CONFIG_FILE_NAME);
     let routes_dir = project_root.join("routes");
-    let (width, height) = embedded_assets::image_dimensions(embedded_assets::LOGIC_MAP_ASSET_PATH)?;
+    let bwiki_cache_dir = project_root.join("cache").join("bwiki");
+    BwikiCachePaths::new(&bwiki_cache_dir).ensure_directories()?;
+    let map_dimensions = default_map_dimensions();
 
     Ok(AssetManifest {
         config_path,
-        logic_map_asset_path: embedded_assets::LOGIC_MAP_ASSET_PATH,
-        display_map_asset_path: embedded_assets::DISPLAY_MAP_ASSET_PATH,
-        marker_icon_asset_dir: embedded_assets::POINT_ICON_ASSET_DIR,
         routes_dir,
-        map_dimensions: MapDimensions { width, height },
+        bwiki_cache_dir,
+        map_dimensions,
     })
 }

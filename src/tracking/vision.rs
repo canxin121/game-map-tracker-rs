@@ -15,8 +15,7 @@ use strum::Display;
 
 use crate::{
     domain::{geometry::WorldPoint, tracker::TrackerEngineKind},
-    embedded_assets,
-    resources::WorkspaceSnapshot,
+    resources::{BWIKI_WORLD_ZOOM, WorkspaceSnapshot, load_logic_map_image},
     tracking::debug::{DebugField, DebugImage, DebugImageKind, TrackingDebugSnapshot},
 };
 
@@ -130,11 +129,11 @@ pub enum DebugOverlay {
 
 pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyramid, MaskSet)> {
     let config = &workspace.config;
-    let logic_map = embedded_assets::load_luma_image(workspace.assets.logic_map_asset_path)
+    let logic_map = load_logic_map_image(&workspace.assets.bwiki_cache_dir, BWIKI_WORLD_ZOOM)
         .with_context(|| {
             format!(
-                "failed to load logic map from embedded asset {}",
-                workspace.assets.logic_map_asset_path
+                "failed to load stitched BWiki logic map from {}",
+                workspace.assets.bwiki_cache_dir.display()
             )
         })?;
     let logic_map = equalize_histogram(&logic_map);

@@ -8,7 +8,7 @@ use directories::ProjectDirs;
 
 use crate::{
     config::{AppConfig, CONFIG_FILE_NAME},
-    resources::RouteRepository,
+    resources::{BwikiCachePaths, RouteRepository},
 };
 
 const DATA_DIR_ENV: &str = "GAME_MAP_TRACKER_RS_DATA_DIR";
@@ -68,10 +68,11 @@ fn ensure_default_config(root: &Path) -> Result<()> {
 }
 
 fn ensure_workspace_layout(root: &Path) -> Result<()> {
-    for path in [root.join("routes")] {
+    for path in [root.join("routes"), root.join("cache").join("bwiki")] {
         fs::create_dir_all(&path)
             .with_context(|| format!("failed to create workspace directory {}", path.display()))?;
     }
+    BwikiCachePaths::new(root.join("cache").join("bwiki")).ensure_directories()?;
     Ok(())
 }
 
