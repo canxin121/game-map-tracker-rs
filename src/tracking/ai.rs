@@ -2,6 +2,11 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 
+#[cfg(all(
+    feature = "ai-candle",
+    any(feature = "ai-candle-cuda", feature = "ai-candle-metal")
+))]
+use anyhow::Context as _;
 #[cfg(feature = "ai-candle")]
 use image::GrayImage;
 #[cfg(feature = "ai-candle")]
@@ -9,7 +14,7 @@ use std::path::PathBuf;
 
 #[cfg(feature = "ai-candle")]
 use crate::{
-    config::AppConfig,
+    config::{AiDevicePreference, AiTrackingConfig, AppConfig},
     domain::{
         geometry::WorldPoint,
         tracker::{PositionEstimate, TrackingSource},
@@ -32,7 +37,7 @@ use crate::{
 };
 
 #[cfg(feature = "ai-candle")]
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Device, DeviceLocation, Tensor};
 #[cfg(feature = "ai-candle")]
 use candle_nn::{Conv2d, Conv2dConfig, Module, VarBuilder};
 
@@ -97,6 +102,7 @@ impl CandleTrackerWorker {
             let config = workspace.config.clone();
             let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
             let (pyramid, masks) = load_logic_map_pyramid(workspace.as_ref())?;
+            let encoder = FixedFeatureEncoder::new(workspace.as_ref(), &config.ai)?;
 
             Ok(Self {
                 inner: CandleTrackerInner {
@@ -105,7 +111,7 @@ impl CandleTrackerWorker {
                     pyramid,
                     masks,
                     state: TrackerState::default(),
-                    encoder: FixedFeatureEncoder::new(workspace.as_ref())?,
+                    encoder,
                 },
             })
         }
@@ -120,8 +126,8 @@ impl CandleTrackerWorker {
 
 #[cfg(feature = "ai-candle")]
 impl FixedFeatureEncoder {
-    fn new(workspace: &WorkspaceSnapshot) -> Result<Self> {
-        let device = Device::Cpu;
+    fn new(workspace: &WorkspaceSnapshot, config: &AiTrackingConfig) -> Result<Self> {
+        let device = select_candle_device(config)?;
         if let Some(encoder) = Self::load_from_safetensors(workspace, &device)? {
             return Ok(encoder);
         }
@@ -153,6 +159,10 @@ impl FixedFeatureEncoder {
 
     fn source_label(&self) -> String {
         self.source.label()
+    }
+
+    fn device_label(&self) -> String {
+        candle_device_label(&self.device)
     }
 
     fn load_from_safetensors(
@@ -320,7 +330,7 @@ impl CandleTrackerInner {
                         status.source = Some(TrackingSource::CandleEmbedding);
                         status.match_score = Some(candidate.score);
                         status.message = format!(
-                            "Candle 局部锁定成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
+                            "卷积特征匹配局部锁定成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
                             candidate.score, candidate.world.x, candidate.world.y
                         );
                         estimate =
@@ -333,11 +343,12 @@ impl CandleTrackerInner {
                         .state
                         .increment_local_fail(self.config.local_search.lock_fail_threshold);
                     status.message = format!(
-                        "Candle 局部锁定失败，第 {} 次重试。",
+                        "卷积特征匹配局部锁定失败，第 {} 次重试。",
                         self.state.local_fail_streak
                     );
                     if switched {
-                        status.message = "Candle 局部锁定连续失败，切回全局重定位。".to_owned();
+                        status.message =
+                            "卷积特征匹配局部锁定连续失败，切回全局重定位。".to_owned();
                     }
                 }
             }
@@ -379,7 +390,7 @@ impl CandleTrackerInner {
                     status.source = Some(TrackingSource::CandleEmbedding);
                     status.match_score = Some(candidate.score);
                     status.message = format!(
-                        "Candle 全局重定位成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
+                        "卷积特征匹配全局重定位成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
                         candidate.score, candidate.world.x, candidate.world.y
                     );
                     estimate =
@@ -395,7 +406,7 @@ impl CandleTrackerInner {
         if estimate.is_none() {
             status.source = None;
             status.match_score = None;
-            status.message = "Candle 当前帧未找到可靠匹配，等待下一帧。".to_owned();
+            status.message = "卷积特征匹配当前帧未找到可靠匹配，等待下一帧。".to_owned();
         }
 
         let debug = Some(self.build_debug_snapshot(
@@ -416,7 +427,7 @@ impl CandleTrackerInner {
 
     fn base_status(&self) -> TrackingStatus {
         TrackingStatus {
-            engine: TrackerEngineKind::CandleAi,
+            engine: TrackerEngineKind::ConvolutionFeatureMatch,
             frame_index: self.state.frame_index,
             lifecycle: crate::domain::tracker::TrackerLifecycle::Running,
             message: String::new(),
@@ -441,7 +452,7 @@ impl CandleTrackerInner {
         status.source = Some(TrackingSource::InertialHold);
         status.match_score = None;
         status.message = format!(
-            "Candle 进入惯性保位，第 {} / {} 帧。",
+            "卷积特征匹配进入惯性保位，第 {} / {} 帧。",
             self.state.lost_frames, self.config.max_lost_frames
         );
 
@@ -538,6 +549,7 @@ impl CandleTrackerInner {
 
         let mut fields = vec![
             DebugField::new("阶段", self.state.stage.to_string()),
+            DebugField::new("设备", self.encoder.device_label()),
             DebugField::new("编码器", self.encoder.source_label()),
             DebugField::new("局部失败", self.state.local_fail_streak.to_string()),
             DebugField::new("丢失帧", self.state.lost_frames.to_string()),
@@ -562,7 +574,7 @@ impl CandleTrackerInner {
         }
 
         build_debug_snapshot(
-            TrackerEngineKind::CandleAi,
+            TrackerEngineKind::ConvolutionFeatureMatch,
             self.state.frame_index,
             self.state.stage,
             vec![
@@ -679,6 +691,73 @@ fn repeated_mask(mask: &GrayImage, channels: usize) -> Vec<f32> {
     values
 }
 
+#[cfg(feature = "ai-candle")]
+fn select_candle_device(config: &AiTrackingConfig) -> Result<Device> {
+    match config.device {
+        AiDevicePreference::Cpu => Ok(Device::Cpu),
+        AiDevicePreference::Cuda => build_cuda_device(config.device_index),
+        AiDevicePreference::Metal => build_metal_device(config.device_index),
+    }
+}
+
+#[cfg(feature = "ai-candle")]
+fn candle_device_label(device: &Device) -> String {
+    match device.location() {
+        DeviceLocation::Cpu => "CPU".to_owned(),
+        DeviceLocation::Cuda { gpu_id } => format!("CUDA:{gpu_id}"),
+        DeviceLocation::Metal { gpu_id } => format!("Metal:{gpu_id}"),
+    }
+}
+
+#[cfg(feature = "ai-candle")]
+fn available_candle_backends() -> &'static str {
+    #[cfg(all(feature = "ai-candle-cuda", feature = "ai-candle-metal"))]
+    {
+        return "CPU / CUDA / Metal";
+    }
+
+    #[cfg(all(feature = "ai-candle-cuda", not(feature = "ai-candle-metal")))]
+    {
+        return "CPU / CUDA";
+    }
+
+    #[cfg(all(not(feature = "ai-candle-cuda"), feature = "ai-candle-metal"))]
+    {
+        return "CPU / Metal";
+    }
+
+    #[cfg(all(not(feature = "ai-candle-cuda"), not(feature = "ai-candle-metal")))]
+    {
+        "CPU"
+    }
+}
+
+#[cfg(all(feature = "ai-candle", feature = "ai-candle-cuda"))]
+fn build_cuda_device(ordinal: usize) -> Result<Device> {
+    Device::new_cuda(ordinal)
+        .with_context(|| format!("无法初始化 CUDA 设备 {ordinal}，请检查驱动、运行库和显卡状态"))
+}
+
+#[cfg(all(feature = "ai-candle", not(feature = "ai-candle-cuda")))]
+fn build_cuda_device(_ordinal: usize) -> Result<Device> {
+    anyhow::bail!(
+        "配置选择了 CUDA 设备，但当前二进制未启用 `ai-candle-cuda` 特性；请使用 `cargo run --features ai-candle-cuda` 重新构建"
+    )
+}
+
+#[cfg(all(feature = "ai-candle", feature = "ai-candle-metal"))]
+fn build_metal_device(ordinal: usize) -> Result<Device> {
+    Device::new_metal(ordinal)
+        .with_context(|| format!("无法初始化 Metal 设备 {ordinal}，请检查系统和 GPU 支持状态"))
+}
+
+#[cfg(all(feature = "ai-candle", not(feature = "ai-candle-metal")))]
+fn build_metal_device(_ordinal: usize) -> Result<Device> {
+    anyhow::bail!(
+        "配置选择了 Metal 设备，但当前二进制未启用 `ai-candle-metal` 特性；请使用 `cargo run --features ai-candle-metal` 重新构建"
+    )
+}
+
 impl TrackingWorker for CandleTrackerWorker {
     fn refresh_interval(&self) -> Duration {
         #[cfg(feature = "ai-candle")]
@@ -700,27 +779,27 @@ impl TrackingWorker for CandleTrackerWorker {
 
         #[cfg(not(feature = "ai-candle"))]
         {
-            anyhow::bail!(
-                "Candle AI backend was selected, but the binary was built without the `ai-candle` feature"
-            )
+            anyhow::bail!("卷积特征匹配后端被选中，但当前二进制未启用 `ai-candle` 特性")
         }
     }
 
     fn initial_status(&self) -> TrackingStatus {
         #[cfg(feature = "ai-candle")]
         let message = format!(
-            "Candle AI backend is ready: {} + tensor cosine search.",
+            "卷积特征匹配引擎已就绪：设备 {}，可用后端 {}，{} + 张量相似度搜索。",
+            self.inner.encoder.device_label(),
+            available_candle_backends(),
             self.inner.encoder.source_label()
         );
 
         #[cfg(not(feature = "ai-candle"))]
-        let message = "Candle AI backend is ready: fixed conv feature bank + tensor cosine search."
-            .to_owned();
+        let message =
+            "卷积特征匹配引擎已就绪：设备 CPU，固定卷积特征组 + 张量相似度搜索。".to_owned();
 
-        TrackingStatus::new(TrackerEngineKind::CandleAi, message)
+        TrackingStatus::new(TrackerEngineKind::ConvolutionFeatureMatch, message)
     }
 
     fn engine_kind(&self) -> TrackerEngineKind {
-        TrackerEngineKind::CandleAi
+        TrackerEngineKind::ConvolutionFeatureMatch
     }
 }

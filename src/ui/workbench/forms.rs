@@ -118,6 +118,8 @@ pub(super) struct ConfigFormInputs {
     pub(super) ai_scan_size: gpui::Entity<InputState>,
     pub(super) ai_scan_step: gpui::Entity<InputState>,
     pub(super) ai_track_radius: gpui::Entity<InputState>,
+    pub(super) ai_device: gpui::Entity<InputState>,
+    pub(super) ai_device_index: gpui::Entity<InputState>,
     pub(super) ai_weights_path: gpui::Entity<InputState>,
     pub(super) template_refresh_rate_ms: gpui::Entity<InputState>,
     pub(super) template_local_downscale: gpui::Entity<InputState>,
@@ -158,6 +160,8 @@ impl ConfigFormInputs {
             ai_scan_size: config_input(window, cx, "scan_size"),
             ai_scan_step: config_input(window, cx, "scan_step"),
             ai_track_radius: config_input(window, cx, "track_radius"),
+            ai_device: config_input(window, cx, "cpu / cuda / metal"),
+            ai_device_index: config_input(window, cx, "device_index"),
             ai_weights_path: config_input(window, cx, "weights_path，可留空"),
             template_refresh_rate_ms: config_input(window, cx, "refresh_rate_ms"),
             template_local_downscale: config_input(window, cx, "local_downscale"),
@@ -603,6 +607,8 @@ impl ConfigDraft {
                     scan_size: parse_input_value(&form.ai_scan_size, "ai.scan_size", cx)?,
                     scan_step: parse_input_value(&form.ai_scan_step, "ai.scan_step", cx)?,
                     track_radius: parse_input_value(&form.ai_track_radius, "ai.track_radius", cx)?,
+                    device: parse_enum_input_value(&form.ai_device, "ai.device", cx)?,
+                    device_index: parse_input_value(&form.ai_device_index, "ai.device_index", cx)?,
                     weights_path: (!weights_path.is_empty()).then(|| weights_path.to_owned()),
                 },
                 template: TemplateTrackingConfig {
@@ -712,6 +718,21 @@ fn parse_bool_input_value(
         "false" | "0" | "no" | "n" | "off" => Ok(false),
         _ => Err(format!("{field_name} 必须是 true 或 false。")),
     }
+}
+
+fn parse_enum_input_value<T>(
+    input: &gpui::Entity<InputState>,
+    field_name: &'static str,
+    cx: &mut Context<TrackerWorkbench>,
+) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: ToString,
+{
+    read_input_value(input, cx)
+        .trim()
+        .parse::<T>()
+        .map_err(|error| format!("{field_name} 配置无效：{}", error.to_string()))
 }
 
 fn picker_menu_row(title: &SharedString, subtitle: &SharedString) -> impl IntoElement {

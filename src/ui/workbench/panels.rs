@@ -2116,7 +2116,7 @@ fn settings_config_page(
             tokens,
         ))
         .child(editable_config_section(
-            "AI 追踪",
+            "卷积特征匹配",
             vec![
                 div()
                     .flex()
@@ -2146,9 +2146,21 @@ fn settings_config_page(
                             .into_any_element(),
                         labeled_input(tokens, "跟踪半径", &this.config_form.ai_track_radius)
                             .into_any_element(),
-                        labeled_input(tokens, "权重路径", &this.config_form.ai_weights_path)
+                        labeled_input(tokens, "执行设备", &this.config_form.ai_device)
+                            .into_any_element(),
+                        labeled_input(tokens, "设备序号", &this.config_form.ai_device_index)
                             .into_any_element(),
                     ])
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .gap_2()
+                    .children([labeled_input(
+                        tokens,
+                        "权重路径",
+                        &this.config_form.ai_weights_path,
+                    )
+                    .into_any_element()])
                     .into_any_element(),
             ],
             tokens,

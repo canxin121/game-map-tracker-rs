@@ -18,10 +18,20 @@ use crate::domain::geometry::WorldPoint;
     JsonSchema,
 )]
 pub enum TrackerEngineKind {
-    #[strum(to_string = "传统图像匹配")]
-    RustTemplate,
-    #[strum(to_string = "AI 图像识别")]
-    CandleAi,
+    #[strum(
+        to_string = "多尺度模板匹配",
+        serialize = "MultiScaleTemplateMatch",
+        serialize = "RustTemplate"
+    )]
+    #[serde(rename = "multi_scale_template_match", alias = "RustTemplate")]
+    MultiScaleTemplateMatch,
+    #[strum(
+        to_string = "卷积特征匹配",
+        serialize = "ConvolutionFeatureMatch",
+        serialize = "CandleAi"
+    )]
+    #[serde(rename = "convolution_feature_match", alias = "CandleAi")]
+    ConvolutionFeatureMatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display, Serialize, Deserialize, JsonSchema)]
@@ -33,11 +43,17 @@ pub enum TrackerLifecycle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display, Serialize, Deserialize, JsonSchema)]
 pub enum TrackingSource {
+    #[strum(to_string = "手动预览")]
     ManualPreview,
+    #[strum(to_string = "模板搜索")]
     TemplateSearch,
+    #[strum(to_string = "局部锁定")]
     LocalTrack,
+    #[strum(to_string = "全局重定位")]
     GlobalRelocate,
+    #[strum(to_string = "惯性保位")]
     InertialHold,
+    #[strum(to_string = "卷积特征匹配")]
     CandleEmbedding,
 }
 

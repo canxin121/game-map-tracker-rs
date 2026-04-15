@@ -196,7 +196,7 @@ impl TemplateTrackerWorker {
 
     fn base_status(&self) -> TrackingStatus {
         TrackingStatus {
-            engine: TrackerEngineKind::RustTemplate,
+            engine: TrackerEngineKind::MultiScaleTemplateMatch,
             frame_index: self.state.frame_index,
             lifecycle: crate::domain::tracker::TrackerLifecycle::Running,
             message: String::new(),
@@ -382,13 +382,13 @@ impl TrackingWorker for TemplateTrackerWorker {
 
     fn initial_status(&self) -> TrackingStatus {
         TrackingStatus::new(
-            TrackerEngineKind::RustTemplate,
-            "Rust 模板匹配引擎已启动：局部锁定 + 全局重定位 + 惯性保位。",
+            TrackerEngineKind::MultiScaleTemplateMatch,
+            "多尺度模板匹配引擎已启动：局部锁定 + 全局重定位 + 惯性保位。",
         )
     }
 
     fn engine_kind(&self) -> TrackerEngineKind {
-        TrackerEngineKind::RustTemplate
+        TrackerEngineKind::MultiScaleTemplateMatch
     }
 }
 

@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fmt, fs, path::Path, str::FromStr};
 
 use anyhow::{Context as _, Result};
 use schemars::JsonSchema;
@@ -45,7 +45,17 @@ pub struct AiTrackingConfig {
     pub scan_size: u32,
     pub scan_step: u32,
     pub track_radius: u32,
+    pub device: AiDevicePreference,
+    pub device_index: usize,
     pub weights_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AiDevicePreference {
+    Cpu,
+    Cuda,
+    Metal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -127,7 +137,39 @@ impl Default for AiTrackingConfig {
             scan_size: 1600,
             scan_step: 1400,
             track_radius: 500,
+            device: AiDevicePreference::default(),
+            device_index: 0,
             weights_path: None,
+        }
+    }
+}
+
+impl Default for AiDevicePreference {
+    fn default() -> Self {
+        Self::Cpu
+    }
+}
+
+impl fmt::Display for AiDevicePreference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+            Self::Metal => "metal",
+        };
+        f.write_str(value)
+    }
+}
+
+impl FromStr for AiDevicePreference {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cpu" => Ok(Self::Cpu),
+            "cuda" => Ok(Self::Cuda),
+            "metal" => Ok(Self::Metal),
+            _ => Err("ai.device 必须是 cpu、cuda 或 metal。".to_owned()),
         }
     }
 }

@@ -161,8 +161,12 @@ fn build_worker(
     engine: TrackerEngineKind,
 ) -> Result<Box<dyn TrackingWorker>> {
     Ok(match engine {
-        TrackerEngineKind::RustTemplate => Box::new(TemplateTrackerWorker::new(workspace)?),
-        TrackerEngineKind::CandleAi => Box::new(CandleTrackerWorker::new(workspace)?),
+        TrackerEngineKind::MultiScaleTemplateMatch => {
+            Box::new(TemplateTrackerWorker::new(workspace)?)
+        }
+        TrackerEngineKind::ConvolutionFeatureMatch => {
+            Box::new(CandleTrackerWorker::new(workspace)?)
+        }
     })
 }
 

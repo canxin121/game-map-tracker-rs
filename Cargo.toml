@@ -8,6 +8,8 @@ edition = "2024"
 [features]
 default = ["ai-candle"]
 ai-candle = ["dep:candle-core", "dep:candle-nn"]
+ai-candle-cuda = ["ai-candle", "candle-core/cuda"]
+ai-candle-metal = ["ai-candle", "candle-core/metal"]
 
 [dependencies]
 anyhow = "1.0"

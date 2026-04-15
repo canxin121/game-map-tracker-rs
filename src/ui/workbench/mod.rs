@@ -447,7 +447,7 @@ impl TrackerWorkbench {
                     workspace,
                     tracker_session: None,
                     tracker_lifecycle: TrackerLifecycle::Idle,
-                    selected_engine: TrackerEngineKind::RustTemplate,
+                    selected_engine: TrackerEngineKind::MultiScaleTemplateMatch,
                     status_text: "数据目录已经完成解析。路线追踪页负责查看地图和运行 tracker，路线管理页负责在地图上管理 routes 目录下的单线路线。".into(),
                     preview_position: preview_position.clone(),
                     preview_cursor: selected_group_id.as_ref().map(|_| 0),
@@ -547,7 +547,7 @@ impl TrackerWorkbench {
                     workspace,
                     tracker_session: None,
                     tracker_lifecycle: TrackerLifecycle::Failed,
-                    selected_engine: TrackerEngineKind::RustTemplate,
+                    selected_engine: TrackerEngineKind::MultiScaleTemplateMatch,
                     status_text: format!("载入数据目录失败：{error:#}").into(),
                     preview_position: None,
                     preview_cursor: None,
@@ -3501,11 +3501,15 @@ impl TrackerWorkbench {
         }
 
         self.selected_engine = match self.selected_engine {
-            TrackerEngineKind::RustTemplate => TrackerEngineKind::CandleAi,
-            TrackerEngineKind::CandleAi => TrackerEngineKind::RustTemplate,
+            TrackerEngineKind::MultiScaleTemplateMatch => {
+                TrackerEngineKind::ConvolutionFeatureMatch
+            }
+            TrackerEngineKind::ConvolutionFeatureMatch => {
+                TrackerEngineKind::MultiScaleTemplateMatch
+            }
         };
         self.status_text = format!(
-            "当前追踪方式已切换为 {}。传统图像匹配使用经典画面对比，AI 图像识别使用神经网络特征匹配。",
+            "当前追踪方式已切换为 {}。多尺度模板匹配使用灰度模板相关与局部/全局搜索，卷积特征匹配使用固定卷积特征与张量相似度搜索。",
             self.selected_engine
         )
         .into();
@@ -4235,6 +4239,18 @@ impl TrackerWorkbench {
         set_input_value(
             &self.config_form.ai_track_radius,
             config.ai.track_radius.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.ai_device,
+            config.ai.device.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.ai_device_index,
+            config.ai.device_index.to_string(),
             window,
             cx,
         );
