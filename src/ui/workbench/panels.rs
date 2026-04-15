@@ -1384,7 +1384,7 @@ fn page_header(
                     tokens,
                     "P",
                     this.tracker_pip_toggle_label(),
-                    if this.is_tracker_pip_open() {
+                    if this.is_tracker_pip_open() || this.is_tracker_pip_pending_open() {
                         ToolbarButtonTone::Primary
                     } else {
                         ToolbarButtonTone::Neutral

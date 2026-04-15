@@ -333,6 +333,7 @@ pub struct TrackerWorkbench {
     tracker_pip_window: Option<AnyWindowHandle>,
     tracker_pip_window_bounds: Option<WindowBounds>,
     tracker_pip_always_on_top: bool,
+    tracker_pip_pending_open: bool,
     pub(super) ui_preferences_path: PathBuf,
     pub(super) bwiki_resources: BwikiResourceManager,
     pub(super) bwiki_tile_cache: gpui::Entity<TileImageCache>,
@@ -474,6 +475,7 @@ impl TrackerWorkbench {
                     tracker_pip_window: None,
                     tracker_pip_window_bounds: None,
                     tracker_pip_always_on_top: false,
+                    tracker_pip_pending_open: false,
                     ui_preferences_path: ui_preferences_path.clone(),
                     bwiki_resources,
                     bwiki_tile_cache: bwiki_tile_cache.clone(),
@@ -567,6 +569,7 @@ impl TrackerWorkbench {
                     tracker_pip_window: None,
                     tracker_pip_window_bounds: None,
                     tracker_pip_always_on_top: false,
+                    tracker_pip_pending_open: false,
                     ui_preferences_path: ui_preferences_path.clone(),
                     bwiki_resources,
                     bwiki_tile_cache,
@@ -1018,12 +1021,18 @@ impl TrackerWorkbench {
         self.tracker_pip_window.is_some()
     }
 
+    pub(super) const fn is_tracker_pip_pending_open(&self) -> bool {
+        self.tracker_pip_pending_open
+    }
+
     pub(super) const fn is_tracker_pip_always_on_top(&self) -> bool {
         self.tracker_pip_always_on_top
     }
 
     pub(super) fn tracker_pip_toggle_label(&self) -> SharedString {
-        if self.is_tracker_pip_open() {
+        if self.tracker_pip_pending_open {
+            "打开中".into()
+        } else if self.is_tracker_pip_open() {
             "关闭画中画".into()
         } else {
             "打开画中画".into()
@@ -4232,9 +4241,18 @@ impl TrackerWorkbench {
     ) {
         if self.is_tracker_pip_open() {
             self.close_tracker_pip_window(cx);
-        } else {
-            self.open_tracker_pip_window(window, cx);
+            return;
         }
+        if self.tracker_pip_pending_open {
+            return;
+        }
+
+        self.tracker_pip_pending_open = true;
+        self.status_text = "正在打开追踪画中画。".into();
+        cx.defer_in(window, |this, window, cx| {
+            this.open_tracker_pip_window(window, cx);
+            cx.notify();
+        });
     }
 
     pub(super) fn toggle_tracker_pip_always_on_top(&mut self, cx: &mut Context<Self>) {
@@ -4270,6 +4288,11 @@ impl TrackerWorkbench {
     }
 
     fn open_tracker_pip_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tracker_pip_pending_open = false;
+        if self.tracker_pip_window.is_some() {
+            return;
+        }
+
         let workbench = cx.entity().downgrade();
         let workbench_for_close = workbench.clone();
         let initial_camera = self.tracker_map_view.camera;
@@ -4342,6 +4365,7 @@ impl TrackerWorkbench {
                 }
             }
             Err(error) => {
+                self.tracker_pip_window = None;
                 self.status_text = format!("打开追踪画中画失败：{error:#}").into();
             }
         }
@@ -4349,11 +4373,14 @@ impl TrackerWorkbench {
 
     fn close_tracker_pip_window(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.tracker_pip_window.take() {
-            let _ = handle.update(cx, |_, pip_window, _| {
-                pip_window.remove_window();
+            let _ = handle.update(cx, |_, pip_window, cx| {
+                pip_window.defer(cx, |pip_window, _| {
+                    pip_window.remove_window();
+                });
             });
             self.status_text = "追踪画中画已关闭。".into();
         }
+        self.tracker_pip_pending_open = false;
     }
 
     fn default_tracker_pip_window_bounds(&self, window: &Window) -> WindowBounds {
@@ -4371,14 +4398,11 @@ impl TrackerWorkbench {
         })
     }
 
-    pub(super) fn update_tracker_pip_window_bounds(&mut self, bounds: WindowBounds) {
-        self.tracker_pip_window_bounds = Some(bounds);
-    }
-
     pub(super) fn handle_tracker_pip_window_closed(&mut self) {
         if self.tracker_pip_window.take().is_some() {
             self.status_text = "追踪画中画已关闭。".into();
         }
+        self.tracker_pip_pending_open = false;
     }
 
     fn refresh_tracker_pip_window(&mut self, cx: &mut Context<Self>) {
@@ -4386,13 +4410,20 @@ impl TrackerWorkbench {
             return;
         };
 
-        if handle
-            .update(cx, |_, pip_window, _| {
+        match handle.update(cx, |_, pip_window, cx| {
+            let bounds = pip_window.window_bounds();
+            pip_window.defer(cx, |pip_window, _| {
                 pip_window.refresh();
-            })
-            .is_err()
-        {
-            self.tracker_pip_window = None;
+            });
+            bounds
+        }) {
+            Ok(bounds) => {
+                self.tracker_pip_window_bounds = Some(bounds);
+            }
+            Err(_) => {
+                self.tracker_pip_window = None;
+                self.tracker_pip_pending_open = false;
+            }
         }
     }
 

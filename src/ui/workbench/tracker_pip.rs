@@ -1,7 +1,7 @@
 use gpui::{
     Bounds, Context, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, Styled as _, Subscription,
-    Window, canvas, div,
+    ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, Styled as _, Window, canvas,
+    div,
 };
 use gpui_component::ActiveTheme as _;
 
@@ -21,7 +21,6 @@ const MAP_CLICK_DRAG_THRESHOLD: f32 = 4.0;
 pub(super) struct TrackerPipWindow {
     workbench: gpui::WeakEntity<TrackerWorkbench>,
     viewport: MapViewportState,
-    subscriptions: Vec<Subscription>,
 }
 
 impl TrackerPipWindow {
@@ -29,10 +28,10 @@ impl TrackerPipWindow {
         workbench: gpui::WeakEntity<TrackerWorkbench>,
         initial_camera: MapCamera,
         initial_focus: Option<WorldPoint>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) -> Self {
-        let mut this = Self {
+        Self {
             workbench,
             viewport: MapViewportState {
                 camera: initial_camera,
@@ -40,23 +39,7 @@ impl TrackerPipWindow {
                 needs_fit: false,
                 ..Default::default()
             },
-            subscriptions: Vec::new(),
-        };
-        this.subscriptions
-            .push(cx.observe_window_bounds(window, |this, window, cx| {
-                this.handle_window_bounds_changed(window, cx);
-            }));
-        this
-    }
-
-    fn handle_window_bounds_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(workbench) = self.workbench.upgrade() else {
-            return;
-        };
-        let bounds = window.window_bounds();
-        let _ = workbench.update(cx, |this, _| {
-            this.update_tracker_pip_window_bounds(bounds);
-        });
+        }
     }
 
     fn sync_view_state(&mut self, width: f32, height: f32, follow_point: Option<WorldPoint>) {
