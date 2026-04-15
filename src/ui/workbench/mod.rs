@@ -16,7 +16,8 @@ use std::{
 
 use gpui::{
     AnyWindowHandle, AppContext, Bounds, Context, PathPromptOptions, Pixels, Render, SharedString,
-    Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
+    Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    WindowOptions,
 };
 use gpui_component::input::InputEvent;
 
@@ -56,11 +57,23 @@ use self::{
 };
 
 #[derive(Debug, Clone)]
-struct MapPointRenderItem {
+pub(super) struct MapPointRenderItem {
     group_id: RouteId,
     point_id: RoutePointId,
     world: WorldPoint,
     style: MarkerStyle,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct TrackerMapRenderSnapshot {
+    pub(super) route_color_hex: Option<String>,
+    pub(super) trail: Vec<WorldPoint>,
+    pub(super) preview_position: Option<PositionEstimate>,
+    pub(super) route_world: Vec<WorldPoint>,
+    pub(super) point_visuals: Vec<MapPointRenderItem>,
+    pub(super) selected_group_id: Option<RouteId>,
+    pub(super) selected_point_id: Option<RoutePointId>,
+    pub(super) follow_point: Option<WorldPoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -330,7 +343,7 @@ pub struct TrackerWorkbench {
     point_reorder_target_id: Option<RoutePointId>,
     point_reorder_picker: gpui::Entity<SelectState<PointReorderTargetItem>>,
     minimap_region_picker_window: Option<AnyWindowHandle>,
-    tracker_pip_window: Option<AnyWindowHandle>,
+    tracker_pip_window: Option<WindowHandle<TrackerPipWindow>>,
     tracker_pip_window_bounds: Option<WindowBounds>,
     tracker_pip_always_on_top: bool,
     tracker_pip_pending_open: bool,
@@ -1244,6 +1257,28 @@ impl TrackerWorkbench {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    pub(super) fn tracker_map_render_snapshot(&self) -> TrackerMapRenderSnapshot {
+        TrackerMapRenderSnapshot {
+            route_color_hex: self
+                .active_group()
+                .map(|group| group.default_style.color_hex.clone()),
+            trail: self.trail.clone(),
+            preview_position: self.preview_position.clone(),
+            route_world: self.active_group_route_worlds(),
+            point_visuals: self.active_group_points(),
+            selected_group_id: self.selected_group_id.clone(),
+            selected_point_id: self.selected_point_id.clone(),
+            follow_point: self
+                .auto_focus_enabled
+                .then(|| {
+                    self.preview_position
+                        .as_ref()
+                        .map(|position| position.world)
+                })
+                .flatten(),
+        }
     }
 
     fn moving_point_preview_world(&self, point_id: &RoutePointId) -> Option<WorldPoint> {
@@ -4293,13 +4328,15 @@ impl TrackerWorkbench {
             return;
         }
 
-        let workbench = cx.entity().downgrade();
-        let workbench_for_close = workbench.clone();
+        let workbench_for_close = cx.entity().downgrade();
         let initial_camera = self.tracker_map_view.camera;
         let initial_focus = self
             .preview_position
             .as_ref()
             .map(|position| position.world);
+        let initial_snapshot = self.tracker_map_render_snapshot();
+        let bwiki_resources = self.bwiki_resources.clone();
+        let bwiki_tile_cache = self.bwiki_tile_cache.clone();
         let initial_bounds = self
             .tracker_pip_window_bounds
             .unwrap_or_else(|| self.default_tracker_pip_window_bounds(window));
@@ -4330,9 +4367,11 @@ impl TrackerWorkbench {
 
                 cx.new(|cx| {
                     TrackerPipWindow::new(
-                        workbench.clone(),
                         initial_camera,
                         initial_focus,
+                        initial_snapshot.clone(),
+                        bwiki_resources.clone(),
+                        bwiki_tile_cache.clone(),
                         pip_window,
                         cx,
                     )
@@ -4342,7 +4381,7 @@ impl TrackerWorkbench {
 
         match open_result {
             Ok(handle) => {
-                self.tracker_pip_window = Some(handle.into());
+                self.tracker_pip_window = Some(handle);
                 self.tracker_pip_window_bounds = Some(initial_bounds);
                 self.status_text = "追踪画中画已打开。".into();
 
@@ -4409,8 +4448,10 @@ impl TrackerWorkbench {
         let Some(handle) = self.tracker_pip_window else {
             return;
         };
+        let snapshot = self.tracker_map_render_snapshot();
 
-        match handle.update(cx, |_, pip_window, cx| {
+        match handle.update(cx, |pip, pip_window, cx| {
+            pip.update_snapshot(snapshot.clone());
             let bounds = pip_window.window_bounds();
             pip_window.defer(cx, |pip_window, _| {
                 pip_window.refresh();

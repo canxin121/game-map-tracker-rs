@@ -29,7 +29,7 @@ use crate::{
 };
 
 use super::{
-    MapCanvasKind, TrackerWorkbench,
+    MapCanvasKind, TrackerMapRenderSnapshot, TrackerWorkbench,
     forms::read_input_value,
     page::{MapPage, SettingsPage, WorkbenchPage},
     select::Select,
@@ -3632,28 +3632,41 @@ pub(super) fn paint_tracker_map_overlay(
     camera: crate::domain::geometry::MapCamera,
     tokens: WorkbenchThemeTokens,
 ) {
-    let (
-        active_group,
-        trail,
-        preview_position,
-        route_world,
-        point_visuals,
-        selected_group_id,
-        selected_point_id,
-        bwiki_resources,
-    ) = {
+    let (snapshot, bwiki_resources) = {
         let this = entity.read(cx);
         (
-            this.active_group().cloned(),
-            this.trail.clone(),
-            this.preview_position.clone(),
-            this.active_group_route_worlds(),
-            this.active_group_points(),
-            this.selected_group_id.clone(),
-            this.selected_point_id.clone(),
+            this.tracker_map_render_snapshot(),
             this.bwiki_resources.clone(),
         )
     };
+
+    paint_tracker_map_overlay_snapshot(
+        window,
+        bounds,
+        cx,
+        camera,
+        tokens,
+        &snapshot,
+        &bwiki_resources,
+    );
+}
+
+pub(super) fn paint_tracker_map_overlay_snapshot(
+    window: &mut gpui::Window,
+    bounds: Bounds<gpui::Pixels>,
+    cx: &mut gpui::App,
+    camera: crate::domain::geometry::MapCamera,
+    tokens: WorkbenchThemeTokens,
+    snapshot: &TrackerMapRenderSnapshot,
+    bwiki_resources: &BwikiResourceManager,
+) {
+    let route_color_hex = snapshot.route_color_hex.clone();
+    let trail = snapshot.trail.clone();
+    let preview_position = snapshot.preview_position.clone();
+    let route_world = snapshot.route_world.clone();
+    let point_visuals = snapshot.point_visuals.clone();
+    let selected_group_id = snapshot.selected_group_id.clone();
+    let selected_point_id = snapshot.selected_point_id.clone();
 
     window.paint_layer(bounds, |window| {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -3693,9 +3706,8 @@ pub(super) fn paint_tracker_map_overlay(
                 }
             }
 
-            if let Some(group) = active_group.as_ref() {
-                let route_color =
-                    gpui::rgb(parse_hex_color(&group.default_style.color_hex, 0xff6b6b));
+            if let Some(route_color_hex) = route_color_hex.as_ref() {
+                let route_color = gpui::rgb(parse_hex_color(route_color_hex, 0xff6b6b));
                 if route_world.len() > 1 {
                     let route_screen = screen_points(camera, &route_world);
                     let route_canvas = route_screen

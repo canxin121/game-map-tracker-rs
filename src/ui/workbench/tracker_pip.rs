@@ -7,46 +7,57 @@ use gpui_component::ActiveTheme as _;
 
 use crate::{
     domain::geometry::{MapCamera, WorldPoint},
-    ui::map_canvas::MapViewportState,
+    resources::BwikiResourceManager,
+    ui::{map_canvas::MapViewportState, tile_cache::TileImageCache},
 };
 
 use super::{
-    TrackerWorkbench,
-    panels::{paint_bwiki_tile_layers, paint_tracker_map_overlay},
+    TrackerMapRenderSnapshot,
+    panels::{paint_bwiki_tile_layers, paint_tracker_map_overlay_snapshot},
     theme::WorkbenchThemeTokens,
 };
 
 const MAP_CLICK_DRAG_THRESHOLD: f32 = 4.0;
 
 pub(super) struct TrackerPipWindow {
-    workbench: gpui::WeakEntity<TrackerWorkbench>,
     viewport: MapViewportState,
+    snapshot: TrackerMapRenderSnapshot,
+    bwiki_resources: BwikiResourceManager,
+    bwiki_tile_cache: gpui::Entity<TileImageCache>,
 }
 
 impl TrackerPipWindow {
     pub(super) fn new(
-        workbench: gpui::WeakEntity<TrackerWorkbench>,
         initial_camera: MapCamera,
         initial_focus: Option<WorldPoint>,
+        snapshot: TrackerMapRenderSnapshot,
+        bwiki_resources: BwikiResourceManager,
+        bwiki_tile_cache: gpui::Entity<TileImageCache>,
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Self {
         Self {
-            workbench,
             viewport: MapViewportState {
                 camera: initial_camera,
                 pending_center: initial_focus,
                 needs_fit: false,
                 ..Default::default()
             },
+            snapshot,
+            bwiki_resources,
+            bwiki_tile_cache,
         }
     }
 
-    fn sync_view_state(&mut self, width: f32, height: f32, follow_point: Option<WorldPoint>) {
-        self.viewport.update_viewport(width, height);
-        if let Some(point) = follow_point {
+    pub(super) fn update_snapshot(&mut self, snapshot: TrackerMapRenderSnapshot) {
+        if let Some(point) = snapshot.follow_point {
             self.viewport.center_on_or_queue(point);
         }
+        self.snapshot = snapshot;
+    }
+
+    fn sync_view_state(&mut self, width: f32, height: f32) {
+        self.viewport.update_viewport(width, height);
         self.viewport.apply_pending_center();
     }
 
@@ -108,61 +119,38 @@ impl Render for TrackerPipWindow {
             canvas(
                 move |_, _, _| (),
                 move |bounds, _, window, cx| {
-                    let bounds_width = f32::from(bounds.size.width);
-                    let bounds_height = f32::from(bounds.size.height);
-                    let (camera, workbench, bwiki_resources, bwiki_tile_cache) =
-                        entity.update(cx, |this, cx| {
-                            let mut follow_point = None;
-                            let workbench = this.workbench.upgrade();
-                            let (bwiki_resources, bwiki_tile_cache) =
-                                if let Some(workbench_entity) = workbench.as_ref() {
-                                    let workbench_state = workbench_entity.read(cx);
-                                    if workbench_state.is_auto_focus_enabled() {
-                                        follow_point = workbench_state
-                                            .preview_position
-                                            .as_ref()
-                                            .map(|position| position.world);
-                                    }
-                                    (
-                                        Some(workbench_state.bwiki_resources.clone()),
-                                        Some(workbench_state.bwiki_tile_cache.clone()),
-                                    )
-                                } else {
-                                    (None, None)
-                                };
-                            this.sync_view_state(bounds_width, bounds_height, follow_point);
+                    let (camera, snapshot, bwiki_resources, bwiki_tile_cache) =
+                        entity.update(cx, |this, _| {
+                            this.sync_view_state(
+                                f32::from(bounds.size.width),
+                                f32::from(bounds.size.height),
+                            );
                             (
                                 this.viewport.camera,
-                                workbench,
-                                bwiki_resources,
-                                bwiki_tile_cache,
+                                this.snapshot.clone(),
+                                this.bwiki_resources.clone(),
+                                this.bwiki_tile_cache.clone(),
                             )
                         });
 
-                    if let (Some(workbench), Some(bwiki_resources), Some(bwiki_tile_cache)) =
-                        (workbench, bwiki_resources, bwiki_tile_cache)
-                    {
-                        paint_bwiki_tile_layers(
-                            window,
-                            bounds,
-                            cx,
-                            camera,
-                            &bwiki_resources,
-                            &bwiki_tile_cache,
-                            tokens.map_canvas_backdrop,
-                        );
-                        paint_tracker_map_overlay(
-                            &workbench,
-                            window,
-                            bounds,
-                            cx,
-                            bounds_width,
-                            bounds_height,
-                            camera,
-                            tokens,
-                        );
-                    }
-
+                    paint_bwiki_tile_layers(
+                        window,
+                        bounds,
+                        cx,
+                        camera,
+                        &bwiki_resources,
+                        &bwiki_tile_cache,
+                        tokens.map_canvas_backdrop,
+                    );
+                    paint_tracker_map_overlay_snapshot(
+                        window,
+                        bounds,
+                        cx,
+                        camera,
+                        tokens,
+                        &snapshot,
+                        &bwiki_resources,
+                    );
                     install_tracker_pip_navigation_handlers(window, entity.clone(), bounds);
                 },
             )
