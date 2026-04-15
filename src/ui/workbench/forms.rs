@@ -145,11 +145,7 @@ impl ConfigFormInputs {
             local_search_enabled: config_input(window, cx, "true / false"),
             local_search_radius_px: config_input(window, cx, "radius_px"),
             local_search_lock_fail_threshold: config_input(window, cx, "lock_fail_threshold"),
-            local_search_max_accepted_jump_px: config_input(
-                window,
-                cx,
-                "max_accepted_jump_px",
-            ),
+            local_search_max_accepted_jump_px: config_input(window, cx, "max_accepted_jump_px"),
             sift_refresh_rate_ms: config_input(window, cx, "refresh_rate_ms"),
             sift_clahe_limit: config_input(window, cx, "clahe_limit"),
             sift_match_ratio: config_input(window, cx, "match_ratio"),
@@ -536,11 +532,7 @@ impl ConfigDraft {
                 },
                 window_geometry: read_input_value(&form.window_geometry, cx),
                 view_size: parse_input_value(&form.view_size, "view_size", cx)?,
-                max_lost_frames: parse_input_value(
-                    &form.max_lost_frames,
-                    "max_lost_frames",
-                    cx,
-                )?,
+                max_lost_frames: parse_input_value(&form.max_lost_frames, "max_lost_frames", cx)?,
                 teleport_link_distance: parse_input_value(
                     &form.teleport_link_distance,
                     "teleport_link_distance",
@@ -656,11 +648,7 @@ impl ConfigDraft {
                     )?,
                 },
                 network: NetworkConfig {
-                    http_port: parse_input_value(
-                        &form.network_http_port,
-                        "network.http_port",
-                        cx,
-                    )?,
+                    http_port: parse_input_value(&form.network_http_port, "network.http_port", cx)?,
                     websocket_port: parse_input_value(
                         &form.network_websocket_port,
                         "network.websocket_port",

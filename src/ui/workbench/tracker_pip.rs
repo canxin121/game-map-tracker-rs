@@ -1,6 +1,6 @@
 use gpui::{
-    Bounds, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
+    Bounds, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     WindowControlArea, canvas, div, px,
 };
@@ -160,54 +160,47 @@ impl Render for TrackerPipWindow {
             .flex_col()
             .child(pip_titlebar(self, cx, tokens))
             .child(
-                div()
-                    .flex_1()
-                    .relative()
-                    .child(
-                        canvas(
-                            move |_, _, _| (),
-                            move |bounds, _, window, cx| {
-                                let (camera, snapshot, bwiki_resources, bwiki_tile_cache) =
-                                    entity.update(cx, |this, _| {
-                                        this.sync_view_state(
-                                            f32::from(bounds.size.width),
-                                            f32::from(bounds.size.height),
-                                        );
-                                        (
-                                            this.viewport.camera,
-                                            this.snapshot.clone(),
-                                            this.bwiki_resources.clone(),
-                                            this.bwiki_tile_cache.clone(),
-                                        )
-                                    });
+                div().flex_1().relative().child(
+                    canvas(
+                        move |_, _, _| (),
+                        move |bounds, _, window, cx| {
+                            let (camera, snapshot, bwiki_resources, bwiki_tile_cache) = entity
+                                .update(cx, |this, _| {
+                                    this.sync_view_state(
+                                        f32::from(bounds.size.width),
+                                        f32::from(bounds.size.height),
+                                    );
+                                    (
+                                        this.viewport.camera,
+                                        this.snapshot.clone(),
+                                        this.bwiki_resources.clone(),
+                                        this.bwiki_tile_cache.clone(),
+                                    )
+                                });
 
-                                paint_bwiki_tile_layers(
-                                    window,
-                                    bounds,
-                                    cx,
-                                    camera,
-                                    &bwiki_resources,
-                                    &bwiki_tile_cache,
-                                    tokens.map_canvas_backdrop,
-                                );
-                                paint_tracker_map_overlay_snapshot(
-                                    window,
-                                    bounds,
-                                    cx,
-                                    camera,
-                                    tokens,
-                                    &snapshot,
-                                    &bwiki_resources,
-                                );
-                                install_tracker_pip_navigation_handlers(
-                                    window,
-                                    entity.clone(),
-                                    bounds,
-                                );
-                            },
-                        )
-                        .size_full(),
-                    ),
+                            paint_bwiki_tile_layers(
+                                window,
+                                bounds,
+                                cx,
+                                camera,
+                                &bwiki_resources,
+                                &bwiki_tile_cache,
+                                tokens.map_canvas_backdrop,
+                            );
+                            paint_tracker_map_overlay_snapshot(
+                                window,
+                                bounds,
+                                cx,
+                                camera,
+                                tokens,
+                                &snapshot,
+                                &bwiki_resources,
+                            );
+                            install_tracker_pip_navigation_handlers(window, entity.clone(), bounds);
+                        },
+                    )
+                    .size_full(),
+                ),
             )
     }
 }

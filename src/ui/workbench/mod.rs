@@ -62,6 +62,8 @@ pub(super) struct MapPointRenderItem {
     point_id: RoutePointId,
     world: WorldPoint,
     style: MarkerStyle,
+    is_start: bool,
+    is_end: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1186,16 +1188,20 @@ impl TrackerWorkbench {
     fn active_group_points(&self) -> Vec<MapPointRenderItem> {
         self.active_group()
             .map(|group| {
+                let last_index = group.points.len().saturating_sub(1);
                 group
                     .points
                     .iter()
-                    .map(|point| MapPointRenderItem {
+                    .enumerate()
+                    .map(|(index, point)| MapPointRenderItem {
                         group_id: group.id.clone(),
                         point_id: point.id.clone(),
                         world: self
                             .moving_point_preview_world(&point.id)
                             .unwrap_or_else(|| point.world()),
                         style: group.effective_style(point),
+                        is_start: index == 0,
+                        is_end: index == last_index,
                     })
                     .collect()
             })
@@ -5164,7 +5170,8 @@ fn planner_point_to_route_point(
         .type_definition
         .as_ref()
         .and_then(|definition| {
-            (!definition.name.trim().is_empty()).then(|| MarkerIconStyle::new(definition.name.clone()))
+            (!definition.name.trim().is_empty())
+                .then(|| MarkerIconStyle::new(definition.name.clone()))
         })
         .unwrap_or_else(|| MarkerIconStyle::new(point.record.mark_type.to_string()));
     let type_label = point

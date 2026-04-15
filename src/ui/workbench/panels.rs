@@ -3734,6 +3734,7 @@ pub(super) fn paint_tracker_map_overlay_snapshot(
                 }
             }
 
+            let mut badge_items = Vec::new();
             for marker in point_visuals {
                 let screen = camera.world_to_screen(marker.world);
                 let highlighted = selected_group_id.as_ref() == Some(&marker.group_id)
@@ -3743,7 +3744,10 @@ pub(super) fn paint_tracker_map_overlay_snapshot(
                     bounds.origin.y + px(screen.y),
                 );
                 let accent = parse_hex_color(&marker.style.color_hex, 0xff6b6b);
-                if let Some((mark_type, image)) = route_icon_assets.get(&marker.style.icon) {
+                let marker_bounds = if let Some((mark_type, image)) =
+                    route_icon_assets.get(&marker.style.icon)
+                {
+                    let marker_bounds = bwiki_marker_image_bounds(anchor);
                     paint_bwiki_style_marker(
                         window,
                         anchor,
@@ -3758,9 +3762,35 @@ pub(super) fn paint_tracker_map_overlay_snapshot(
                             }
                         },
                     );
+                    marker_bounds
                 } else {
+                    let marker_bounds = route_marker_bounds(anchor, 24.0);
                     paint_route_marker(window, anchor, 24.0, accent, highlighted, false, tokens);
+                    marker_bounds
+                };
+                if marker.is_start || marker.is_end {
+                    badge_items.push(RoutePointBadgeRenderItem {
+                        marker_bounds,
+                        is_start: marker.is_start,
+                        is_end: marker.is_end,
+                    });
                 }
+            }
+
+            if !badge_items.is_empty() {
+                window.paint_layer(bounds, |window| {
+                    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                        for badge in &badge_items {
+                            paint_route_point_badges(
+                                window,
+                                badge.marker_bounds,
+                                badge.is_start,
+                                badge.is_end,
+                                tokens,
+                            );
+                        }
+                    });
+                });
             }
 
             if let Some(position) = preview_position
@@ -4479,6 +4509,118 @@ fn paint_route_marker(
     }
     window.paint_quad(fill(inner_bounds, gpui::rgb(accent)).corner_radii(px(radius)));
     window.paint_quad(fill(core_bounds, gpui::rgb(0xFFFFFF)).corner_radii(px(radius * 0.38)));
+}
+
+fn route_marker_bounds(anchor: gpui::Point<gpui::Pixels>, size_px: f32) -> Bounds<gpui::Pixels> {
+    let size_px = size_px.clamp(14.0, 64.0);
+    let radius = size_px * 0.34 + 4.0;
+    Bounds {
+        origin: point(anchor.x - px(radius), anchor.y - px(radius)),
+        size: size(px(radius * 2.0), px(radius * 2.0)),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RoutePointBadgeRenderItem {
+    marker_bounds: Bounds<gpui::Pixels>,
+    is_start: bool,
+    is_end: bool,
+}
+
+fn paint_route_point_badges(
+    window: &mut gpui::Window,
+    marker_bounds: Bounds<gpui::Pixels>,
+    is_start: bool,
+    is_end: bool,
+    tokens: WorkbenchThemeTokens,
+) {
+    const BADGE_SIZE: f32 = 10.0;
+    const BADGE_MARGIN: f32 = 2.0;
+
+    if !is_start && !is_end {
+        return;
+    }
+
+    let top = marker_bounds.origin.y + px(BADGE_MARGIN);
+    if is_start {
+        paint_route_point_badge(
+            window,
+            Bounds {
+                origin: point(marker_bounds.origin.x + px(BADGE_MARGIN), top),
+                size: size(px(BADGE_SIZE), px(BADGE_SIZE)),
+            },
+            RoutePointBadgeKind::Start,
+            tokens,
+        );
+    }
+    if is_end {
+        let right = marker_bounds.origin.x + px(f32::from(marker_bounds.size.width));
+        paint_route_point_badge(
+            window,
+            Bounds {
+                origin: point(right - px(BADGE_SIZE + BADGE_MARGIN), top),
+                size: size(px(BADGE_SIZE), px(BADGE_SIZE)),
+            },
+            RoutePointBadgeKind::End,
+            tokens,
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoutePointBadgeKind {
+    Start,
+    End,
+}
+
+fn paint_route_point_badge(
+    window: &mut gpui::Window,
+    bounds: Bounds<gpui::Pixels>,
+    kind: RoutePointBadgeKind,
+    tokens: WorkbenchThemeTokens,
+) {
+    let frame_bounds = inflate_bounds(bounds, 1.0);
+    let frame_radius = match kind {
+        RoutePointBadgeKind::Start => px(6.0),
+        RoutePointBadgeKind::End => px(4.0),
+    };
+    let badge_color = match kind {
+        RoutePointBadgeKind::Start => gpui::rgb(0x1F9D55),
+        RoutePointBadgeKind::End => gpui::rgb(0xC24141),
+    };
+
+    window.paint_quad(fill(frame_bounds, tokens.preview_ring).corner_radii(frame_radius));
+    window.paint_quad(fill(bounds, badge_color).corner_radii(frame_radius));
+
+    match kind {
+        RoutePointBadgeKind::Start => {
+            let left = bounds.origin.x + px(3.0);
+            let top = bounds.origin.y + px(2.4);
+            let center_y = bounds.origin.y + px(f32::from(bounds.size.height) * 0.5);
+            let bottom = bounds.origin.y + px(f32::from(bounds.size.height) - 2.4);
+            let right = bounds.origin.x + px(f32::from(bounds.size.width) - 2.3);
+            let points = [
+                point(left, top),
+                point(right, center_y),
+                point(left, bottom),
+            ];
+            let mut builder = PathBuilder::fill();
+            builder.add_polygon(&points, false);
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, gpui::rgb(0xFFFFFF));
+            }
+        }
+        RoutePointBadgeKind::End => {
+            let stop_bounds = Bounds {
+                origin: point(bounds.origin.x + px(3.0), bounds.origin.y + px(3.0)),
+                size: size(
+                    px(f32::from(bounds.size.width) - 6.0),
+                    px(f32::from(bounds.size.height) - 6.0),
+                ),
+            };
+            window.paint_quad(fill(stop_bounds, gpui::rgb(0xFFFFFF)).corner_radii(px(1.4)));
+        }
+    }
 }
 
 fn paint_bwiki_placeholder_marker(

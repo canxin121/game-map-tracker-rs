@@ -192,8 +192,7 @@ pub fn save_config(project_root: &Path, config: &AppConfig) -> Result<std::path:
             .with_context(|| format!("failed to create config parent {}", parent.display()))?;
     }
 
-    let raw =
-        toml::to_string_pretty(config).context("failed to serialize config file as TOML")?;
+    let raw = toml::to_string_pretty(config).context("failed to serialize config file as TOML")?;
     fs::write(&path, raw)
         .with_context(|| format!("failed to write config file at {}", path.display()))?;
     Ok(path)
