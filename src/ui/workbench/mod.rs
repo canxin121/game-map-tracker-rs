@@ -159,6 +159,13 @@ struct BwikiRoutePlanPreview {
 }
 
 #[derive(Debug, Clone)]
+struct BwikiPlannerTaskResult {
+    requested_count: usize,
+    normalized_selection_keys: HashSet<BwikiPointKey>,
+    preview: Option<BwikiRoutePlanPreview>,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct SelectedPointPopup {
     pub(super) left: f32,
     pub(super) top: f32,
@@ -337,6 +344,8 @@ pub struct TrackerWorkbench {
     bwiki_planner_selected_points: HashSet<BwikiPointKey>,
     bwiki_planner_lasso_selection: Option<BwikiPlannerLassoSelection>,
     bwiki_planner_preview: Option<BwikiRoutePlanPreview>,
+    bwiki_planner_status: AsyncTaskStatus,
+    bwiki_planner_task_id: u64,
     bwiki_planner_form: RoutePlannerFormInputs,
     bwiki_planner_icon: MarkerIconStyle,
     bwiki_planner_icon_picker: gpui::Entity<SelectState<BwikiIconPickerItem>>,
@@ -479,6 +488,8 @@ impl TrackerWorkbench {
                     bwiki_planner_selected_points: HashSet::new(),
                     bwiki_planner_lasso_selection: None,
                     bwiki_planner_preview: None,
+                    bwiki_planner_status: AsyncTaskStatus::idle("选择节点后可在后台规划路线。"),
+                    bwiki_planner_task_id: 0,
                     bwiki_planner_form: bwiki_planner_form.clone(),
                     bwiki_planner_icon: MarkerIconStyle::default(),
                     bwiki_planner_icon_picker: bwiki_planner_icon_picker.clone(),
@@ -573,6 +584,8 @@ impl TrackerWorkbench {
                     bwiki_planner_selected_points: HashSet::new(),
                     bwiki_planner_lasso_selection: None,
                     bwiki_planner_preview: None,
+                    bwiki_planner_status: AsyncTaskStatus::idle("选择节点后可在后台规划路线。"),
+                    bwiki_planner_task_id: 0,
                     bwiki_planner_form,
                     bwiki_planner_icon: MarkerIconStyle::default(),
                     bwiki_planner_icon_picker,
@@ -1079,6 +1092,14 @@ impl TrackerWorkbench {
         self.bwiki_resources.is_dataset_refresh_pending()
     }
 
+    pub(super) fn is_bwiki_planner_busy(&self) -> bool {
+        self.bwiki_planner_status.phase == AsyncTaskPhase::Working
+    }
+
+    pub(super) fn bwiki_planner_tooltip(&self) -> SharedString {
+        self.bwiki_planner_status.summary.clone()
+    }
+
     pub(super) fn bwiki_status_summary(&self) -> SharedString {
         if self.is_bwiki_refreshing() {
             "同步中".into()
@@ -1475,16 +1496,6 @@ impl TrackerWorkbench {
             .collect()
     }
 
-    fn resolve_bwiki_selected_points(&self) -> Vec<BwikiPlannerResolvedPoint> {
-        let mut keys = self
-            .bwiki_planner_selected_points
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        keys.sort();
-        self.resolve_bwiki_points_by_keys(&keys)
-    }
-
     fn resolve_bwiki_points_by_keys(
         &self,
         keys: &[BwikiPointKey],
@@ -1492,31 +1503,7 @@ impl TrackerWorkbench {
         let Some(dataset) = self.bwiki_resources.dataset_snapshot() else {
             return Vec::new();
         };
-        if keys.is_empty() {
-            return Vec::new();
-        }
-
-        let mut lookup = HashMap::new();
-        for definition in &dataset.types {
-            let Some(records) = dataset.points_by_type.get(&definition.mark_type) else {
-                continue;
-            };
-            for record in records {
-                let key = BwikiPointKey::from_record(record);
-                lookup.insert(
-                    key.clone(),
-                    BwikiPlannerResolvedPoint {
-                        key,
-                        record: record.clone(),
-                        type_definition: Some(definition.clone()),
-                    },
-                );
-            }
-        }
-
-        keys.iter()
-            .filter_map(|key| lookup.get(key).cloned())
-            .collect()
+        resolve_bwiki_points_by_keys_from_dataset(&dataset, keys)
     }
 
     fn resolve_bwiki_preview_points(&self) -> Vec<BwikiPlannerResolvedPoint> {
@@ -1526,25 +1513,14 @@ impl TrackerWorkbench {
         self.resolve_bwiki_points_by_keys(&preview.route_keys)
     }
 
-    fn resolve_bwiki_teleports(&self) -> Vec<BwikiPlannerResolvedPoint> {
-        let Some(dataset) = self.bwiki_resources.dataset_snapshot() else {
-            return Vec::new();
-        };
-        let teleport_keys = dataset
-            .points_by_type
-            .get(&BWIKI_TELEPORT_MARK_TYPE)
-            .map(|points| {
-                points
-                    .iter()
-                    .map(BwikiPointKey::from_record)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        self.resolve_bwiki_points_by_keys(&teleport_keys)
-    }
-
     fn invalidate_bwiki_route_plan_preview(&mut self) {
-        self.bwiki_planner_preview = None;
+        let had_preview = self.bwiki_planner_preview.take().is_some();
+        if self.is_bwiki_planner_busy() {
+            self.bwiki_planner_task_id = self.bwiki_planner_task_id.wrapping_add(1);
+            self.bwiki_planner_status = AsyncTaskStatus::idle("规划条件已变化，请重新规划。");
+        } else if had_preview || self.bwiki_planner_status.phase == AsyncTaskPhase::Succeeded {
+            self.bwiki_planner_status = AsyncTaskStatus::idle("当前规划结果已失效，请重新规划。");
+        }
     }
 
     fn toggle_bwiki_planner_keys<I>(&mut self, keys: I) -> usize
@@ -1910,6 +1886,7 @@ impl TrackerWorkbench {
     fn has_busy_operation(&self) -> bool {
         self.is_tracker_transition_pending()
             || self.is_bwiki_refreshing()
+            || self.is_bwiki_planner_busy()
             || self.is_route_import_busy()
     }
 
@@ -2088,64 +2065,100 @@ impl TrackerWorkbench {
         self.bwiki_planner_active = true;
         self.clear_bwiki_planner_selection();
         self.ensure_bwiki_planner_defaults(window, cx);
+        self.bwiki_planner_status = AsyncTaskStatus::idle("选择节点后可在后台规划路线。");
         self.status_text =
             "已进入路线规划模式。单击节点切换选中，按住 Ctrl 左键手绘闭合曲线可反选。".into();
     }
 
-    pub(super) fn plan_bwiki_route_preview(&mut self) {
-        let Some(_) = self.bwiki_resources.dataset_snapshot() else {
+    fn begin_bwiki_route_plan_task(&mut self, selected_count: usize) -> u64 {
+        self.bwiki_planner_task_id = self.bwiki_planner_task_id.wrapping_add(1);
+        self.bwiki_planner_preview = None;
+        let message = format!("正在规划 {} 个节点，请稍候。", selected_count);
+        self.bwiki_planner_status = AsyncTaskStatus::working(message.clone());
+        self.status_text = message.into();
+        self.bwiki_planner_task_id
+    }
+
+    fn apply_bwiki_route_plan_task_result(&mut self, task_id: u64, result: BwikiPlannerTaskResult) {
+        if task_id != self.bwiki_planner_task_id {
+            return;
+        }
+
+        let resolved_count = result.normalized_selection_keys.len();
+        self.bwiki_planner_selected_points = result.normalized_selection_keys;
+
+        match result.preview {
+            Some(preview) => {
+                let total_cost = preview.total_cost;
+                self.bwiki_planner_preview = Some(preview);
+                let message = if resolved_count == 1 {
+                    "当前只选中了 1 个节点，已生成单点路线。".to_owned()
+                } else {
+                    format!(
+                        "已完成路线规划，共 {} 个节点，预计长度 {:.0}。",
+                        resolved_count, total_cost
+                    )
+                };
+                self.bwiki_planner_status = AsyncTaskStatus::succeeded(message.clone());
+                self.status_text = message.into();
+            }
+            None => {
+                self.bwiki_planner_preview = None;
+                let message = if result.requested_count > 0 {
+                    "当前选中的节点已失效，请重新选择后再规划。".to_owned()
+                } else {
+                    "请先在地图中选择至少一个节点。".to_owned()
+                };
+                self.bwiki_planner_status = AsyncTaskStatus::idle(message.clone());
+                self.status_text = message.into();
+            }
+        }
+    }
+
+    pub(super) fn plan_bwiki_route_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_bwiki_planner_busy() {
+            return;
+        }
+
+        let Some(dataset) = self.bwiki_resources.dataset_snapshot() else {
             self.bwiki_planner_preview = None;
-            self.status_text = "节点图鉴数据尚未就绪，暂时无法规划。".into();
+            let message = "节点图鉴数据尚未就绪，暂时无法规划。".to_owned();
+            self.bwiki_planner_status = AsyncTaskStatus::failed(message.clone());
+            self.status_text = message.into();
             return;
         };
 
-        let resolved = self.resolve_bwiki_selected_points();
-        if resolved.len() != self.bwiki_planner_selected_points.len() {
-            self.bwiki_planner_selected_points = resolved
-                .iter()
-                .map(|point| point.key.clone())
-                .collect::<HashSet<_>>();
-        }
-        if resolved.is_empty() {
-            self.invalidate_bwiki_route_plan_preview();
-            self.status_text = "请先在地图中选择至少一个节点。".into();
-            return;
-        }
-
-        let teleports = self.resolve_bwiki_teleports();
-        let teleport_link_distance = self.teleport_link_distance();
-        if resolved.len() == 1 {
-            self.bwiki_planner_preview = Some(BwikiRoutePlanPreview {
-                route_keys: vec![resolved[0].key.clone()],
-                total_cost: 0.0,
-            });
-            self.status_text = "当前只选中了 1 个节点，已生成单点路线。".into();
-            return;
-        }
-
-        let worlds = resolved
+        let mut selected_keys = self
+            .bwiki_planner_selected_points
             .iter()
-            .map(|point| point.record.world)
-            .collect::<Vec<_>>();
-        let pair_costs =
-            build_bwiki_planner_cost_matrix(&worlds, &teleports, teleport_link_distance);
-        let order = build_bwiki_planner_order(&pair_costs);
-        let ordered_points = order
-            .iter()
-            .filter_map(|index| resolved.get(*index))
             .cloned()
             .collect::<Vec<_>>();
-        let preview =
-            build_bwiki_route_plan_preview(&ordered_points, &teleports, teleport_link_distance);
-        let total_cost = preview.total_cost;
+        selected_keys.sort();
+        if selected_keys.is_empty() {
+            self.invalidate_bwiki_route_plan_preview();
+            let message = "请先在地图中选择至少一个节点。".to_owned();
+            self.bwiki_planner_status = AsyncTaskStatus::idle(message.clone());
+            self.status_text = message.into();
+            return;
+        }
 
-        self.bwiki_planner_preview = Some(preview);
-        self.status_text = format!(
-            "已完成路线规划，共 {} 个节点，预计长度 {:.0}。",
-            resolved.len(),
-            total_cost
-        )
-        .into();
+        let teleport_link_distance = self.teleport_link_distance();
+        let task_id = self.begin_bwiki_route_plan_task(selected_keys.len());
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move {
+                build_bwiki_route_plan_task_result(&dataset, selected_keys, teleport_link_distance)
+            });
+
+            let result = result.await;
+
+            this.update_in(cx, |this, _, cx| {
+                this.apply_bwiki_route_plan_task_result(task_id, result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn handle_bwiki_planner_click(&mut self, screen_x: f32, screen_y: f32) -> bool {
@@ -5115,6 +5128,104 @@ fn ordered_bwiki_route_cost(order: &[usize], costs: &[Vec<f32>]) -> f32 {
         .windows(2)
         .map(|segment| costs[segment[0]][segment[1]])
         .sum()
+}
+
+fn resolve_bwiki_points_by_keys_from_dataset(
+    dataset: &crate::resources::BwikiDataset,
+    keys: &[BwikiPointKey],
+) -> Vec<BwikiPlannerResolvedPoint> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lookup = HashMap::new();
+    for definition in &dataset.types {
+        let Some(records) = dataset.points_by_type.get(&definition.mark_type) else {
+            continue;
+        };
+        for record in records {
+            let key = BwikiPointKey::from_record(record);
+            lookup.insert(
+                key.clone(),
+                BwikiPlannerResolvedPoint {
+                    key,
+                    record: record.clone(),
+                    type_definition: Some(definition.clone()),
+                },
+            );
+        }
+    }
+
+    keys.iter()
+        .filter_map(|key| lookup.get(key).cloned())
+        .collect()
+}
+
+fn resolve_bwiki_teleports_from_dataset(
+    dataset: &crate::resources::BwikiDataset,
+) -> Vec<BwikiPlannerResolvedPoint> {
+    let type_definition = dataset.type_by_mark_type(BWIKI_TELEPORT_MARK_TYPE).cloned();
+    dataset
+        .points_by_type
+        .get(&BWIKI_TELEPORT_MARK_TYPE)
+        .map(|records| {
+            records
+                .iter()
+                .map(|record| BwikiPlannerResolvedPoint {
+                    key: BwikiPointKey::from_record(record),
+                    record: record.clone(),
+                    type_definition: type_definition.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn build_bwiki_route_plan_task_result(
+    dataset: &crate::resources::BwikiDataset,
+    selected_keys: Vec<BwikiPointKey>,
+    teleport_link_distance: f32,
+) -> BwikiPlannerTaskResult {
+    let requested_count = selected_keys.len();
+    let resolved = resolve_bwiki_points_by_keys_from_dataset(dataset, &selected_keys);
+    let normalized_selection_keys = resolved
+        .iter()
+        .map(|point| point.key.clone())
+        .collect::<HashSet<_>>();
+
+    let preview = if resolved.is_empty() {
+        None
+    } else if resolved.len() == 1 {
+        Some(BwikiRoutePlanPreview {
+            route_keys: vec![resolved[0].key.clone()],
+            total_cost: 0.0,
+        })
+    } else {
+        let teleports = resolve_bwiki_teleports_from_dataset(dataset);
+        let worlds = resolved
+            .iter()
+            .map(|point| point.record.world)
+            .collect::<Vec<_>>();
+        let pair_costs =
+            build_bwiki_planner_cost_matrix(&worlds, &teleports, teleport_link_distance);
+        let order = build_bwiki_planner_order(&pair_costs);
+        let ordered_points = order
+            .iter()
+            .filter_map(|index| resolved.get(*index))
+            .cloned()
+            .collect::<Vec<_>>();
+        Some(build_bwiki_route_plan_preview(
+            &ordered_points,
+            &teleports,
+            teleport_link_distance,
+        ))
+    };
+
+    BwikiPlannerTaskResult {
+        requested_count,
+        normalized_selection_keys,
+        preview,
+    }
 }
 
 fn append_preview_key(route_keys: &mut Vec<BwikiPointKey>, key: &BwikiPointKey) {

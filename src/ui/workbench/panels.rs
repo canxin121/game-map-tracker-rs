@@ -2802,16 +2802,21 @@ fn bwiki_route_planner_card(
     planner_selected_count: usize,
     planner_total_cost: Option<f32>,
 ) -> impl IntoElement {
-    let preview_summary = planner_total_cost
-        .map(|total_cost| {
-            format!(
-                "已选 {} 个点 · 预计长度 {:.0}",
-                planner_selected_count, total_cost
-            )
-        })
-        .unwrap_or_else(|| format!("已选 {} 个点 · 尚未规划", planner_selected_count));
-    let plan_disabled = planner_selected_count == 0;
-    let create_disabled = !this.bwiki_planner_has_preview();
+    let preview_summary = if this.is_bwiki_planner_busy() {
+        format!("已选 {} 个点 · 正在规划", planner_selected_count)
+    } else {
+        planner_total_cost
+            .map(|total_cost| {
+                format!(
+                    "已选 {} 个点 · 预计长度 {:.0}",
+                    planner_selected_count, total_cost
+                )
+            })
+            .unwrap_or_else(|| format!("已选 {} 个点 · 尚未规划", planner_selected_count))
+    };
+    let plan_disabled =
+        planner_selected_count == 0 || !bwiki_dataset_ready || this.is_bwiki_planner_busy();
+    let create_disabled = this.is_bwiki_planner_busy() || !this.bwiki_planner_has_preview();
 
     div()
         .rounded_lg()
@@ -2930,13 +2935,21 @@ fn bwiki_route_planner_card(
                     toolbar_button_with_tooltip(
                         "bwiki-planner-plan",
                         tokens,
-                        "P",
-                        "规划路线",
-                        None,
+                        if this.is_bwiki_planner_busy() {
+                            this.busy_spinner_icon()
+                        } else {
+                            "P"
+                        },
+                        if this.is_bwiki_planner_busy() {
+                            "规划中"
+                        } else {
+                            "规划路线"
+                        },
+                        Some(this.bwiki_planner_tooltip()),
                         ToolbarButtonTone::Neutral,
                         plan_disabled,
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.plan_bwiki_route_preview();
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.plan_bwiki_route_preview(window, cx);
                             cx.notify();
                         }),
                     )
