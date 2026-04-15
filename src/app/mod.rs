@@ -15,6 +15,7 @@ use crate::{
 
 pub fn launch() -> Result<()> {
     init_tracing();
+    configure_windows_capture_compatibility();
 
     let workspace = WorkspaceBootstrap::prepare()?;
 
@@ -53,6 +54,22 @@ pub fn launch() -> Result<()> {
         });
 
     Ok(())
+}
+
+fn configure_windows_capture_compatibility() {
+    #[cfg(target_os = "windows")]
+    {
+        const GPUI_DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
+
+        if std::env::var_os(GPUI_DISABLE_DIRECT_COMPOSITION).is_none() {
+            // GPUI's DirectComposition path uses WS_EX_NOREDIRECTIONBITMAP, which some
+            // screen recorders fail to capture reliably and can cause the content layer
+            // to blink or disappear. Default to the more compatible swap-chain path.
+            unsafe {
+                std::env::set_var(GPUI_DISABLE_DIRECT_COMPOSITION, "1");
+            }
+        }
+    }
 }
 
 fn init_tracing() {
