@@ -165,14 +165,63 @@ fn navigation_sidebar(
                             .border_color(tokens.border)
                             .p_2()
                             .child(sidebar_nav_item(
-                                "sidebar-nav-settings-config",
+                                "sidebar-nav-settings-runtime",
                                 tokens,
-                                "配置",
-                                settings_is_active && this.settings_page == SettingsPage::Config,
+                                "界面与运行",
+                                settings_is_active && this.settings_page == SettingsPage::Runtime,
                                 tokens.nav_subitem_active_bg,
                                 None,
                                 cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.select_settings_page(SettingsPage::Config);
+                                    this.select_settings_page(SettingsPage::Runtime);
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(sidebar_nav_item(
+                                "sidebar-nav-settings-capture",
+                                tokens,
+                                "截图与局部搜索",
+                                settings_is_active && this.settings_page == SettingsPage::Capture,
+                                tokens.nav_subitem_active_bg,
+                                None,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.select_settings_page(SettingsPage::Capture);
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(sidebar_nav_item(
+                                "sidebar-nav-settings-sift",
+                                tokens,
+                                "SIFT 特征匹配",
+                                settings_is_active && this.settings_page == SettingsPage::Sift,
+                                tokens.nav_subitem_active_bg,
+                                None,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.select_settings_page(SettingsPage::Sift);
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(sidebar_nav_item(
+                                "sidebar-nav-settings-convolution",
+                                tokens,
+                                "卷积特征匹配",
+                                settings_is_active
+                                    && this.settings_page == SettingsPage::Convolution,
+                                tokens.nav_subitem_active_bg,
+                                None,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.select_settings_page(SettingsPage::Convolution);
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(sidebar_nav_item(
+                                "sidebar-nav-settings-template",
+                                tokens,
+                                "多尺度模板匹配",
+                                settings_is_active && this.settings_page == SettingsPage::Template,
+                                tokens.nav_subitem_active_bg,
+                                None,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.select_settings_page(SettingsPage::Template);
                                     cx.notify();
                                 }),
                             ))
@@ -1547,7 +1596,11 @@ fn settings_page(
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
     match this.settings_page {
-        SettingsPage::Config => settings_config_page(this, cx, tokens).into_any_element(),
+        SettingsPage::Runtime => settings_runtime_page(this, cx, tokens).into_any_element(),
+        SettingsPage::Capture => settings_capture_page(this, cx, tokens).into_any_element(),
+        SettingsPage::Sift => settings_sift_page(this, cx, tokens).into_any_element(),
+        SettingsPage::Convolution => settings_convolution_page(this, cx, tokens).into_any_element(),
+        SettingsPage::Template => settings_template_page(this, cx, tokens).into_any_element(),
         SettingsPage::Debug => settings_debug_page(this, tokens).into_any_element(),
         SettingsPage::Resources => settings_resources_page(this, cx, tokens).into_any_element(),
     }
@@ -1897,7 +1950,74 @@ fn group_detail_panel(
         })
 }
 
-fn settings_config_page(
+fn settings_editor_toolbar(
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    toolbar_cluster(vec![
+        toolbar_button(
+            "settings-config-reload",
+            tokens,
+            "R",
+            "回填当前配置",
+            ToolbarButtonTone::Neutral,
+            cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.sync_config_form_from_workspace(window, cx);
+                this.status_text = "已回填当前配置文件内容。".into();
+                cx.notify();
+            }),
+        )
+        .into_any_element(),
+        toolbar_button(
+            "settings-config-save",
+            tokens,
+            "S",
+            "保存配置",
+            ToolbarButtonTone::Primary,
+            cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.save_app_config(window, cx);
+                cx.notify();
+            }),
+        )
+        .into_any_element(),
+    ])
+}
+
+fn settings_page_shell(
+    title: &'static str,
+    description: impl Into<SharedString>,
+    header_actions: Option<AnyElement>,
+    sections: Vec<AnyElement>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    let description = description.into();
+
+    div()
+        .flex_1()
+        .min_h(px(0.0))
+        .flex()
+        .flex_col()
+        .gap_4()
+        .overflow_y_scrollbar()
+        .rounded_xl()
+        .bg(tokens.panel_bg)
+        .border_1()
+        .border_color(tokens.border)
+        .p_4()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(section_title(title))
+                .when_some(header_actions, |header, actions| header.child(actions)),
+        )
+        .child(body_text(tokens, description))
+        .children(sections)
+}
+
+fn settings_runtime_page(
     this: &TrackerWorkbench,
     cx: &mut Context<TrackerWorkbench>,
     tokens: WorkbenchThemeTokens,
@@ -1923,127 +2043,115 @@ fn settings_config_page(
             }
         }));
 
-    div()
-        .flex_1()
-        .min_h(px(0.0))
-        .flex()
-        .flex_col()
-        .gap_4()
-        .overflow_y_scrollbar()
-        .rounded_xl()
-        .bg(tokens.panel_bg)
-        .border_1()
-        .border_color(tokens.border)
-        .p_4()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(section_title("界面与追踪配置"))
-                .child(toolbar_cluster(vec![
-                    toolbar_button(
-                        "settings-config-reload",
-                        tokens,
-                        "R",
-                        "回填当前配置",
-                        ToolbarButtonTone::Neutral,
-                        cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.sync_config_form_from_workspace(window, cx);
-                            this.status_text = "已回填当前配置文件内容。".into();
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element(),
-                    toolbar_button(
-                        "settings-config-save",
-                        tokens,
-                        "S",
-                        "保存配置",
-                        ToolbarButtonTone::Primary,
-                        cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.save_app_config(window, cx);
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element(),
-                ])),
-        )
-        .child(
-            div()
-                .rounded_lg()
-                .bg(tokens.panel_sunken_bg)
-                .border_1()
-                .border_color(tokens.border)
-                .p_3()
-                .child(field_label(tokens, "主题模式"))
-                .child(theme_mode_picker),
-        )
-        .child(editable_config_section(
-            "通用",
-            vec![
-                div()
-                    .flex()
-                    .gap_2()
-                    .children([
+    settings_page_shell(
+        "界面与运行",
+        "这里放工作区级别的运行参数：界面外观、预览窗口、追踪容忍度和网络端口。它们不依赖某个具体引擎。",
+        Some(settings_editor_toolbar(cx, tokens).into_any_element()),
+        vec![
+            editable_config_section(
+                "界面",
+                vec![
+                    div()
+                        .min_w(px(180.0))
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(field_label(tokens, "主题模式"))
+                        .child(theme_mode_picker)
+                        .into_any_element(),
+                    config_row(vec![
                         labeled_input(tokens, "窗口几何", &this.config_form.window_geometry)
                             .into_any_element(),
-                        labeled_input(tokens, "视图尺寸", &this.config_form.view_size)
-                            .into_any_element(),
-                        labeled_input(tokens, "最大丢帧", &this.config_form.max_lost_frames)
-                            .into_any_element(),
-                        labeled_input(
+                    ]),
+                ],
+                tokens,
+            )
+            .into_any_element(),
+            editable_config_section(
+                "追踪运行",
+                vec![config_row(vec![
+                    labeled_input(tokens, "视图尺寸", &this.config_form.view_size)
+                        .into_any_element(),
+                    labeled_input(tokens, "最大丢帧", &this.config_form.max_lost_frames)
+                        .into_any_element(),
+                    labeled_input(
+                        tokens,
+                        "传送等效距离",
+                        &this.config_form.teleport_link_distance,
+                    )
+                    .into_any_element(),
+                ])],
+                tokens,
+            )
+            .into_any_element(),
+            editable_config_section(
+                "网络接口",
+                vec![config_row(vec![
+                    labeled_input(tokens, "HTTP 端口", &this.config_form.network_http_port)
+                        .into_any_element(),
+                    labeled_input(
+                        tokens,
+                        "WebSocket 端口",
+                        &this.config_form.network_websocket_port,
+                    )
+                    .into_any_element(),
+                ])],
+                tokens,
+            )
+            .into_any_element(),
+        ],
+        tokens,
+    )
+}
+
+fn settings_capture_page(
+    this: &TrackerWorkbench,
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    settings_page_shell(
+        "截图与局部搜索",
+        "这组参数决定每帧从屏幕哪里取图，以及锁定后最多允许在周围多大范围内继续搜索。一般先校准截图，再调局部搜索阈值。",
+        Some(settings_editor_toolbar(cx, tokens).into_any_element()),
+        vec![
+            editable_config_section(
+                "截图区域",
+                vec![
+                    toolbar_cluster(vec![
+                        toolbar_button_with_tooltip(
+                            "settings-minimap-picker",
                             tokens,
-                            "传送等效距离",
-                            &this.config_form.teleport_link_distance,
+                            if this.is_minimap_region_picker_active() {
+                                this.busy_spinner_icon()
+                            } else {
+                                "P"
+                            },
+                            if this.is_minimap_region_picker_active() {
+                                "取区中"
+                            } else {
+                                "手动取区"
+                            },
+                            Some(if this.is_minimap_region_picker_active() {
+                                "小地图取区窗口已打开：拖动选择屏幕区域，右键取消。".into()
+                            } else {
+                                "打开屏幕取区窗口，拖动选择小地图截图范围。".into()
+                            }),
+                            if this.is_minimap_region_picker_active() {
+                                ToolbarButtonTone::Primary
+                            } else {
+                                ToolbarButtonTone::Neutral
+                            },
+                            false,
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.toggle_minimap_region_picker(window, cx);
+                                cx.notify();
+                            }),
                         )
                         .into_any_element(),
                     ])
                     .into_any_element(),
-            ],
-            tokens,
-        ))
-        .child(editable_config_section(
-            "截图区域",
-            vec![
-                toolbar_cluster(vec![
-                    toolbar_button_with_tooltip(
-                        "settings-minimap-picker",
-                        tokens,
-                        if this.is_minimap_region_picker_active() {
-                            this.busy_spinner_icon()
-                        } else {
-                            "P"
-                        },
-                        if this.is_minimap_region_picker_active() {
-                            "取区中"
-                        } else {
-                            "手动取区"
-                        },
-                        Some(if this.is_minimap_region_picker_active() {
-                            "小地图取区窗口已打开：拖动选择屏幕区域，右键取消。".into()
-                        } else {
-                            "打开屏幕取区窗口，拖动选择小地图截图范围。".into()
-                        }),
-                        if this.is_minimap_region_picker_active() {
-                            ToolbarButtonTone::Primary
-                        } else {
-                            ToolbarButtonTone::Neutral
-                        },
-                        false,
-                        cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.toggle_minimap_region_picker(window, cx);
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element(),
-                ])
-                .into_any_element(),
-                div()
-                    .flex()
-                    .gap_2()
-                    .children([
+                    config_row(vec![
                         labeled_input(tokens, "Top", &this.config_form.minimap_top)
                             .into_any_element(),
                         labeled_input(tokens, "Left", &this.config_form.minimap_left)
@@ -2052,209 +2160,229 @@ fn settings_config_page(
                             .into_any_element(),
                         labeled_input(tokens, "Height", &this.config_form.minimap_height)
                             .into_any_element(),
-                    ])
+                    ]),
+                ],
+                tokens,
+            )
+            .into_any_element(),
+            editable_config_section(
+                "局部搜索",
+                vec![config_row(vec![
+                    labeled_input(
+                        tokens,
+                        "启用 true/false",
+                        &this.config_form.local_search_enabled,
+                    )
                     .into_any_element(),
-            ],
-            tokens,
-        ))
-        .child(editable_config_section(
-            "局部搜索",
-            vec![
-                div()
-                    .flex()
-                    .gap_2()
-                    .children([
-                        labeled_input(
-                            tokens,
-                            "启用 true/false",
-                            &this.config_form.local_search_enabled,
-                        )
+                    labeled_input(tokens, "搜索半径", &this.config_form.local_search_radius_px)
                         .into_any_element(),
-                        labeled_input(tokens, "搜索半径", &this.config_form.local_search_radius_px)
-                            .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "锁定失败阈值",
-                            &this.config_form.local_search_lock_fail_threshold,
-                        )
-                        .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "最大跳变",
-                            &this.config_form.local_search_max_accepted_jump_px,
-                        )
-                        .into_any_element(),
-                    ])
+                    labeled_input(
+                        tokens,
+                        "锁定失败阈值",
+                        &this.config_form.local_search_lock_fail_threshold,
+                    )
                     .into_any_element(),
-            ],
-            tokens,
-        ))
-        .child(editable_config_section(
-            "SIFT 追踪",
-            vec![
-                div()
-                    .flex()
-                    .gap_2()
-                    .children([
-                        labeled_input(tokens, "刷新间隔", &this.config_form.sift_refresh_rate_ms)
-                            .into_any_element(),
-                        labeled_input(tokens, "CLAHE", &this.config_form.sift_clahe_limit)
-                            .into_any_element(),
-                        labeled_input(tokens, "匹配比", &this.config_form.sift_match_ratio)
-                            .into_any_element(),
-                        labeled_input(tokens, "最小匹配数", &this.config_form.sift_min_match_count)
-                            .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "RANSAC 阈值",
-                            &this.config_form.sift_ransac_threshold,
-                        )
-                        .into_any_element(),
-                    ])
+                    labeled_input(
+                        tokens,
+                        "最大跳变",
+                        &this.config_form.local_search_max_accepted_jump_px,
+                    )
                     .into_any_element(),
-            ],
-            tokens,
-        ))
-        .child(editable_config_section(
-            "卷积特征匹配",
-            vec![
-                div()
-                    .flex()
-                    .gap_2()
-                    .children([
-                        labeled_input(tokens, "刷新间隔", &this.config_form.ai_refresh_rate_ms)
-                            .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "置信度阈值",
-                            &this.config_form.ai_confidence_threshold,
-                        )
+                ])],
+                tokens,
+            )
+            .into_any_element(),
+        ],
+        tokens,
+    )
+}
+
+fn settings_sift_page(
+    this: &TrackerWorkbench,
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    settings_page_shell(
+        "SIFT 特征匹配",
+        "这一页保留传统特征匹配引擎的 CPU 参数：刷新节奏、对比度增强、匹配比和几何校验阈值。",
+        Some(settings_editor_toolbar(cx, tokens).into_any_element()),
+        vec![
+            editable_config_section(
+                "匹配参数",
+                vec![config_row(vec![
+                    labeled_input(tokens, "刷新间隔", &this.config_form.sift_refresh_rate_ms)
                         .into_any_element(),
-                        labeled_input(tokens, "最小匹配数", &this.config_form.ai_min_match_count)
-                            .into_any_element(),
-                        labeled_input(tokens, "RANSAC 阈值", &this.config_form.ai_ransac_threshold)
-                            .into_any_element(),
-                    ])
+                    labeled_input(tokens, "CLAHE", &this.config_form.sift_clahe_limit)
+                        .into_any_element(),
+                    labeled_input(tokens, "匹配比", &this.config_form.sift_match_ratio)
+                        .into_any_element(),
+                    labeled_input(tokens, "最小匹配数", &this.config_form.sift_min_match_count)
+                        .into_any_element(),
+                    labeled_input(
+                        tokens,
+                        "RANSAC 阈值",
+                        &this.config_form.sift_ransac_threshold,
+                    )
                     .into_any_element(),
-                div()
-                    .flex()
-                    .gap_2()
-                    .children([
-                        labeled_input(tokens, "扫描尺寸", &this.config_form.ai_scan_size)
-                            .into_any_element(),
-                        labeled_input(tokens, "扫描步长", &this.config_form.ai_scan_step)
-                            .into_any_element(),
-                        labeled_input(tokens, "跟踪半径", &this.config_form.ai_track_radius)
-                            .into_any_element(),
+                ])],
+                tokens,
+            )
+            .into_any_element(),
+        ],
+        tokens,
+    )
+}
+
+fn settings_convolution_page(
+    this: &TrackerWorkbench,
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    settings_page_shell(
+        "卷积特征匹配",
+        "卷积特征匹配使用 Candle 后端。执行设备只能切到已编译进当前二进制的后端；Windows 全功能版通常是 cpu/cuda，macOS 则可切到 metal。",
+        Some(settings_editor_toolbar(cx, tokens).into_any_element()),
+        vec![
+            editable_config_section(
+                "执行设备与模型",
+                vec![
+                    config_row(vec![
                         labeled_input(tokens, "执行设备", &this.config_form.ai_device)
                             .into_any_element(),
                         labeled_input(tokens, "设备序号", &this.config_form.ai_device_index)
                             .into_any_element(),
-                    ])
-                    .into_any_element(),
-                div()
-                    .flex()
-                    .gap_2()
-                    .children([labeled_input(
+                    ]),
+                    config_row(vec![
+                        labeled_input(tokens, "权重路径", &this.config_form.ai_weights_path)
+                            .into_any_element(),
+                    ]),
+                ],
+                tokens,
+            )
+            .into_any_element(),
+            editable_config_section(
+                "匹配参数",
+                vec![config_row(vec![
+                    labeled_input(tokens, "刷新间隔", &this.config_form.ai_refresh_rate_ms)
+                        .into_any_element(),
+                    labeled_input(
                         tokens,
-                        "权重路径",
-                        &this.config_form.ai_weights_path,
+                        "置信度阈值",
+                        &this.config_form.ai_confidence_threshold,
                     )
-                    .into_any_element()])
                     .into_any_element(),
-            ],
-            tokens,
-        ))
-        .child(editable_config_section(
-            "模板追踪",
-            vec![
-                div()
-                    .flex()
-                    .gap_2()
-                    .children([
-                        labeled_input(
-                            tokens,
-                            "刷新间隔",
-                            &this.config_form.template_refresh_rate_ms,
-                        )
+                    labeled_input(tokens, "最小匹配数", &this.config_form.ai_min_match_count)
                         .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "局部缩放",
-                            &this.config_form.template_local_downscale,
-                        )
+                    labeled_input(tokens, "RANSAC 阈值", &this.config_form.ai_ransac_threshold)
                         .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "全局缩放",
-                            &this.config_form.template_global_downscale,
-                        )
+                ])],
+                tokens,
+            )
+            .into_any_element(),
+            editable_config_section(
+                "搜索窗口",
+                vec![config_row(vec![
+                    labeled_input(tokens, "扫描尺寸", &this.config_form.ai_scan_size)
                         .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "全局细化半径",
-                            &this.config_form.template_global_refine_radius_px,
-                        )
+                    labeled_input(tokens, "扫描步长", &this.config_form.ai_scan_step)
                         .into_any_element(),
-                    ])
+                    labeled_input(tokens, "跟踪半径", &this.config_form.ai_track_radius)
+                        .into_any_element(),
+                ])],
+                tokens,
+            )
+            .into_any_element(),
+        ],
+        tokens,
+    )
+}
+
+fn settings_template_page(
+    this: &TrackerWorkbench,
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    settings_page_shell(
+        "多尺度模板匹配",
+        "多尺度模板匹配现在同样走 Candle 设备抽象。这里拆开设备、金字塔采样和阈值遮罩三类参数，避免把 GPU 选项和算法阈值混在一起调。",
+        Some(settings_editor_toolbar(cx, tokens).into_any_element()),
+        vec![
+            editable_config_section(
+                "执行设备",
+                vec![config_row(vec![
+                    labeled_input(tokens, "执行设备", &this.config_form.template_device)
+                        .into_any_element(),
+                    labeled_input(tokens, "设备序号", &this.config_form.template_device_index)
+                        .into_any_element(),
+                ])],
+                tokens,
+            )
+            .into_any_element(),
+            editable_config_section(
+                "金字塔与细化",
+                vec![config_row(vec![
+                    labeled_input(
+                        tokens,
+                        "刷新间隔",
+                        &this.config_form.template_refresh_rate_ms,
+                    )
                     .into_any_element(),
-                div()
-                    .flex()
-                    .gap_2()
-                    .children([
-                        labeled_input(
-                            tokens,
-                            "局部阈值",
-                            &this.config_form.template_local_match_threshold,
-                        )
-                        .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "全局阈值",
-                            &this.config_form.template_global_match_threshold,
-                        )
-                        .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "外圈半径",
-                            &this.config_form.template_mask_outer_radius,
-                        )
-                        .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "内圈半径",
-                            &this.config_form.template_mask_inner_radius,
-                        )
-                        .into_any_element(),
-                        labeled_input(tokens, "执行设备", &this.config_form.template_device)
-                            .into_any_element(),
-                        labeled_input(tokens, "设备序号", &this.config_form.template_device_index)
-                            .into_any_element(),
-                    ])
+                    labeled_input(
+                        tokens,
+                        "局部缩放",
+                        &this.config_form.template_local_downscale,
+                    )
                     .into_any_element(),
-            ],
-            tokens,
-        ))
-        .child(editable_config_section(
-            "网络",
-            vec![
-                div()
-                    .flex()
-                    .gap_2()
-                    .children([
-                        labeled_input(tokens, "HTTP 端口", &this.config_form.network_http_port)
-                            .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "WebSocket 端口",
-                            &this.config_form.network_websocket_port,
-                        )
-                        .into_any_element(),
-                    ])
+                    labeled_input(
+                        tokens,
+                        "全局缩放",
+                        &this.config_form.template_global_downscale,
+                    )
                     .into_any_element(),
-            ],
-            tokens,
-        ))
+                    labeled_input(
+                        tokens,
+                        "全局细化半径",
+                        &this.config_form.template_global_refine_radius_px,
+                    )
+                    .into_any_element(),
+                ])],
+                tokens,
+            )
+            .into_any_element(),
+            editable_config_section(
+                "匹配阈值与遮罩",
+                vec![config_row(vec![
+                    labeled_input(
+                        tokens,
+                        "局部阈值",
+                        &this.config_form.template_local_match_threshold,
+                    )
+                    .into_any_element(),
+                    labeled_input(
+                        tokens,
+                        "全局阈值",
+                        &this.config_form.template_global_match_threshold,
+                    )
+                    .into_any_element(),
+                    labeled_input(
+                        tokens,
+                        "外圈半径",
+                        &this.config_form.template_mask_outer_radius,
+                    )
+                    .into_any_element(),
+                    labeled_input(
+                        tokens,
+                        "内圈半径",
+                        &this.config_form.template_mask_inner_radius,
+                    )
+                    .into_any_element(),
+                ])],
+                tokens,
+            )
+            .into_any_element(),
+        ],
+        tokens,
+    )
 }
 
 fn settings_debug_page(this: &TrackerWorkbench, tokens: WorkbenchThemeTokens) -> impl IntoElement {
@@ -2268,50 +2396,44 @@ fn settings_debug_page(this: &TrackerWorkbench, tokens: WorkbenchThemeTokens) ->
         .map(|snapshot| snapshot.fields.clone())
         .unwrap_or_default();
 
-    div()
-        .flex_1()
-        .min_h(px(0.0))
-        .flex()
-        .flex_col()
-        .gap_4()
-        .overflow_y_scrollbar()
-        .rounded_xl()
-        .bg(tokens.panel_bg)
-        .border_1()
-        .border_color(tokens.border)
-        .p_4()
-        .child(section_title("追踪调试"))
-        .child(body_text(
-            tokens,
-            snapshot.as_ref().map_or_else(
-                || {
-                    "启动 tracker 后，这里会显示 minimap、heatmap、refine 预览和状态字段。"
-                        .to_owned()
-                },
-                |snapshot| {
-                    format!(
-                        "引擎 {}，阶段 {}，帧序号 {}。",
-                        snapshot.engine, snapshot.stage_label, snapshot.frame_index
-                    )
-                },
-            ),
-        ))
-        .child(
-            div().flex().gap_3().flex_wrap().children(
-                images
-                    .into_iter()
-                    .map(|image| debug_image_card(image, tokens))
-                    .collect::<Vec<_>>(),
-            ),
-        )
-        .child(
-            div().flex().gap_3().flex_wrap().children(
-                fields
-                    .into_iter()
-                    .map(|field| debug_field_card(field, tokens).into_any_element())
-                    .collect::<Vec<_>>(),
-            ),
-        )
+    settings_page_shell(
+        "追踪调试",
+        snapshot.as_ref().map_or_else(
+            || "启动 tracker 后，这里会显示 minimap、heatmap、refine 预览和状态字段。".to_owned(),
+            |snapshot| {
+                format!(
+                    "引擎 {}，阶段 {}，帧序号 {}。",
+                    snapshot.engine, snapshot.stage_label, snapshot.frame_index
+                )
+            },
+        ),
+        None,
+        vec![
+            div()
+                .flex()
+                .gap_3()
+                .flex_wrap()
+                .children(
+                    images
+                        .into_iter()
+                        .map(|image| debug_image_card(image, tokens))
+                        .collect::<Vec<_>>(),
+                )
+                .into_any_element(),
+            div()
+                .flex()
+                .gap_3()
+                .flex_wrap()
+                .children(
+                    fields
+                        .into_iter()
+                        .map(|field| debug_field_card(field, tokens).into_any_element())
+                        .collect::<Vec<_>>(),
+                )
+                .into_any_element(),
+        ],
+        tokens,
+    )
 }
 
 fn settings_resources_page(
@@ -2326,65 +2448,56 @@ fn settings_resources_page(
         .display()
         .to_string();
 
-    div()
-        .flex_1()
-        .min_h(px(0.0))
-        .flex()
-        .flex_col()
-        .gap_4()
-        .overflow_y_scrollbar()
-        .rounded_xl()
-        .bg(tokens.panel_bg)
-        .border_1()
-        .border_color(tokens.border)
-        .p_4()
-        .child(section_title("本地数据路径"))
-        .child(body_text(
-            tokens,
-            "路线文件、配置和 BWiki 运行时缓存都会真实落盘。BWiki 只缓存点位目录、图标和按需下载的瓦片，不再生成或保留整张拼接地图。",
-        ))
-        .child(resource_path(
-            "resource-data-dir",
-            cx,
-            tokens,
-            "数据目录",
-            &this.project_root.to_string(),
-        ))
-        .child(resource_path(
-            "resource-routes-dir",
-            cx,
-            tokens,
-            "路线目录",
-            &this.workspace.assets.routes_dir.display().to_string(),
-        ))
-        .child(resource_path(
-            "resource-bwiki-cache-dir",
-            cx,
-            tokens,
-            "BWiki 缓存目录",
-            &this.workspace.assets.bwiki_cache_dir.display().to_string(),
-        ))
-        .child(resource_path(
-            "resource-models-dir",
-            cx,
-            tokens,
-            "模型目录",
-            &models_dir,
-        ))
-        .child(resource_path(
-            "resource-config-file",
-            cx,
-            tokens,
-            "配置文件",
-            &this.workspace.assets.config_path.display().to_string(),
-        ))
-        .child(resource_path(
-            "resource-ui-preferences",
-            cx,
-            tokens,
-            "界面偏好",
-            &this.ui_preferences_path.display().to_string(),
-        ))
+    settings_page_shell(
+        "本地数据路径",
+        "路线文件、配置和 BWiki 运行时缓存都会真实落盘。BWiki 只缓存点位目录、图标和按需下载的瓦片，不再生成或保留整张拼接地图。",
+        None,
+        vec![
+            resource_path(
+                "resource-data-dir",
+                cx,
+                tokens,
+                "数据目录",
+                &this.project_root.to_string(),
+            )
+            .into_any_element(),
+            resource_path(
+                "resource-routes-dir",
+                cx,
+                tokens,
+                "路线目录",
+                &this.workspace.assets.routes_dir.display().to_string(),
+            )
+            .into_any_element(),
+            resource_path(
+                "resource-bwiki-cache-dir",
+                cx,
+                tokens,
+                "BWiki 缓存目录",
+                &this.workspace.assets.bwiki_cache_dir.display().to_string(),
+            )
+            .into_any_element(),
+            resource_path("resource-models-dir", cx, tokens, "模型目录", &models_dir)
+                .into_any_element(),
+            resource_path(
+                "resource-config-file",
+                cx,
+                tokens,
+                "配置文件",
+                &this.workspace.assets.config_path.display().to_string(),
+            )
+            .into_any_element(),
+            resource_path(
+                "resource-ui-preferences",
+                cx,
+                tokens,
+                "界面偏好",
+                &this.ui_preferences_path.display().to_string(),
+            )
+            .into_any_element(),
+        ],
+        tokens,
+    )
 }
 
 fn config_section(
@@ -2432,6 +2545,15 @@ fn editable_config_section(
                 .child(section_title(title))
                 .children(rows),
         )
+}
+
+fn config_row(children: Vec<AnyElement>) -> AnyElement {
+    div()
+        .flex()
+        .gap_2()
+        .flex_wrap()
+        .children(children)
+        .into_any_element()
 }
 
 type MapOverlayPainter = fn(
@@ -4962,6 +5084,7 @@ fn labeled_input(
     input: &gpui::Entity<gpui_component::input::InputState>,
 ) -> impl IntoElement {
     div()
+        .min_w(px(180.0))
         .flex_1()
         .flex()
         .flex_col()

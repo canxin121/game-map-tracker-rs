@@ -24,8 +24,16 @@ pub(super) enum MapPage {
 #[derive(Debug, Clone, Copy, Default, Display, EnumIter, PartialEq, Eq, Hash)]
 pub(super) enum SettingsPage {
     #[default]
-    #[display("配置")]
-    Config,
+    #[display("界面与运行")]
+    Runtime,
+    #[display("截图与局部搜索")]
+    Capture,
+    #[display("SIFT 特征匹配")]
+    Sift,
+    #[display("卷积特征匹配")]
+    Convolution,
+    #[display("多尺度模板匹配")]
+    Template,
     #[display("调试")]
     Debug,
     #[display("资源")]
