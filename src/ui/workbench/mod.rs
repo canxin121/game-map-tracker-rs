@@ -275,7 +275,6 @@ const BWIKI_PLANNER_FULL_2OPT_LIMIT: usize = 256;
 const BWIKI_PLANNER_FULL_2OPT_PASS_LIMIT: usize = 2;
 const BWIKI_PLANNER_SPATIAL_NEIGHBOR_WINDOW: usize = 6;
 const BWIKI_PLANNER_HIERARCHICAL_2OPT_PASS_LIMIT: usize = 2;
-const BWIKI_PREVIEW_TELEPORT_CANDIDATE_LIMIT: usize = 6;
 const BWIKI_TELEPORT_MARK_TYPE: u32 = 202;
 
 fn normalized_list_query(
@@ -328,6 +327,7 @@ pub struct TrackerWorkbench {
     pub(super) marker_icon: MarkerIconStyle,
     pub(super) theme_preference: ThemePreference,
     pub(super) auto_focus_enabled: bool,
+    pub(super) tracker_point_popup_enabled: bool,
     tracker_pending_action: Option<TrackerPendingAction>,
     tracker_status_text: SharedString,
     route_import_status: AsyncTaskStatus,
@@ -412,11 +412,17 @@ impl TrackerWorkbench {
         let bwiki_tile_cache =
             TileImageCache::new(BWIKI_TILE_CACHE_MAX_ITEMS, BWIKI_TILE_CACHE_MAX_BYTES, cx);
         let ui_preferences_path = UiPreferencesRepository::path_for(&project_root);
-        let (theme_preference, auto_focus_enabled, preferences_error) =
+        let (theme_preference, auto_focus_enabled, tracker_point_popup_enabled, preferences_error) =
             match UiPreferencesRepository::load(&project_root) {
-                Ok(preferences) => (preferences.theme_mode, preferences.auto_focus_enabled, None),
+                Ok(preferences) => (
+                    preferences.theme_mode,
+                    preferences.auto_focus_enabled,
+                    preferences.tracker_point_popup_enabled,
+                    None,
+                ),
                 Err(error) => (
                     ThemePreference::default(),
+                    true,
                     true,
                     Some(format!("载入界面偏好失败：{error:#}")),
                 ),
@@ -472,6 +478,7 @@ impl TrackerWorkbench {
                     marker_icon: MarkerIconStyle::default(),
                     theme_preference,
                     auto_focus_enabled,
+                    tracker_point_popup_enabled,
                     tracker_pending_action: None,
                     tracker_status_text: "追踪未启动。".into(),
                     route_import_status: AsyncTaskStatus::idle("尚未导入路线文件。"),
@@ -568,6 +575,7 @@ impl TrackerWorkbench {
                     marker_icon: MarkerIconStyle::default(),
                     theme_preference,
                     auto_focus_enabled,
+                    tracker_point_popup_enabled,
                     tracker_pending_action: None,
                     tracker_status_text: "追踪未启动。".into(),
                     route_import_status: AsyncTaskStatus::idle("尚未导入路线文件。"),
@@ -1162,6 +1170,10 @@ impl TrackerWorkbench {
         self.auto_focus_enabled
     }
 
+    pub(super) const fn is_tracker_point_popup_enabled(&self) -> bool {
+        self.tracker_point_popup_enabled
+    }
+
     pub(super) fn active_group_name(&self) -> SharedString {
         self.active_group().map_or_else(
             || "未选择路线".into(),
@@ -1337,6 +1349,12 @@ impl TrackerWorkbench {
 
     pub(super) fn selected_tracker_point_popup(&self) -> Option<SelectedPointPopup> {
         if self.is_selected_point_move_armed() {
+            return None;
+        }
+        if self.active_page == WorkbenchPage::Map
+            && self.map_page == MapPage::Tracker
+            && !self.tracker_point_popup_enabled
+        {
             return None;
         }
         let group = self.active_group()?;
@@ -2916,6 +2934,15 @@ impl TrackerWorkbench {
             self.tracker_map_view.pending_center = None;
             self.persist_ui_preferences("自动聚焦已关闭");
         }
+    }
+
+    pub(super) fn set_tracker_point_popup_enabled(&mut self, enabled: bool) {
+        self.tracker_point_popup_enabled = enabled;
+        self.persist_ui_preferences(if enabled {
+            "节点浮窗已开启"
+        } else {
+            "节点浮窗已关闭"
+        });
     }
 
     pub(super) fn select_group(
@@ -4858,6 +4885,7 @@ impl TrackerWorkbench {
         let preferences = UiPreferences {
             theme_mode: self.theme_preference,
             auto_focus_enabled: self.auto_focus_enabled,
+            tracker_point_popup_enabled: self.tracker_point_popup_enabled,
         };
 
         match UiPreferencesRepository::save(&self.workspace.project_root, &preferences) {
@@ -4909,115 +4937,63 @@ fn planner_world_distance(from: WorldPoint, to: WorldPoint) -> f32 {
     dx.hypot(dy)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct NearestTeleport {
-    index: usize,
-    distance: f32,
-}
-
-type NearestTeleportPair = [Option<NearestTeleport>; 2];
-
-#[derive(Debug, Clone, Copy)]
-struct BwikiSegmentPlan {
-    total_cost: f32,
-    source_teleport_index: Option<usize>,
-    target_teleport_index: Option<usize>,
-}
-
-fn nearest_two_teleports(
+fn nearest_teleport_distance(
     point: WorldPoint,
     teleports: &[BwikiPlannerResolvedPoint],
-) -> NearestTeleportPair {
-    let mut nearest: NearestTeleportPair = [None, None];
-
-    for (index, teleport) in teleports.iter().enumerate() {
-        let distance = planner_world_distance(point, teleport.record.world);
-        let candidate = NearestTeleport { index, distance };
-        if nearest[0].is_none_or(|current| distance < current.distance) {
-            nearest[1] = nearest[0];
-            nearest[0] = Some(candidate);
-        } else if nearest[0].is_some_and(|current| current.index != index)
-            && nearest[1].is_none_or(|current| distance < current.distance)
-        {
-            nearest[1] = Some(candidate);
-        }
-    }
-
-    nearest
+) -> Option<f32> {
+    teleports
+        .iter()
+        .map(|teleport| planner_world_distance(point, teleport.record.world))
+        .min_by(|left, right| left.total_cmp(right))
 }
 
-fn build_bwiki_segment_plan_from_candidates(
-    from: WorldPoint,
-    to: WorldPoint,
-    from_candidates: NearestTeleportPair,
-    to_candidates: NearestTeleportPair,
-    teleport_link_distance: f32,
-) -> BwikiSegmentPlan {
-    let direct_cost = planner_world_distance(from, to);
-    let mut best_teleport_cost = f32::INFINITY;
-    let mut best_pair = None;
-
-    for from_candidate in from_candidates.into_iter().flatten() {
-        for to_candidate in to_candidates.into_iter().flatten() {
-            if from_candidate.index == to_candidate.index {
-                continue;
-            }
-            let candidate_cost =
-                from_candidate.distance + teleport_link_distance + to_candidate.distance;
-            if candidate_cost < best_teleport_cost {
-                best_teleport_cost = candidate_cost;
-                best_pair = Some((from_candidate.index, to_candidate.index));
-            }
-        }
-    }
-
-    if let Some((source_teleport_index, target_teleport_index)) = best_pair
-        && best_teleport_cost + 0.001 < direct_cost
-    {
-        return BwikiSegmentPlan {
-            total_cost: best_teleport_cost,
-            source_teleport_index: Some(source_teleport_index),
-            target_teleport_index: Some(target_teleport_index),
-        };
-    }
-
-    BwikiSegmentPlan {
-        total_cost: direct_cost,
-        source_teleport_index: None,
-        target_teleport_index: None,
-    }
-}
-
-fn build_bwiki_point_teleport_candidates(
+fn build_bwiki_point_teleport_arrival_costs(
     points: &[WorldPoint],
     teleports: &[BwikiPlannerResolvedPoint],
-) -> Vec<NearestTeleportPair> {
+) -> Vec<f32> {
     points
         .iter()
-        .map(|point| nearest_two_teleports(*point, teleports))
+        .map(|point| nearest_teleport_distance(*point, teleports).unwrap_or(f32::INFINITY))
         .collect()
+}
+
+fn build_bwiki_segment_total_cost(
+    from: WorldPoint,
+    to: WorldPoint,
+    target_teleport_distance: f32,
+    teleport_link_distance: f32,
+) -> f32 {
+    let direct_cost = planner_world_distance(from, to);
+    let teleport_cost = teleport_link_distance + target_teleport_distance;
+
+    if teleport_cost + 0.001 < direct_cost {
+        teleport_cost
+    } else {
+        direct_cost
+    }
 }
 
 fn build_bwiki_planner_cost_matrix(
     points: &[WorldPoint],
-    teleport_candidates: &[NearestTeleportPair],
+    teleport_arrival_costs: &[f32],
     teleport_link_distance: f32,
 ) -> Vec<Vec<f32>> {
     let point_count = points.len();
     let mut costs = vec![vec![0.0; point_count]; point_count];
 
     for from_index in 0..point_count {
-        for to_index in from_index + 1..point_count {
-            let cost = build_bwiki_segment_plan_from_candidates(
+        for to_index in 0..point_count {
+            if from_index == to_index {
+                continue;
+            }
+
+            let cost = build_bwiki_segment_total_cost(
                 points[from_index],
                 points[to_index],
-                teleport_candidates[from_index],
-                teleport_candidates[to_index],
+                teleport_arrival_costs[to_index],
                 teleport_link_distance,
-            )
-            .total_cost;
+            );
             costs[from_index][to_index] = cost;
-            costs[to_index][from_index] = cost;
         }
     }
 
@@ -5027,7 +5003,7 @@ fn build_bwiki_planner_cost_matrix(
 fn build_bwiki_planner_order_for_points(
     points: &[WorldPoint],
     teleports: &[BwikiPlannerResolvedPoint],
-    teleport_candidates: &[NearestTeleportPair],
+    teleport_arrival_costs: &[f32],
     teleport_link_distance: f32,
 ) -> Vec<usize> {
     let point_count = points.len();
@@ -5036,14 +5012,14 @@ fn build_bwiki_planner_order_for_points(
     }
     if point_count <= BWIKI_PLANNER_HIERARCHICAL_LIMIT {
         let costs =
-            build_bwiki_planner_cost_matrix(points, teleport_candidates, teleport_link_distance);
+            build_bwiki_planner_cost_matrix(points, teleport_arrival_costs, teleport_link_distance);
         return build_bwiki_planner_order_from_costs(&costs);
     }
 
     build_bwiki_planner_order_hierarchical(
         points,
         teleports,
-        teleport_candidates,
+        teleport_arrival_costs,
         teleport_link_distance,
     )
 }
@@ -5051,13 +5027,13 @@ fn build_bwiki_planner_order_for_points(
 fn build_bwiki_planner_order_hierarchical(
     points: &[WorldPoint],
     teleports: &[BwikiPlannerResolvedPoint],
-    teleport_candidates: &[NearestTeleportPair],
+    teleport_arrival_costs: &[f32],
     teleport_link_distance: f32,
 ) -> Vec<usize> {
     let clusters = build_bwiki_spatial_clusters(points, BWIKI_PLANNER_CLUSTER_TARGET_SIZE);
     if clusters.len() <= 1 {
         let costs =
-            build_bwiki_planner_cost_matrix(points, teleport_candidates, teleport_link_distance);
+            build_bwiki_planner_cost_matrix(points, teleport_arrival_costs, teleport_link_distance);
         return build_bwiki_planner_order_from_costs(&costs);
     }
 
@@ -5068,14 +5044,14 @@ fn build_bwiki_planner_order_hierarchical(
                 .iter()
                 .map(|index| points[*index])
                 .collect::<Vec<_>>();
-            let cluster_candidates = cluster
+            let cluster_arrival_costs = cluster
                 .iter()
-                .map(|index| teleport_candidates[*index])
+                .map(|index| teleport_arrival_costs[*index])
                 .collect::<Vec<_>>();
             let local_order = build_bwiki_planner_order_for_points(
                 &cluster_points,
                 teleports,
-                &cluster_candidates,
+                &cluster_arrival_costs,
                 teleport_link_distance,
             );
             local_order
@@ -5089,19 +5065,19 @@ fn build_bwiki_planner_order_hierarchical(
         .iter()
         .map(|cluster| cluster_centroid(cluster, points))
         .collect::<Vec<_>>();
-    let cluster_centroid_candidates =
-        build_bwiki_point_teleport_candidates(&cluster_centroids, teleports);
+    let cluster_centroid_arrival_costs =
+        build_bwiki_point_teleport_arrival_costs(&cluster_centroids, teleports);
     let cluster_order = build_bwiki_planner_order_for_points(
         &cluster_centroids,
         teleports,
-        &cluster_centroid_candidates,
+        &cluster_centroid_arrival_costs,
         teleport_link_distance,
     );
     let orientations = choose_bwiki_cluster_orientations(
         &cluster_order,
         &local_routes,
         points,
-        teleport_candidates,
+        teleport_arrival_costs,
         teleport_link_distance,
     );
     let mut order = flatten_bwiki_cluster_routes(&cluster_order, &orientations, &local_routes);
@@ -5113,7 +5089,7 @@ fn build_bwiki_planner_order_hierarchical(
     improve_bwiki_planner_order_point_2opt(
         &mut order,
         points,
-        teleport_candidates,
+        teleport_arrival_costs,
         &spatial_neighbors,
         teleport_link_distance,
         BWIKI_PLANNER_HIERARCHICAL_2OPT_PASS_LIMIT,
@@ -5368,7 +5344,7 @@ fn choose_bwiki_cluster_orientations(
     cluster_order: &[usize],
     local_routes: &[Vec<usize>],
     points: &[WorldPoint],
-    teleport_candidates: &[NearestTeleportPair],
+    teleport_arrival_costs: &[f32],
     teleport_link_distance: f32,
 ) -> Vec<bool> {
     if cluster_order.is_empty() {
@@ -5402,7 +5378,7 @@ fn choose_bwiki_cluster_orientations(
                 };
                 let transition_cost = bwiki_route_transition_cost(
                     points,
-                    teleport_candidates,
+                    teleport_arrival_costs,
                     previous_end,
                     current_start,
                     teleport_link_distance,
@@ -5472,19 +5448,17 @@ fn flatten_bwiki_cluster_routes(
 
 fn bwiki_route_transition_cost(
     points: &[WorldPoint],
-    teleport_candidates: &[NearestTeleportPair],
+    teleport_arrival_costs: &[f32],
     from_index: usize,
     to_index: usize,
     teleport_link_distance: f32,
 ) -> f32 {
-    build_bwiki_segment_plan_from_candidates(
+    build_bwiki_segment_total_cost(
         points[from_index],
         points[to_index],
-        teleport_candidates[from_index],
-        teleport_candidates[to_index],
+        teleport_arrival_costs[to_index],
         teleport_link_distance,
     )
-    .total_cost
 }
 
 fn build_bwiki_planner_start_candidates(costs: &[Vec<f32>]) -> (Vec<usize>, Vec<(usize, usize)>) {
@@ -5516,7 +5490,10 @@ fn build_bwiki_planner_start_candidates(costs: &[Vec<f32>]) -> (Vec<usize>, Vec<
     let mut farthest_pair = None;
     let mut farthest_cost = f32::NEG_INFINITY;
     for left in 0..point_count {
-        for right in left + 1..point_count {
+        for right in 0..point_count {
+            if left == right {
+                continue;
+            }
             let cost = costs[left][right];
             if cost > farthest_cost {
                 farthest_cost = cost;
@@ -5621,10 +5598,16 @@ fn build_bwiki_planner_order_nearest(costs: &[Vec<f32>], start: usize) -> Vec<us
     order
 }
 
-fn nearest_unvisited_point(costs: &[Vec<f32>], from: usize, visited: &[bool]) -> Option<usize> {
+fn nearest_unvisited_successor(costs: &[Vec<f32>], from: usize, visited: &[bool]) -> Option<usize> {
     (0..costs.len())
         .filter(|index| !visited[*index])
         .min_by(|left, right| costs[from][*left].total_cmp(&costs[from][*right]))
+}
+
+fn nearest_unvisited_predecessor(costs: &[Vec<f32>], to: usize, visited: &[bool]) -> Option<usize> {
+    (0..costs.len())
+        .filter(|index| !visited[*index])
+        .min_by(|left, right| costs[*left][to].total_cmp(&costs[*right][to]))
 }
 
 fn build_bwiki_planner_order_bidirectional(costs: &[Vec<f32>], start: usize) -> Vec<usize> {
@@ -5638,12 +5621,12 @@ fn build_bwiki_planner_order_bidirectional(costs: &[Vec<f32>], start: usize) -> 
     while order.len() < point_count {
         let left = *order.first().expect("order should not be empty");
         let right = *order.last().expect("order should not be empty");
-        let left_candidate = nearest_unvisited_point(costs, left, &visited);
-        let right_candidate = nearest_unvisited_point(costs, right, &visited);
+        let left_candidate = nearest_unvisited_predecessor(costs, left, &visited);
+        let right_candidate = nearest_unvisited_successor(costs, right, &visited);
 
         match (left_candidate, right_candidate) {
             (Some(left_index), Some(right_index)) => {
-                if costs[left][left_index] <= costs[right][right_index] {
+                if costs[left_index][left] <= costs[right][right_index] {
                     visited[left_index] = true;
                     order.insert(0, left_index);
                 } else {
@@ -5721,6 +5704,38 @@ fn build_bwiki_planner_order_from_pair(
     order
 }
 
+fn route_reversal_transition_costs<F>(
+    order: &[usize],
+    start: usize,
+    end: usize,
+    transition_cost: &F,
+) -> (f32, f32)
+where
+    F: Fn(usize, usize) -> f32,
+{
+    let mut before = 0.0;
+    let mut after = 0.0;
+
+    if start > 0 {
+        before += transition_cost(order[start - 1], order[start]);
+        after += transition_cost(order[start - 1], order[end]);
+    }
+
+    for index in start..end {
+        before += transition_cost(order[index], order[index + 1]);
+    }
+    for index in (start + 1..=end).rev() {
+        after += transition_cost(order[index], order[index - 1]);
+    }
+
+    if let Some(&next) = order.get(end + 1) {
+        before += transition_cost(order[end], next);
+        after += transition_cost(order[start], next);
+    }
+
+    (before, after)
+}
+
 fn improve_bwiki_planner_order_2opt(
     order: &mut [usize],
     costs: &[Vec<f32>],
@@ -5762,11 +5777,9 @@ fn improve_bwiki_planner_order_2opt(
 
             candidate_ends.sort_unstable();
             for end in candidate_ends {
-                let last = order[end];
-                let next = order.get(end + 1).copied();
-
-                let before = costs[left][first] + next.map_or(0.0, |next| costs[last][next]);
-                let after = costs[left][last] + next.map_or(0.0, |next| costs[first][next]);
+                let transition_cost = |from: usize, to: usize| costs[from][to];
+                let (before, after) =
+                    route_reversal_transition_costs(order, start, end, &transition_cost);
                 if after + 0.001 >= before {
                     continue;
                 }
@@ -5798,13 +5811,9 @@ fn improve_bwiki_planner_order_full_2opt(
         let mut improved = false;
         for start in 1..order.len() - 1 {
             for end in start + 1..order.len() {
-                let left = order[start - 1];
-                let first = order[start];
-                let last = order[end];
-                let next = order.get(end + 1).copied();
-
-                let before = costs[left][first] + next.map_or(0.0, |next| costs[last][next]);
-                let after = costs[left][last] + next.map_or(0.0, |next| costs[first][next]);
+                let transition_cost = |from: usize, to: usize| costs[from][to];
+                let (before, after) =
+                    route_reversal_transition_costs(order, start, end, &transition_cost);
                 if after + 0.001 < before {
                     order[start..=end].reverse();
                     improved = true;
@@ -5821,7 +5830,7 @@ fn improve_bwiki_planner_order_full_2opt(
 fn improve_bwiki_planner_order_point_2opt(
     order: &mut [usize],
     points: &[WorldPoint],
-    teleport_candidates: &[NearestTeleportPair],
+    teleport_arrival_costs: &[f32],
     candidate_neighbors: &[Vec<usize>],
     teleport_link_distance: f32,
     pass_limit: usize,
@@ -5861,39 +5870,17 @@ fn improve_bwiki_planner_order_point_2opt(
 
             candidate_ends.sort_unstable();
             for end in candidate_ends {
-                let last = order[end];
-                let next = order.get(end + 1).copied();
-
-                let before = bwiki_route_transition_cost(
-                    points,
-                    teleport_candidates,
-                    left,
-                    first,
-                    teleport_link_distance,
-                ) + next.map_or(0.0, |next| {
+                let transition_cost = |from: usize, to: usize| {
                     bwiki_route_transition_cost(
                         points,
-                        teleport_candidates,
-                        last,
-                        next,
+                        teleport_arrival_costs,
+                        from,
+                        to,
                         teleport_link_distance,
                     )
-                });
-                let after = bwiki_route_transition_cost(
-                    points,
-                    teleport_candidates,
-                    left,
-                    last,
-                    teleport_link_distance,
-                ) + next.map_or(0.0, |next| {
-                    bwiki_route_transition_cost(
-                        points,
-                        teleport_candidates,
-                        first,
-                        next,
-                        teleport_link_distance,
-                    )
-                });
+                };
+                let (before, after) =
+                    route_reversal_transition_costs(order, start, end, &transition_cost);
                 if after + 0.001 >= before {
                     continue;
                 }
@@ -5998,19 +5985,7 @@ fn build_bwiki_route_plan_task_result(
         (None, None)
     } else {
         let teleports = resolve_bwiki_teleports_from_dataset(dataset);
-        let worlds = resolved
-            .iter()
-            .map(|point| point.record.world)
-            .collect::<Vec<_>>();
-        let teleport_candidates = build_bwiki_point_teleport_candidates(&worlds, &teleports);
-        let order = build_bwiki_planner_order_for_points(
-            &worlds,
-            &teleports,
-            &teleport_candidates,
-            teleport_link_distance,
-        );
-        let preview =
-            build_bwiki_route_plan_preview(&resolved, &order, &teleports, teleport_link_distance);
+        let preview = build_bwiki_route_plan_preview(&resolved, &teleports, teleport_link_distance);
         let failure_message = preview.is_none().then(|| {
             "当前无法生成从传送点开始且不重复经过节点的单行路线，请调整选点后重试。".to_owned()
         });
@@ -6036,212 +6011,483 @@ fn bwiki_route_keys_form_simple_path(route_keys: &[BwikiPointKey]) -> bool {
     route_keys.iter().all(|key| seen.insert(key.clone()))
 }
 
-fn bwiki_route_start_plan_for_order(
-    order: &[usize],
+#[derive(Debug, Clone)]
+struct BwikiTeleportClusterPlan {
+    teleport_index: usize,
+    walk_order: Vec<usize>,
+    teleport_order: Vec<usize>,
+    centroid: WorldPoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BwikiClusterEntryMode {
+    Teleport,
+    Walk,
+}
+
+#[derive(Debug, Clone)]
+struct BwikiClusterRouteVariant {
+    route_keys: Vec<BwikiPointKey>,
+    entry_world: WorldPoint,
+    exit_world: WorldPoint,
+    internal_cost: f32,
+    entry_mode: BwikiClusterEntryMode,
+}
+
+fn bwiki_cluster_centroid(
+    point_indices: &[usize],
+    resolved_points: &[BwikiPlannerResolvedPoint],
+    fallback: WorldPoint,
+) -> WorldPoint {
+    if point_indices.is_empty() {
+        return fallback;
+    }
+
+    let (sum_x, sum_y, count) =
+        point_indices
+            .iter()
+            .fold((0.0, 0.0, 0usize), |(sum_x, sum_y, count), index| {
+                let point = &resolved_points[*index];
+                (
+                    sum_x + point.record.world.x,
+                    sum_y + point.record.world.y,
+                    count + 1,
+                )
+            });
+    if count == 0 {
+        return fallback;
+    }
+
+    WorldPoint::new(sum_x / count as f32, sum_y / count as f32)
+}
+
+fn build_bwiki_walk_order_for_point_indices(
+    point_indices: &[usize],
+    resolved_points: &[BwikiPlannerResolvedPoint],
+    teleport_link_distance: f32,
+) -> Vec<usize> {
+    if point_indices.len() <= 1 {
+        return point_indices.to_vec();
+    }
+
+    let worlds = point_indices
+        .iter()
+        .map(|index| resolved_points[*index].record.world)
+        .collect::<Vec<_>>();
+    let direct_arrival_costs = vec![f32::INFINITY; worlds.len()];
+    let local_order = build_bwiki_planner_order_for_points(
+        &worlds,
+        &[],
+        &direct_arrival_costs,
+        teleport_link_distance,
+    );
+
+    local_order
+        .into_iter()
+        .filter_map(|local_index| point_indices.get(local_index).copied())
+        .collect()
+}
+
+fn orient_bwiki_order_toward_reference(
+    mut order: Vec<usize>,
+    resolved_points: &[BwikiPlannerResolvedPoint],
+    reference_world: WorldPoint,
+) -> Vec<usize> {
+    if order.len() <= 1 {
+        return order;
+    }
+
+    let forward_entry = order
+        .first()
+        .map(|index| planner_world_distance(reference_world, resolved_points[*index].record.world))
+        .unwrap_or(0.0);
+    let reverse_entry = order
+        .last()
+        .map(|index| planner_world_distance(reference_world, resolved_points[*index].record.world))
+        .unwrap_or(0.0);
+    if reverse_entry + 0.001 < forward_entry {
+        order.reverse();
+    }
+
+    order
+}
+
+fn build_bwiki_cluster_teleport_order(
+    point_indices: &[usize],
+    resolved_points: &[BwikiPlannerResolvedPoint],
+    teleport: &BwikiPlannerResolvedPoint,
+    teleport_link_distance: f32,
+) -> Vec<usize> {
+    let walk_points = point_indices
+        .iter()
+        .copied()
+        .filter(|index| resolved_points[*index].key != teleport.key)
+        .collect::<Vec<_>>();
+
+    orient_bwiki_order_toward_reference(
+        build_bwiki_walk_order_for_point_indices(
+            &walk_points,
+            resolved_points,
+            teleport_link_distance,
+        ),
+        resolved_points,
+        teleport.record.world,
+    )
+}
+
+fn ordered_bwiki_walk_cost(
+    point_indices: &[usize],
+    resolved_points: &[BwikiPlannerResolvedPoint],
+) -> f32 {
+    point_indices
+        .windows(2)
+        .map(|segment| {
+            let from = resolved_points[segment[0]].record.world;
+            let to = resolved_points[segment[1]].record.world;
+            planner_world_distance(from, to)
+        })
+        .sum()
+}
+
+fn nearest_bwiki_cluster_point_distance(
+    point: WorldPoint,
+    cluster_point_indices: &[usize],
+    resolved_points: &[BwikiPlannerResolvedPoint],
+) -> Option<f32> {
+    cluster_point_indices
+        .iter()
+        .filter_map(|index| resolved_points.get(*index))
+        .map(|resolved_point| planner_world_distance(point, resolved_point.record.world))
+        .min_by(|left, right| left.total_cmp(right))
+}
+
+fn build_bwiki_teleport_cluster_plans(
     resolved_points: &[BwikiPlannerResolvedPoint],
     teleports: &[BwikiPlannerResolvedPoint],
-    selected_keys: &HashSet<BwikiPointKey>,
-) -> Option<(Option<usize>, f32)> {
-    let &first_index = order.first()?;
-    let first_point = resolved_points.get(first_index)?;
-    if first_point.key.mark_type == BWIKI_TELEPORT_MARK_TYPE {
-        return Some((None, 0.0));
+    teleport_link_distance: f32,
+) -> Option<Vec<BwikiTeleportClusterPlan>> {
+    if resolved_points.is_empty() {
+        return Some(Vec::new());
+    }
+    if teleports.is_empty() {
+        return None;
     }
 
-    teleports
+    let teleport_index_by_key = teleports
         .iter()
         .enumerate()
-        .filter(|(_, teleport)| !selected_keys.contains(&teleport.key))
-        .map(|(index, teleport)| {
-            (
-                Some(index),
-                planner_world_distance(teleport.record.world, first_point.record.world),
-            )
-        })
-        .min_by(|left, right| left.1.total_cmp(&right.1))
-}
-
-fn collect_bwiki_preview_teleport_candidates(
-    point: WorldPoint,
-    teleports: &[BwikiPlannerResolvedPoint],
-    used_keys: &HashSet<BwikiPointKey>,
-    selected_keys: &HashSet<BwikiPointKey>,
-    allowed_endpoint_key: Option<&BwikiPointKey>,
-) -> Vec<NearestTeleport> {
-    let mut candidates = teleports
+        .map(|(index, teleport)| (teleport.key.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut cluster_points = vec![Vec::new(); teleports.len()];
+    let non_teleport_points = resolved_points
         .iter()
         .enumerate()
-        .filter_map(|(index, teleport)| {
-            if Some(&teleport.key) != allowed_endpoint_key
-                && (used_keys.contains(&teleport.key) || selected_keys.contains(&teleport.key))
-            {
-                return None;
+        .filter_map(|(index, point)| {
+            if point.key.mark_type == BWIKI_TELEPORT_MARK_TYPE {
+                let &teleport_index = teleport_index_by_key.get(&point.key)?;
+                cluster_points[teleport_index].push(index);
+                None
+            } else {
+                Some((index, point.record.world))
             }
-
-            Some(NearestTeleport {
-                index,
-                distance: planner_world_distance(point, teleport.record.world),
-            })
         })
         .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| left.distance.total_cmp(&right.distance));
-    candidates.truncate(BWIKI_PREVIEW_TELEPORT_CANDIDATE_LIMIT.min(candidates.len()));
-    candidates
-}
+    let mut unassigned_points = non_teleport_points;
 
-fn build_bwiki_preview_segment_plan(
-    from: &BwikiPlannerResolvedPoint,
-    to: &BwikiPlannerResolvedPoint,
-    teleports: &[BwikiPlannerResolvedPoint],
-    used_keys: &HashSet<BwikiPointKey>,
-    selected_keys: &HashSet<BwikiPointKey>,
-    teleport_link_distance: f32,
-) -> BwikiSegmentPlan {
-    let direct_cost = planner_world_distance(from.record.world, to.record.world);
-    if teleports.len() < 2 {
-        return BwikiSegmentPlan {
-            total_cost: direct_cost,
-            source_teleport_index: None,
-            target_teleport_index: None,
-        };
+    while !unassigned_points.is_empty() {
+        let best_assignment = unassigned_points
+            .iter()
+            .enumerate()
+            .filter_map(|(unassigned_index, (point_index, point_world))| {
+                teleports
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(teleport_index, teleport)| {
+                        let cluster_is_open = !cluster_points[teleport_index].is_empty();
+                        let (candidate_cost, tie_distance) = if cluster_is_open {
+                            let distance = nearest_bwiki_cluster_point_distance(
+                                *point_world,
+                                &cluster_points[teleport_index],
+                                resolved_points,
+                            )?;
+                            (distance, distance)
+                        } else {
+                            let distance =
+                                planner_world_distance(*point_world, teleport.record.world);
+                            (distance + teleport_link_distance, distance)
+                        };
+
+                        Some((
+                            unassigned_index,
+                            *point_index,
+                            teleport_index,
+                            candidate_cost,
+                            cluster_is_open,
+                            tie_distance,
+                        ))
+                    })
+                    .min_by(|left, right| {
+                        left.3
+                            .total_cmp(&right.3)
+                            .then_with(|| right.4.cmp(&left.4))
+                            .then_with(|| left.5.total_cmp(&right.5))
+                    })
+            })
+            .min_by(|left, right| {
+                left.3
+                    .total_cmp(&right.3)
+                    .then_with(|| right.4.cmp(&left.4))
+                    .then_with(|| left.5.total_cmp(&right.5))
+            })?;
+        cluster_points[best_assignment.2].push(best_assignment.1);
+        unassigned_points.swap_remove(best_assignment.0);
     }
 
-    let source_candidates = collect_bwiki_preview_teleport_candidates(
-        from.record.world,
-        teleports,
-        used_keys,
-        selected_keys,
-        (from.key.mark_type == BWIKI_TELEPORT_MARK_TYPE).then_some(&from.key),
-    );
-    let target_candidates = collect_bwiki_preview_teleport_candidates(
-        to.record.world,
-        teleports,
-        used_keys,
-        selected_keys,
-        (to.key.mark_type == BWIKI_TELEPORT_MARK_TYPE).then_some(&to.key),
+    Some(
+        cluster_points
+            .into_iter()
+            .enumerate()
+            .filter_map(|(teleport_index, point_indices)| {
+                (!point_indices.is_empty()).then(|| {
+                    let teleport = &teleports[teleport_index];
+                    let walk_order = build_bwiki_walk_order_for_point_indices(
+                        &point_indices,
+                        resolved_points,
+                        teleport_link_distance,
+                    );
+                    let teleport_order = build_bwiki_cluster_teleport_order(
+                        &point_indices,
+                        resolved_points,
+                        teleport,
+                        teleport_link_distance,
+                    );
+                    let centroid = bwiki_cluster_centroid(
+                        &point_indices,
+                        resolved_points,
+                        teleport.record.world,
+                    );
+
+                    BwikiTeleportClusterPlan {
+                        teleport_index,
+                        walk_order,
+                        teleport_order,
+                        centroid,
+                    }
+                })
+            })
+            .collect(),
+    )
+}
+
+fn build_bwiki_teleport_cluster_order(
+    cluster_plans: &[BwikiTeleportClusterPlan],
+    teleport_link_distance: f32,
+) -> Vec<usize> {
+    if cluster_plans.len() <= 1 {
+        return (0..cluster_plans.len()).collect();
+    }
+
+    let centroids = cluster_plans
+        .iter()
+        .map(|plan| plan.centroid)
+        .collect::<Vec<_>>();
+    let direct_arrival_costs = vec![f32::INFINITY; centroids.len()];
+    let forward_order = build_bwiki_planner_order_for_points(
+        &centroids,
+        &[],
+        &direct_arrival_costs,
+        teleport_link_distance,
     );
 
-    let mut best_plan = BwikiSegmentPlan {
-        total_cost: direct_cost,
-        source_teleport_index: None,
-        target_teleport_index: None,
-    };
-    for source in source_candidates {
-        for target in &target_candidates {
-            if source.index == target.index {
-                continue;
-            }
-            let candidate_cost = source.distance + teleport_link_distance + target.distance;
-            if candidate_cost + 0.001 < best_plan.total_cost {
-                best_plan = BwikiSegmentPlan {
-                    total_cost: candidate_cost,
-                    source_teleport_index: Some(source.index),
-                    target_teleport_index: Some(target.index),
-                };
+    forward_order
+}
+
+fn build_bwiki_cluster_walk_variant(
+    point_order: &[usize],
+    resolved_points: &[BwikiPlannerResolvedPoint],
+) -> Option<BwikiClusterRouteVariant> {
+    let &first_index = point_order.first()?;
+    let &last_index = point_order.last()?;
+
+    Some(BwikiClusterRouteVariant {
+        route_keys: point_order
+            .iter()
+            .filter_map(|index| resolved_points.get(*index).map(|point| point.key.clone()))
+            .collect(),
+        entry_world: resolved_points.get(first_index)?.record.world,
+        exit_world: resolved_points.get(last_index)?.record.world,
+        internal_cost: ordered_bwiki_walk_cost(point_order, resolved_points),
+        entry_mode: BwikiClusterEntryMode::Walk,
+    })
+}
+
+fn build_bwiki_cluster_teleport_variant(
+    cluster_plan: &BwikiTeleportClusterPlan,
+    resolved_points: &[BwikiPlannerResolvedPoint],
+    teleports: &[BwikiPlannerResolvedPoint],
+) -> Option<BwikiClusterRouteVariant> {
+    let teleport = teleports.get(cluster_plan.teleport_index)?;
+    let mut route_keys = vec![teleport.key.clone()];
+    let mut previous_world = teleport.record.world;
+    let mut internal_cost = 0.0;
+
+    for point_index in &cluster_plan.teleport_order {
+        let point = resolved_points.get(*point_index)?;
+        internal_cost += planner_world_distance(previous_world, point.record.world);
+        append_preview_key(&mut route_keys, &point.key);
+        previous_world = point.record.world;
+    }
+
+    Some(BwikiClusterRouteVariant {
+        route_keys,
+        entry_world: teleport.record.world,
+        exit_world: previous_world,
+        internal_cost,
+        entry_mode: BwikiClusterEntryMode::Teleport,
+    })
+}
+
+fn build_bwiki_cluster_route_variants(
+    cluster_plan: &BwikiTeleportClusterPlan,
+    resolved_points: &[BwikiPlannerResolvedPoint],
+    teleports: &[BwikiPlannerResolvedPoint],
+) -> Option<Vec<BwikiClusterRouteVariant>> {
+    let mut variants = Vec::new();
+    variants.push(build_bwiki_cluster_teleport_variant(
+        cluster_plan,
+        resolved_points,
+        teleports,
+    )?);
+
+    if let Some(forward_walk_variant) =
+        build_bwiki_cluster_walk_variant(&cluster_plan.walk_order, resolved_points)
+    {
+        variants.push(forward_walk_variant);
+    }
+
+    if cluster_plan.walk_order.len() > 1 {
+        let reverse_walk_order = cluster_plan
+            .walk_order
+            .iter()
+            .rev()
+            .copied()
+            .collect::<Vec<_>>();
+        if let Some(reverse_walk_variant) =
+            build_bwiki_cluster_walk_variant(&reverse_walk_order, resolved_points)
+        {
+            variants.push(reverse_walk_variant);
+        }
+    }
+
+    Some(variants)
+}
+
+fn bwiki_cluster_variant_transition_cost(
+    previous_variant: &BwikiClusterRouteVariant,
+    current_variant: &BwikiClusterRouteVariant,
+    teleport_link_distance: f32,
+) -> f32 {
+    match current_variant.entry_mode {
+        BwikiClusterEntryMode::Teleport => teleport_link_distance,
+        BwikiClusterEntryMode::Walk => {
+            planner_world_distance(previous_variant.exit_world, current_variant.entry_world)
+        }
+    }
+}
+
+fn build_bwiki_route_plan_preview_for_cluster_order(
+    resolved_points: &[BwikiPlannerResolvedPoint],
+    cluster_plans: &[BwikiTeleportClusterPlan],
+    cluster_order: &[usize],
+    teleports: &[BwikiPlannerResolvedPoint],
+    teleport_link_distance: f32,
+) -> Option<BwikiRoutePlanPreview> {
+    if cluster_order.is_empty() {
+        return Some(BwikiRoutePlanPreview::default());
+    }
+
+    let cluster_variants = cluster_order
+        .iter()
+        .map(|cluster_index| {
+            build_bwiki_cluster_route_variants(
+                cluster_plans.get(*cluster_index)?,
+                resolved_points,
+                teleports,
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut best_costs = cluster_variants
+        .iter()
+        .map(|variants| vec![f32::INFINITY; variants.len()])
+        .collect::<Vec<_>>();
+    let mut predecessors = cluster_variants
+        .iter()
+        .map(|variants| vec![None; variants.len()])
+        .collect::<Vec<_>>();
+
+    for (variant_index, variant) in cluster_variants[0].iter().enumerate() {
+        if variant
+            .route_keys
+            .first()
+            .is_some_and(|key| key.mark_type == BWIKI_TELEPORT_MARK_TYPE)
+        {
+            best_costs[0][variant_index] = variant.internal_cost;
+        }
+    }
+
+    for cluster_index in 1..cluster_variants.len() {
+        for (variant_index, variant) in cluster_variants[cluster_index].iter().enumerate() {
+            for (previous_variant_index, previous_variant) in
+                cluster_variants[cluster_index - 1].iter().enumerate()
+            {
+                let previous_cost = best_costs[cluster_index - 1][previous_variant_index];
+                if !previous_cost.is_finite() {
+                    continue;
+                }
+
+                let candidate_cost = previous_cost
+                    + bwiki_cluster_variant_transition_cost(
+                        previous_variant,
+                        variant,
+                        teleport_link_distance,
+                    )
+                    + variant.internal_cost;
+                if candidate_cost + 0.001 < best_costs[cluster_index][variant_index] {
+                    best_costs[cluster_index][variant_index] = candidate_cost;
+                    predecessors[cluster_index][variant_index] = Some(previous_variant_index);
+                }
             }
         }
     }
 
-    best_plan
-}
+    let last_cluster_index = cluster_variants.len().saturating_sub(1);
+    let (mut best_variant_index, total_cost) = best_costs[last_cluster_index]
+        .iter()
+        .enumerate()
+        .filter(|(_, cost)| cost.is_finite())
+        .min_by(|left, right| left.1.total_cmp(right.1))?;
+    let mut chosen_variant_indices = vec![0usize; cluster_variants.len()];
+    chosen_variant_indices[last_cluster_index] = best_variant_index;
 
-fn build_bwiki_route_plan_preview(
-    resolved_points: &[BwikiPlannerResolvedPoint],
-    order: &[usize],
-    teleports: &[BwikiPlannerResolvedPoint],
-    teleport_link_distance: f32,
-) -> Option<BwikiRoutePlanPreview> {
-    if order.is_empty() {
-        return Some(BwikiRoutePlanPreview::default());
+    for cluster_index in (1..cluster_variants.len()).rev() {
+        best_variant_index = predecessors[cluster_index][best_variant_index]?;
+        chosen_variant_indices[cluster_index - 1] = best_variant_index;
+    }
+
+    let mut route_keys = Vec::new();
+    for (cluster_index, variant_index) in chosen_variant_indices.into_iter().enumerate() {
+        for key in &cluster_variants[cluster_index][variant_index].route_keys {
+            append_preview_key(&mut route_keys, key);
+        }
     }
 
     let selected_keys = resolved_points
         .iter()
         .map(|point| point.key.clone())
         .collect::<HashSet<_>>();
-    let reverse_order = order.iter().rev().copied().collect::<Vec<_>>();
-    let forward_start =
-        bwiki_route_start_plan_for_order(order, resolved_points, teleports, &selected_keys);
-    let reverse_start = bwiki_route_start_plan_for_order(
-        &reverse_order,
-        resolved_points,
-        teleports,
-        &selected_keys,
-    );
-
-    let (route_order, start_teleport, start_cost) = match (forward_start, reverse_start) {
-        (Some(forward), Some(reverse)) if reverse.1 + 0.001 < forward.1 => {
-            (reverse_order, reverse.0, reverse.1)
-        }
-        (Some(forward), _) => (order.to_vec(), forward.0, forward.1),
-        (None, Some(reverse)) => (reverse_order, reverse.0, reverse.1),
-        (None, None) => return None,
-    };
-
-    let &first_index = route_order.first()?;
-    let first_point = resolved_points.get(first_index)?;
-    let mut route_keys = Vec::with_capacity(route_order.len() + 2);
-    let mut used_keys = HashSet::with_capacity(route_order.len() + 2);
-    let mut total_cost = start_cost;
-
-    if let Some(start_teleport_index) = start_teleport {
-        let start_teleport = teleports.get(start_teleport_index)?;
-        append_preview_key(&mut route_keys, &start_teleport.key);
-        used_keys.insert(start_teleport.key.clone());
-    }
-    if used_keys.contains(&first_point.key) {
+    if !selected_keys.iter().all(|key| route_keys.contains(key)) {
         return None;
     }
-    append_preview_key(&mut route_keys, &first_point.key);
-    used_keys.insert(first_point.key.clone());
-
-    for segment in route_order.windows(2) {
-        let [from_index, to_index] = [segment[0], segment[1]];
-        let (Some(from), Some(to)) = (
-            resolved_points.get(from_index),
-            resolved_points.get(to_index),
-        ) else {
-            continue;
-        };
-
-        let segment_plan = build_bwiki_preview_segment_plan(
-            from,
-            to,
-            teleports,
-            &used_keys,
-            &selected_keys,
-            teleport_link_distance,
-        );
-        total_cost += segment_plan.total_cost;
-
-        if let Some(source_teleport_index) = segment_plan.source_teleport_index {
-            let source_key = &teleports[source_teleport_index].key;
-            if route_keys.last() != Some(source_key) && source_key != &to.key {
-                if used_keys.contains(source_key) {
-                    return None;
-                }
-                append_preview_key(&mut route_keys, source_key);
-                used_keys.insert(source_key.clone());
-            }
-        }
-        if let Some(target_teleport_index) = segment_plan.target_teleport_index {
-            let target_key = &teleports[target_teleport_index].key;
-            if route_keys.last() != Some(target_key) && target_key != &to.key {
-                if used_keys.contains(target_key) {
-                    return None;
-                }
-                append_preview_key(&mut route_keys, target_key);
-                used_keys.insert(target_key.clone());
-            }
-        }
-
-        if used_keys.contains(&to.key) {
-            return None;
-        }
-        append_preview_key(&mut route_keys, &to.key);
-        used_keys.insert(to.key.clone());
-    }
-
     if !bwiki_route_keys_form_simple_path(&route_keys)
         || !route_keys
             .first()
@@ -6252,8 +6498,51 @@ fn build_bwiki_route_plan_preview(
 
     Some(BwikiRoutePlanPreview {
         route_keys,
-        total_cost,
+        total_cost: *total_cost,
     })
+}
+
+fn build_bwiki_route_plan_preview(
+    resolved_points: &[BwikiPlannerResolvedPoint],
+    teleports: &[BwikiPlannerResolvedPoint],
+    teleport_link_distance: f32,
+) -> Option<BwikiRoutePlanPreview> {
+    if resolved_points.is_empty() {
+        return Some(BwikiRoutePlanPreview::default());
+    }
+
+    let cluster_plans =
+        build_bwiki_teleport_cluster_plans(resolved_points, teleports, teleport_link_distance)?;
+    if cluster_plans.is_empty() {
+        return None;
+    }
+    let cluster_order = build_bwiki_teleport_cluster_order(&cluster_plans, teleport_link_distance);
+    let reverse_cluster_order = cluster_order.iter().rev().copied().collect::<Vec<_>>();
+    let forward_preview = build_bwiki_route_plan_preview_for_cluster_order(
+        resolved_points,
+        &cluster_plans,
+        &cluster_order,
+        teleports,
+        teleport_link_distance,
+    );
+    let reverse_preview = (reverse_cluster_order != cluster_order).then(|| {
+        build_bwiki_route_plan_preview_for_cluster_order(
+            resolved_points,
+            &cluster_plans,
+            &reverse_cluster_order,
+            teleports,
+            teleport_link_distance,
+        )
+    });
+
+    match (forward_preview, reverse_preview.flatten()) {
+        (Some(forward), Some(reverse)) if reverse.total_cost + 0.001 < forward.total_cost => {
+            Some(reverse)
+        }
+        (Some(forward), _) => Some(forward),
+        (None, Some(reverse)) => Some(reverse),
+        (None, None) => None,
+    }
 }
 
 fn planner_point_to_route_point(
@@ -6261,6 +6550,8 @@ fn planner_point_to_route_point(
     default_style: &MarkerStyle,
 ) -> RoutePoint {
     let mut route_point = RoutePoint::new(point.record.title.clone(), point.record.world);
+    let mark_type_icon_name = point.record.mark_type.to_string();
+    let mark_type_icon = MarkerIconStyle::new(mark_type_icon_name.clone());
     let icon = point
         .type_definition
         .as_ref()
@@ -6268,7 +6559,10 @@ fn planner_point_to_route_point(
             (!definition.name.trim().is_empty())
                 .then(|| MarkerIconStyle::new(definition.name.clone()))
         })
-        .unwrap_or_else(|| MarkerIconStyle::new(point.record.mark_type.to_string()));
+        .or_else(|| {
+            (mark_type_icon.as_str() != mark_type_icon_name).then_some(mark_type_icon.clone())
+        })
+        .unwrap_or_else(|| default_style.icon.clone());
     let type_label = point
         .type_definition
         .as_ref()
@@ -6303,5 +6597,256 @@ impl Render for TrackerWorkbench {
             self.sync_bwiki_icon_picker_state(window, cx);
         }
         render_workbench(self, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn planner_point(mark_type: u32, id: &str, x: f32, y: f32) -> BwikiPlannerResolvedPoint {
+        let record = BwikiPointRecord {
+            mark_type,
+            title: id.to_owned(),
+            id: id.to_owned(),
+            raw_lat: 0,
+            raw_lng: 0,
+            world: WorldPoint::new(x, y),
+            uid: format!("uid-{id}"),
+            layer: "test".to_owned(),
+            time: None,
+            version: None,
+        };
+
+        BwikiPlannerResolvedPoint {
+            key: BwikiPointKey::from_record(&record),
+            record,
+            type_definition: None,
+        }
+    }
+
+    fn assert_cost_eq(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.001,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn planner_cost_matrix_uses_target_teleport_arrival_cost() {
+        let points = [WorldPoint::new(0.0, 0.0), WorldPoint::new(100.0, 0.0)];
+        let teleports = vec![planner_point(BWIKI_TELEPORT_MARK_TYPE, "tp", 80.0, 0.0)];
+        let teleport_arrival_costs = build_bwiki_point_teleport_arrival_costs(&points, &teleports);
+        let costs = build_bwiki_planner_cost_matrix(&points, &teleport_arrival_costs, 10.0);
+
+        assert_cost_eq(costs[0][1], 30.0);
+        assert_cost_eq(costs[1][0], 90.0);
+    }
+
+    #[test]
+    fn route_preview_groups_points_by_used_teleport() {
+        let teleports = vec![
+            planner_point(BWIKI_TELEPORT_MARK_TYPE, "tp-a", 0.0, 0.0),
+            planner_point(BWIKI_TELEPORT_MARK_TYPE, "tp-b", 1000.0, 0.0),
+        ];
+        let resolved_points = vec![
+            planner_point(1, "a-1", 20.0, 0.0),
+            planner_point(1, "a-2", 45.0, 10.0),
+            planner_point(1, "b-1", 1015.0, 0.0),
+        ];
+
+        let preview = build_bwiki_route_plan_preview(&resolved_points, &teleports, 320.0)
+            .expect("preview should exist");
+
+        let route_ids = preview
+            .route_keys
+            .iter()
+            .map(|key| key.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            route_ids == vec!["tp-a", "a-1", "a-2", "tp-b", "b-1"]
+                || route_ids == vec!["tp-b", "b-1", "tp-a", "a-1", "a-2"],
+            "unexpected route order: {:?}",
+            route_ids
+        );
+        assert_cost_eq(preview.total_cost, 381.9258);
+    }
+
+    #[test]
+    fn route_preview_avoids_opening_new_teleport_when_walking_is_cheaper() {
+        let teleports = vec![
+            planner_point(BWIKI_TELEPORT_MARK_TYPE, "tp-a", 0.0, 0.0),
+            planner_point(BWIKI_TELEPORT_MARK_TYPE, "tp-b", 400.0, 0.0),
+        ];
+        let resolved_points = vec![
+            planner_point(1, "a-1", 20.0, 0.0),
+            planner_point(1, "mid", 230.0, 0.0),
+        ];
+
+        let preview = build_bwiki_route_plan_preview(&resolved_points, &teleports, 320.0)
+            .expect("preview should exist");
+
+        assert_eq!(
+            preview
+                .route_keys
+                .iter()
+                .map(|key| key.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tp-a", "a-1", "mid"]
+        );
+        assert_cost_eq(preview.total_cost, 230.0);
+    }
+
+    #[test]
+    fn route_preview_skips_cluster_teleport_when_cross_cluster_walk_is_shorter() {
+        let teleports = vec![
+            planner_point(BWIKI_TELEPORT_MARK_TYPE, "tp-a", 0.0, 0.0),
+            planner_point(BWIKI_TELEPORT_MARK_TYPE, "tp-b", 1000.0, 0.0),
+        ];
+        let resolved_points = vec![
+            planner_point(1, "a-1", 20.0, 0.0),
+            planner_point(1, "a-2", 700.0, 0.0),
+            planner_point(1, "b-1", 760.0, 0.0),
+        ];
+
+        let preview = build_bwiki_route_plan_preview(&resolved_points, &teleports, 450.0)
+            .expect("preview should exist");
+
+        assert_eq!(
+            preview
+                .route_keys
+                .iter()
+                .map(|key| key.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tp-a", "a-1", "a-2", "b-1"]
+        );
+        assert_cost_eq(preview.total_cost, 760.0);
+    }
+
+    #[test]
+    fn teleport_clusters_expand_from_existing_frontier_before_opening_new_one() {
+        let teleports = vec![
+            planner_point(BWIKI_TELEPORT_MARK_TYPE, "tp-a", 0.0, 0.0),
+            planner_point(BWIKI_TELEPORT_MARK_TYPE, "tp-b", 1000.0, 0.0),
+        ];
+        let resolved_points = vec![
+            planner_point(1, "a-1", 20.0, 0.0),
+            planner_point(1, "bridge", 700.0, 0.0),
+            planner_point(1, "b-edge", 760.0, 0.0),
+        ];
+
+        let cluster_plans = build_bwiki_teleport_cluster_plans(&resolved_points, &teleports, 450.0)
+            .expect("cluster plans should exist");
+
+        assert_eq!(cluster_plans.len(), 1);
+        assert_eq!(cluster_plans[0].teleport_index, 0);
+        assert_eq!(cluster_plans[0].walk_order.len(), 3);
+    }
+
+    #[test]
+    fn route_preview_keeps_selected_teleport_once_at_cluster_start() {
+        let teleports = vec![
+            planner_point(BWIKI_TELEPORT_MARK_TYPE, "tp-a", 0.0, 0.0),
+            planner_point(BWIKI_TELEPORT_MARK_TYPE, "tp-b", 1000.0, 0.0),
+        ];
+        let resolved_points = vec![
+            planner_point(BWIKI_TELEPORT_MARK_TYPE, "tp-a", 0.0, 0.0),
+            planner_point(1, "a-1", 20.0, 0.0),
+        ];
+
+        let preview = build_bwiki_route_plan_preview(&resolved_points, &teleports, 320.0)
+            .expect("preview should exist");
+
+        assert_eq!(
+            preview
+                .route_keys
+                .iter()
+                .map(|key| key.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tp-a", "a-1"]
+        );
+        assert_cost_eq(preview.total_cost, 20.0);
+    }
+
+    #[test]
+    fn planner_points_prefer_bwiki_type_icon_over_route_default_icon() {
+        let record = BwikiPointRecord {
+            mark_type: 702,
+            title: "sample".to_owned(),
+            id: "sample".to_owned(),
+            raw_lat: 0,
+            raw_lng: 0,
+            world: WorldPoint::new(10.0, 20.0),
+            uid: "uid-sample".to_owned(),
+            layer: "test".to_owned(),
+            time: None,
+            version: None,
+        };
+        let point = BwikiPlannerResolvedPoint {
+            key: BwikiPointKey::from_record(&record),
+            record,
+            type_definition: Some(BwikiTypeDefinition {
+                category: "test".to_owned(),
+                mark_type: 702,
+                name: "黄石榴石".to_owned(),
+                icon_url: String::new(),
+                point_count: 1,
+                type_known: true,
+            }),
+        };
+        let default_style = MarkerStyle {
+            icon: MarkerIconStyle::new("黑晶琉璃"),
+            color_hex: "#123456".to_owned(),
+            size_px: 28.0,
+        };
+
+        let route_point = planner_point_to_route_point(point, &default_style);
+
+        assert_eq!(route_point.style.icon, MarkerIconStyle::new("黄石榴石"));
+        assert_eq!(route_point.style.color_hex, default_style.color_hex);
+        assert_eq!(route_point.style.size_px, default_style.size_px);
+    }
+
+    #[test]
+    fn planner_points_use_legacy_mark_type_icon_before_route_default_icon() {
+        let point = planner_point(702, "sample", 10.0, 20.0);
+        let default_style = MarkerStyle {
+            icon: MarkerIconStyle::new("黑晶琉璃"),
+            color_hex: "#123456".to_owned(),
+            size_px: 28.0,
+        };
+
+        let route_point = planner_point_to_route_point(point, &default_style);
+
+        assert_eq!(route_point.style.icon, MarkerIconStyle::new("黄石榴石"));
+    }
+
+    #[test]
+    fn planner_points_fall_back_to_route_default_icon_when_bwiki_icon_unknown() {
+        let point = planner_point(999999, "sample", 10.0, 20.0);
+        let default_style = MarkerStyle {
+            icon: MarkerIconStyle::new("黑晶琉璃"),
+            color_hex: "#123456".to_owned(),
+            size_px: 28.0,
+        };
+
+        let route_point = planner_point_to_route_point(point, &default_style);
+
+        assert_eq!(route_point.style.icon, default_style.icon);
+    }
+
+    #[test]
+    fn full_2opt_respects_directed_internal_edges() {
+        let mut order = vec![0usize, 1, 2, 3];
+        let costs = vec![
+            vec![0.0, 10.0, 1.0, 50.0],
+            vec![50.0, 0.0, 1.0, 1.0],
+            vec![50.0, 100.0, 0.0, 10.0],
+            vec![50.0, 50.0, 50.0, 0.0],
+        ];
+
+        improve_bwiki_planner_order_full_2opt(&mut order, &costs, 1);
+
+        assert_eq!(order, vec![0, 1, 2, 3]);
     }
 }

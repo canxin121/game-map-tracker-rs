@@ -1351,6 +1351,28 @@ fn page_header(
                     }),
                 )
                 .into_any_element(),
+                toolbar_button(
+                    "tracker-popup-toggle-top",
+                    tokens,
+                    "P",
+                    if this.is_tracker_point_popup_enabled() {
+                        "隐藏浮窗"
+                    } else {
+                        "显示浮窗"
+                    },
+                    if this.is_tracker_point_popup_enabled() {
+                        ToolbarButtonTone::Neutral
+                    } else {
+                        ToolbarButtonTone::Primary
+                    },
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.set_tracker_point_popup_enabled(
+                            !this.is_tracker_point_popup_enabled(),
+                        );
+                        cx.notify();
+                    }),
+                )
+                .into_any_element(),
                 toolbar_button_with_tooltip(
                     "tracker-toggle-top",
                     tokens,
@@ -2903,7 +2925,7 @@ fn bwiki_route_planner_card(
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(field_label(tokens, "图标"))
+                        .child(field_label(tokens, "默认图标"))
                         .child(
                             Select::new(&this.bwiki_planner_icon_picker)
                                 .w_full()
@@ -3345,47 +3367,26 @@ fn selected_tracker_point_info_popup(
                 cx.stop_propagation();
             })
             .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(tokens.app_fg)
-                                    .child(point.display_label().to_owned()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(tokens.text_muted)
-                                    .child(popup.route_name),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .rounded_lg()
-                            .bg(tokens.panel_sunken_bg)
-                            .border_1()
-                            .border_color(tokens.border)
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(tokens.text_soft)
-                                    .child("当前节点"),
-                            ),
-                    ),
+                div().flex().items_start().gap_2().child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(tokens.app_fg)
+                                .child(point.display_label().to_owned()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.text_muted)
+                                .child(popup.route_name),
+                        ),
+                ),
             )
             .child(
                 div()
@@ -3744,6 +3745,14 @@ pub(super) fn paint_tracker_map_overlay_snapshot(
                     for segment in route_canvas.windows(2) {
                         paint_route_arrow(window, segment[0], segment[1], route_color.into());
                     }
+                    paint_route_segment_lengths(
+                        window,
+                        cx,
+                        &route_world,
+                        &route_canvas,
+                        tokens,
+                        route_color.into(),
+                    );
                 }
             }
 
@@ -3796,6 +3805,14 @@ pub(super) fn paint_tracker_map_overlay_snapshot(
                         for badge in &badge_items {
                             paint_route_point_badges(
                                 window,
+                                badge.marker_bounds,
+                                badge.is_start,
+                                badge.is_end,
+                                tokens,
+                            );
+                            paint_route_point_endpoint_label(
+                                window,
+                                cx,
                                 badge.marker_bounds,
                                 badge.is_start,
                                 badge.is_end,
@@ -3878,6 +3895,10 @@ fn paint_bwiki_map_overlay(
                     .iter()
                     .map(|point| point.key.clone())
                     .collect::<HashSet<_>>();
+                let first_preview_key = planner_preview_points
+                    .first()
+                    .map(|point| point.key.clone());
+                let last_preview_key = planner_preview_points.last().map(|point| point.key.clone());
                 let visible_definitions = dataset
                     .types
                     .iter()
@@ -3920,39 +3941,40 @@ fn paint_bwiki_map_overlay(
                         ))
                     })
                     .collect::<BTreeMap<_, _>>();
+                let mut badge_items = Vec::new();
 
                 if planner_preview_worlds.len() > 1 {
                     let preview_screen = screen_points(camera, &planner_preview_worlds);
+                    let preview_canvas = preview_screen
+                        .iter()
+                        .map(|screen_point| {
+                            point(
+                                bounds.origin.x + px(screen_point.x),
+                                bounds.origin.y + px(screen_point.y),
+                            )
+                        })
+                        .collect::<Vec<_>>();
                     let mut builder = PathBuilder::stroke(px(3.0));
-                    let first = preview_screen[0];
-                    builder.move_to(point(
-                        bounds.origin.x + px(first.x),
-                        bounds.origin.y + px(first.y),
-                    ));
-                    for screen_point in preview_screen.iter().skip(1) {
-                        builder.line_to(point(
-                            bounds.origin.x + px(screen_point.x),
-                            bounds.origin.y + px(screen_point.y),
-                        ));
+                    let first = preview_canvas[0];
+                    builder.move_to(point(first.x, first.y));
+                    for canvas_point in preview_canvas.iter().skip(1) {
+                        builder.line_to(*canvas_point);
                     }
                     if let Ok(path) = builder.build() {
                         window.paint_path(path, preview_color);
                     }
 
-                    for segment in preview_screen.windows(2) {
-                        paint_route_arrow(
-                            window,
-                            point(
-                                bounds.origin.x + px(segment[0].x),
-                                bounds.origin.y + px(segment[0].y),
-                            ),
-                            point(
-                                bounds.origin.x + px(segment[1].x),
-                                bounds.origin.y + px(segment[1].y),
-                            ),
-                            preview_color.into(),
-                        );
+                    for segment in preview_canvas.windows(2) {
+                        paint_route_arrow(window, segment[0], segment[1], preview_color.into());
                     }
+                    paint_route_segment_lengths(
+                        window,
+                        cx,
+                        &planner_preview_worlds,
+                        &preview_canvas,
+                        tokens,
+                        preview_color.into(),
+                    );
                 }
 
                 if let Some(selection) = planner_lasso_selection.as_ref()
@@ -4003,6 +4025,7 @@ fn paint_bwiki_map_overlay(
                         let key = super::BwikiPointKey::from_record(point_record);
                         let highlighted =
                             selected_keys.contains(&key) || preview_keys.contains(&key);
+                        let marker_bounds = bwiki_marker_image_bounds(anchor);
                         paint_bwiki_style_marker(
                             window,
                             anchor,
@@ -4027,6 +4050,23 @@ fn paint_bwiki_map_overlay(
                                 }
                             },
                         );
+                        if first_preview_key
+                            .as_ref()
+                            .is_some_and(|preview_key| preview_key == &key)
+                            || last_preview_key
+                                .as_ref()
+                                .is_some_and(|preview_key| preview_key == &key)
+                        {
+                            badge_items.push(RoutePointBadgeRenderItem {
+                                marker_bounds,
+                                is_start: first_preview_key
+                                    .as_ref()
+                                    .is_some_and(|preview_key| preview_key == &key),
+                                is_end: last_preview_key
+                                    .as_ref()
+                                    .is_some_and(|preview_key| preview_key == &key),
+                            });
+                        }
                     }
                 }
 
@@ -4044,6 +4084,7 @@ fn paint_bwiki_map_overlay(
                         bounds.origin.x + px(screen.x),
                         bounds.origin.y + px(screen.y),
                     );
+                    let marker_bounds = bwiki_marker_image_bounds(anchor);
                     let mark_type = preview_point.record.mark_type;
                     let preview_definition = preview_point.type_definition.as_ref();
                     paint_bwiki_style_marker(window, anchor, true, tokens, |window, bounds| {
@@ -4055,6 +4096,43 @@ fn paint_bwiki_map_overlay(
                         } else {
                             paint_bwiki_placeholder_marker(window, anchor, mark_type, tokens);
                         }
+                    });
+                    let is_start = first_preview_key
+                        .as_ref()
+                        .is_some_and(|preview_key| preview_key == &preview_point.key);
+                    let is_end = last_preview_key
+                        .as_ref()
+                        .is_some_and(|preview_key| preview_key == &preview_point.key);
+                    if is_start || is_end {
+                        badge_items.push(RoutePointBadgeRenderItem {
+                            marker_bounds,
+                            is_start,
+                            is_end,
+                        });
+                    }
+                }
+
+                if !badge_items.is_empty() {
+                    window.paint_layer(bounds, |window| {
+                        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                            for badge in &badge_items {
+                                paint_route_point_badges(
+                                    window,
+                                    badge.marker_bounds,
+                                    badge.is_start,
+                                    badge.is_end,
+                                    tokens,
+                                );
+                                paint_route_point_endpoint_label(
+                                    window,
+                                    cx,
+                                    badge.marker_bounds,
+                                    badge.is_start,
+                                    badge.is_end,
+                                    tokens,
+                                );
+                            }
+                        });
                     });
                 }
             }
@@ -4437,6 +4515,161 @@ fn paint_route_arrow(
     }
 }
 
+fn format_segment_length(length: f32) -> String {
+    let rounded = length.round();
+    if (length - rounded).abs() < 0.05 {
+        format!("{rounded:.0}")
+    } else {
+        format!("{length:.1}")
+    }
+}
+
+fn paint_canvas_text_pill(
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+    center: gpui::Point<gpui::Pixels>,
+    text: &str,
+    background: gpui::Hsla,
+    foreground: gpui::Hsla,
+    border: gpui::Hsla,
+    font_size: f32,
+    horizontal_padding: f32,
+    vertical_padding: f32,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    let mut text_style = window.text_style();
+    text_style.color = foreground;
+    text_style.font_size = px(font_size).into();
+    text_style.line_height = px(font_size + 2.0).into();
+    text_style.font_weight = gpui::FontWeight::SEMIBOLD;
+
+    let rendered_font_size = text_style.font_size.to_pixels(window.rem_size());
+    let rendered_line_height = text_style.line_height_in_pixels(window.rem_size());
+    let shaped_text: SharedString = text.to_owned().into();
+    let shaped = window.text_system().shape_line(
+        shaped_text,
+        rendered_font_size,
+        &[text_style.to_run(text.len())],
+        None,
+    );
+
+    let pill_width = f32::from(shaped.width) + horizontal_padding * 2.0;
+    let pill_height = f32::from(rendered_line_height) + vertical_padding * 2.0;
+    let bounds = Bounds {
+        origin: point(
+            center.x - px(pill_width * 0.5),
+            center.y - px(pill_height * 0.5),
+        ),
+        size: size(px(pill_width), px(pill_height)),
+    };
+    let frame_bounds = inflate_bounds(bounds, 1.0);
+    let radius = px((pill_height * 0.5).min(12.0));
+
+    window.paint_quad(fill(frame_bounds, border).corner_radii(radius + px(1.0)));
+    window.paint_quad(fill(bounds, background).corner_radii(radius));
+    let _ = shaped.paint(
+        point(
+            bounds.origin.x + px(horizontal_padding),
+            bounds.origin.y + px(vertical_padding),
+        ),
+        rendered_line_height,
+        window,
+        cx,
+    );
+}
+
+fn paint_route_segment_lengths(
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+    world_points: &[crate::domain::geometry::WorldPoint],
+    canvas_points: &[gpui::Point<gpui::Pixels>],
+    tokens: WorkbenchThemeTokens,
+    accent: gpui::Hsla,
+) {
+    for (world_segment, canvas_segment) in world_points.windows(2).zip(canvas_points.windows(2)) {
+        let [from_world, to_world] = [world_segment[0], world_segment[1]];
+        let [from_canvas, to_canvas] = [canvas_segment[0], canvas_segment[1]];
+
+        let from_x = f32::from(from_canvas.x);
+        let from_y = f32::from(from_canvas.y);
+        let to_x = f32::from(to_canvas.x);
+        let to_y = f32::from(to_canvas.y);
+        let dx = to_x - from_x;
+        let dy = to_y - from_y;
+        let screen_length = (dx * dx + dy * dy).sqrt();
+        if screen_length < 56.0 {
+            continue;
+        }
+
+        let world_dx = to_world.x - from_world.x;
+        let world_dy = to_world.y - from_world.y;
+        let world_length = (world_dx * world_dx + world_dy * world_dy).sqrt();
+        let mut normal_x = -dy / screen_length;
+        let mut normal_y = dx / screen_length;
+        if normal_y > 0.0 {
+            normal_x = -normal_x;
+            normal_y = -normal_y;
+        }
+
+        paint_canvas_text_pill(
+            window,
+            cx,
+            point(
+                px((from_x + to_x) * 0.5 + normal_x * 14.0),
+                px((from_y + to_y) * 0.5 + normal_y * 14.0),
+            ),
+            &format_segment_length(world_length),
+            tokens.panel_bg.opacity(0.96),
+            tokens.app_fg,
+            accent.opacity(0.82),
+            10.0,
+            7.0,
+            2.0,
+        );
+    }
+}
+
+fn paint_route_point_endpoint_label(
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+    marker_bounds: Bounds<gpui::Pixels>,
+    is_start: bool,
+    is_end: bool,
+    tokens: WorkbenchThemeTokens,
+) {
+    let (label, color) = match (is_start, is_end) {
+        (true, true) => ("起 / 终", gpui::rgb(0xB7791F).into()),
+        (true, false) => ("起点", gpui::rgb(0x1F9D55).into()),
+        (false, true) => ("终点", gpui::rgb(0xC24141).into()),
+        (false, false) => return,
+    };
+
+    let center_x = marker_bounds.origin.x + px(f32::from(marker_bounds.size.width) * 0.5);
+    let marker_top = f32::from(marker_bounds.origin.y);
+    let marker_bottom = marker_top + f32::from(marker_bounds.size.height);
+    let center_y = if marker_top >= 26.0 {
+        px(marker_top - 10.0)
+    } else {
+        px(marker_bottom + 10.0)
+    };
+
+    paint_canvas_text_pill(
+        window,
+        cx,
+        point(center_x, center_y),
+        label,
+        color,
+        gpui::rgb(0xFFFFFF).into(),
+        tokens.preview_ring,
+        10.0,
+        8.0,
+        2.0,
+    );
+}
+
 const MAP_INTERACTION_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 const BWIKI_TYPE_BUTTON_WIDTH: f32 = 168.0;
 const BWIKI_TYPE_BUTTON_HEIGHT: f32 = 44.0;
@@ -4547,8 +4780,8 @@ fn paint_route_point_badges(
     is_end: bool,
     tokens: WorkbenchThemeTokens,
 ) {
-    const BADGE_SIZE: f32 = 10.0;
-    const BADGE_MARGIN: f32 = 2.0;
+    const BADGE_SIZE: f32 = 12.0;
+    const BADGE_MARGIN: f32 = 1.5;
 
     if !is_start && !is_end {
         return;

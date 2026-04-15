@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_FILE_NAME: &str = "config.toml";
-const DEFAULT_TELEPORT_LINK_DISTANCE: f32 = 320.0;
+const DEFAULT_TELEPORT_LINK_DISTANCE: f32 = 450.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]

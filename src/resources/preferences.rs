@@ -17,6 +17,8 @@ pub struct UiPreferences {
     pub theme_mode: ThemePreference,
     #[serde(default = "default_auto_focus_enabled")]
     pub auto_focus_enabled: bool,
+    #[serde(default = "default_tracker_point_popup_enabled")]
+    pub tracker_point_popup_enabled: bool,
 }
 
 impl Default for UiPreferences {
@@ -24,6 +26,7 @@ impl Default for UiPreferences {
         Self {
             theme_mode: ThemePreference::default(),
             auto_focus_enabled: default_auto_focus_enabled(),
+            tracker_point_popup_enabled: default_tracker_point_popup_enabled(),
         }
     }
 }
@@ -71,5 +74,9 @@ impl UiPreferencesRepository {
 }
 
 const fn default_auto_focus_enabled() -> bool {
+    true
+}
+
+const fn default_tracker_point_popup_enabled() -> bool {
     true
 }
