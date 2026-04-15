@@ -78,7 +78,7 @@ pub(super) struct TrackerMapRenderSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct BwikiPointKey {
+pub(super) struct BwikiPointKey {
     mark_type: u32,
     raw_lat: i32,
     raw_lng: i32,
@@ -105,10 +105,10 @@ impl BwikiPointKey {
 }
 
 #[derive(Debug, Clone)]
-struct BwikiPlannerResolvedPoint {
-    key: BwikiPointKey,
-    record: BwikiPointRecord,
-    type_definition: Option<BwikiTypeDefinition>,
+pub(super) struct BwikiPlannerResolvedPoint {
+    pub(super) key: BwikiPointKey,
+    pub(super) record: BwikiPointRecord,
+    pub(super) type_definition: Option<BwikiTypeDefinition>,
 }
 
 #[derive(Debug, Clone)]
@@ -1195,7 +1195,7 @@ impl TrackerWorkbench {
                         world: self
                             .moving_point_preview_world(&point.id)
                             .unwrap_or_else(|| point.world()),
-                        style: group.default_style.clone().normalized(),
+                        style: group.effective_style(point),
                     })
                     .collect()
             })
@@ -1589,6 +1589,10 @@ impl TrackerWorkbench {
             .into_iter()
             .map(|point| point.record.world)
             .collect()
+    }
+
+    pub(super) fn bwiki_planner_preview_points(&self) -> Vec<BwikiPlannerResolvedPoint> {
+        self.resolve_bwiki_preview_points()
     }
 
     fn map_view(&self, map_kind: MapCanvasKind) -> &crate::ui::map_canvas::MapViewportState {
@@ -2051,6 +2055,7 @@ impl TrackerWorkbench {
         {
             set_input_value(&self.bwiki_planner_form.color_hex, "#FF6B6B", window, cx);
         }
+        self.bwiki_planner_icon = MarkerIconStyle::default();
         self.bwiki_planner_icon_picker.update(cx, |picker, cx| {
             picker.set_selected_value(&self.bwiki_planner_icon, window, cx);
         });
@@ -5158,10 +5163,10 @@ fn planner_point_to_route_point(
     let icon = point
         .type_definition
         .as_ref()
-        .map(|definition| definition.name.trim().to_owned())
-        .filter(|name| !name.is_empty())
-        .map(MarkerIconStyle::new)
-        .unwrap_or_else(|| default_style.icon.clone());
+        .and_then(|definition| {
+            (!definition.name.trim().is_empty()).then(|| MarkerIconStyle::new(definition.name.clone()))
+        })
+        .unwrap_or_else(|| MarkerIconStyle::new(point.record.mark_type.to_string()));
     let type_label = point
         .type_definition
         .as_ref()

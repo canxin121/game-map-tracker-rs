@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gpui::{
     AnyElement, Bounds, ClickEvent, ClipboardItem, ContentMask, Context, ImgResourceLoader,
@@ -3809,6 +3809,7 @@ fn paint_bwiki_map_overlay(
         bwiki_resources,
         visible_mark_types,
         selected_keys,
+        planner_preview_points,
         planner_preview_worlds,
         planner_color_hex,
         planner_lasso_selection,
@@ -3819,6 +3820,7 @@ fn paint_bwiki_map_overlay(
             this.bwiki_resources.clone(),
             this.bwiki_visible_mark_types.clone(),
             this.bwiki_planner_selected_points.clone(),
+            this.bwiki_planner_preview_points(),
             this.bwiki_planner_preview_worlds(),
             this.bwiki_planner_route_color_hex(cx),
             this.bwiki_planner_lasso_selection.clone(),
@@ -3829,10 +3831,18 @@ fn paint_bwiki_map_overlay(
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(dataset) = dataset.as_ref() {
                 let preview_color = gpui::rgb(parse_hex_color(&planner_color_hex, 0xff6b6b));
+                let preview_keys = planner_preview_points
+                    .iter()
+                    .map(|point| point.key.clone())
+                    .collect::<HashSet<_>>();
                 let visible_definitions = dataset
                     .types
                     .iter()
                     .filter(|item| visible_mark_types.contains(&item.mark_type))
+                    .collect::<Vec<_>>();
+                let hidden_preview_points = planner_preview_points
+                    .iter()
+                    .filter(|point| !visible_mark_types.contains(&point.record.mark_type))
                     .collect::<Vec<_>>();
                 let icon_images = visible_definitions
                     .iter()
@@ -3848,6 +3858,23 @@ fn paint_bwiki_map_overlay(
                                         .and_then(|result| result.ok())
                                 }),
                         )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let hidden_preview_icon_images = hidden_preview_points
+                    .iter()
+                    .filter_map(|point| {
+                        let definition = point.type_definition.as_ref()?;
+                        Some((
+                            definition.mark_type,
+                            bwiki_resources
+                                .ensure_icon_path(definition.mark_type, &definition.icon_url)
+                                .and_then(|path| {
+                                    let resource = gpui::Resource::from(path);
+                                    window
+                                        .use_asset::<ImgResourceLoader>(&resource, cx)
+                                        .and_then(|result| result.ok())
+                                }),
+                        ))
                     })
                     .collect::<BTreeMap<_, _>>();
 
@@ -3930,8 +3957,9 @@ fn paint_bwiki_map_overlay(
                             bounds.origin.x + px(screen.x),
                             bounds.origin.y + px(screen.y),
                         );
-                        let highlighted = selected_keys
-                            .contains(&super::BwikiPointKey::from_record(point_record));
+                        let key = super::BwikiPointKey::from_record(point_record);
+                        let highlighted =
+                            selected_keys.contains(&key) || preview_keys.contains(&key);
                         paint_bwiki_style_marker(
                             window,
                             anchor,
@@ -3957,6 +3985,34 @@ fn paint_bwiki_map_overlay(
                             },
                         );
                     }
+                }
+
+                for preview_point in hidden_preview_points {
+                    let screen = camera.world_to_screen(preview_point.record.world);
+                    if screen.x < -BWIKI_MARKER_CULL_MARGIN
+                        || screen.y < -BWIKI_MARKER_CULL_MARGIN
+                        || screen.x > bounds_width + BWIKI_MARKER_CULL_MARGIN
+                        || screen.y > bounds_height + BWIKI_MARKER_CULL_MARGIN
+                    {
+                        continue;
+                    }
+
+                    let anchor = point(
+                        bounds.origin.x + px(screen.x),
+                        bounds.origin.y + px(screen.y),
+                    );
+                    let mark_type = preview_point.record.mark_type;
+                    let preview_definition = preview_point.type_definition.as_ref();
+                    paint_bwiki_style_marker(window, anchor, true, tokens, |window, bounds| {
+                        if let Some(definition) = preview_definition
+                            && let Some(Some(image)) =
+                                hidden_preview_icon_images.get(&definition.mark_type)
+                        {
+                            let _ = window.paint_image(bounds, 0.0.into(), image.clone(), 0, false);
+                        } else {
+                            paint_bwiki_placeholder_marker(window, anchor, mark_type, tokens);
+                        }
+                    });
                 }
             }
         });
