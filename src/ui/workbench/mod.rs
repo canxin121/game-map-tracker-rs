@@ -74,6 +74,7 @@ pub(super) struct TrackerMapRenderSnapshot {
     pub(super) selected_group_id: Option<RouteId>,
     pub(super) selected_point_id: Option<RoutePointId>,
     pub(super) follow_point: Option<WorldPoint>,
+    pub(super) pip_always_on_top: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1278,6 +1279,7 @@ impl TrackerWorkbench {
                         .map(|position| position.world)
                 })
                 .flatten(),
+            pip_always_on_top: self.tracker_pip_always_on_top,
         }
     }
 
@@ -4291,14 +4293,14 @@ impl TrackerWorkbench {
     }
 
     pub(super) fn toggle_tracker_pip_always_on_top(&mut self, cx: &mut Context<Self>) {
-        self.tracker_pip_always_on_top = !self.tracker_pip_always_on_top;
-        let always_on_top = self.tracker_pip_always_on_top;
+        let always_on_top = !self.tracker_pip_always_on_top;
 
         if let Some(handle) = self.tracker_pip_window {
             match handle.update(cx, |_, pip_window, _| {
                 apply_window_topmost(pip_window, always_on_top)
             }) {
                 Ok(Ok(())) => {
+                    self.tracker_pip_always_on_top = always_on_top;
                     self.status_text = if always_on_top {
                         "追踪画中画已置顶。".into()
                     } else {
@@ -4314,6 +4316,7 @@ impl TrackerWorkbench {
                 }
             }
         } else {
+            self.tracker_pip_always_on_top = always_on_top;
             self.status_text = if always_on_top {
                 "已记住追踪画中画置顶设置，下次打开时生效。".into()
             } else {
@@ -4322,13 +4325,23 @@ impl TrackerWorkbench {
         }
     }
 
+    pub(super) fn set_tracker_pip_always_on_top_from_pip(&mut self, always_on_top: bool) {
+        self.tracker_pip_always_on_top = always_on_top;
+        self.status_text = if always_on_top {
+            "追踪画中画已置顶。".into()
+        } else {
+            "追踪画中画已取消置顶。".into()
+        };
+    }
+
     fn open_tracker_pip_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tracker_pip_pending_open = false;
         if self.tracker_pip_window.is_some() {
             return;
         }
 
-        let workbench_for_close = cx.entity().downgrade();
+        let workbench = cx.entity().downgrade();
+        let workbench_for_close = workbench.clone();
         let initial_camera = self.tracker_map_view.camera;
         let initial_focus = self
             .preview_position
@@ -4342,16 +4355,13 @@ impl TrackerWorkbench {
             .unwrap_or_else(|| self.default_tracker_pip_window_bounds(window));
         let open_result = cx.open_window(
             WindowOptions {
-                titlebar: Some(gpui::TitlebarOptions {
-                    title: Some("追踪画中画".into()),
-                    appears_transparent: false,
-                    ..Default::default()
-                }),
+                titlebar: None,
                 window_bounds: Some(initial_bounds),
                 kind: WindowKind::Normal,
                 is_movable: true,
                 is_resizable: true,
                 is_minimizable: false,
+                window_decorations: Some(gpui::WindowDecorations::Client),
                 window_min_size: Some(gpui::size(gpui::px(280.0), gpui::px(240.0))),
                 ..Default::default()
             },
@@ -4367,6 +4377,7 @@ impl TrackerWorkbench {
 
                 cx.new(|cx| {
                     TrackerPipWindow::new(
+                        workbench.clone(),
                         initial_camera,
                         initial_focus,
                         initial_snapshot.clone(),

@@ -1,9 +1,10 @@
 use gpui::{
-    Bounds, Context, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, Styled as _, Window, canvas,
-    div,
+    Bounds, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas,
+    div, px,
 };
-use gpui_component::ActiveTheme as _;
+use gpui_component::{ActiveTheme as _, tooltip::Tooltip};
 
 use crate::{
     domain::geometry::{MapCamera, WorldPoint},
@@ -12,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    TrackerMapRenderSnapshot,
+    TrackerMapRenderSnapshot, TrackerWorkbench,
     panels::{paint_bwiki_tile_layers, paint_tracker_map_overlay_snapshot},
     theme::WorkbenchThemeTokens,
 };
@@ -20,14 +21,17 @@ use super::{
 const MAP_CLICK_DRAG_THRESHOLD: f32 = 4.0;
 
 pub(super) struct TrackerPipWindow {
+    workbench: gpui::WeakEntity<TrackerWorkbench>,
     viewport: MapViewportState,
     snapshot: TrackerMapRenderSnapshot,
+    always_on_top: bool,
     bwiki_resources: BwikiResourceManager,
     bwiki_tile_cache: gpui::Entity<TileImageCache>,
 }
 
 impl TrackerPipWindow {
     pub(super) fn new(
+        workbench: gpui::WeakEntity<TrackerWorkbench>,
         initial_camera: MapCamera,
         initial_focus: Option<WorldPoint>,
         snapshot: TrackerMapRenderSnapshot,
@@ -37,12 +41,14 @@ impl TrackerPipWindow {
         _: &mut Context<Self>,
     ) -> Self {
         Self {
+            workbench,
             viewport: MapViewportState {
                 camera: initial_camera,
                 pending_center: initial_focus,
                 needs_fit: false,
                 ..Default::default()
             },
+            always_on_top: snapshot.pip_always_on_top,
             snapshot,
             bwiki_resources,
             bwiki_tile_cache,
@@ -53,6 +59,7 @@ impl TrackerPipWindow {
         if let Some(point) = snapshot.follow_point {
             self.viewport.center_on_or_queue(point);
         }
+        self.always_on_top = snapshot.pip_always_on_top;
         self.snapshot = snapshot;
     }
 
@@ -108,6 +115,37 @@ impl TrackerPipWindow {
         self.viewport.reset_interaction_redraw();
         self.viewport.camera.zoom_at(anchor_x, anchor_y, delta);
     }
+
+    fn toggle_always_on_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = !self.always_on_top;
+        match apply_window_topmost(window, next) {
+            Ok(()) => {
+                self.always_on_top = next;
+                if let Some(workbench) = self.workbench.upgrade() {
+                    let _ = workbench.update(cx, |this, _| {
+                        this.set_tracker_pip_always_on_top_from_pip(next);
+                    });
+                }
+                cx.notify();
+            }
+            Err(error) => {
+                if let Some(workbench) = self.workbench.upgrade() {
+                    let _ = workbench.update(cx, |this, _| {
+                        this.status_text = format!("切换追踪画中画置顶失败：{error:#}").into();
+                    });
+                }
+            }
+        }
+    }
+
+    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(workbench) = self.workbench.upgrade() {
+            let _ = workbench.update(cx, |this, _| {
+                this.handle_tracker_pip_window_closed();
+            });
+        }
+        window.remove_window();
+    }
 }
 
 impl Render for TrackerPipWindow {
@@ -115,48 +153,180 @@ impl Render for TrackerPipWindow {
         let entity = cx.entity();
         let tokens = WorkbenchThemeTokens::from_theme(cx.theme());
 
-        div().size_full().bg(tokens.panel_deep_bg).child(
-            canvas(
-                move |_, _, _| (),
-                move |bounds, _, window, cx| {
-                    let (camera, snapshot, bwiki_resources, bwiki_tile_cache) =
-                        entity.update(cx, |this, _| {
-                            this.sync_view_state(
-                                f32::from(bounds.size.width),
-                                f32::from(bounds.size.height),
-                            );
-                            (
-                                this.viewport.camera,
-                                this.snapshot.clone(),
-                                this.bwiki_resources.clone(),
-                                this.bwiki_tile_cache.clone(),
-                            )
-                        });
+        div()
+            .size_full()
+            .relative()
+            .bg(tokens.panel_deep_bg)
+            .child(
+                canvas(
+                    move |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        let (camera, snapshot, bwiki_resources, bwiki_tile_cache) =
+                            entity.update(cx, |this, _| {
+                                this.sync_view_state(
+                                    f32::from(bounds.size.width),
+                                    f32::from(bounds.size.height),
+                                );
+                                (
+                                    this.viewport.camera,
+                                    this.snapshot.clone(),
+                                    this.bwiki_resources.clone(),
+                                    this.bwiki_tile_cache.clone(),
+                                )
+                            });
 
-                    paint_bwiki_tile_layers(
-                        window,
-                        bounds,
-                        cx,
-                        camera,
-                        &bwiki_resources,
-                        &bwiki_tile_cache,
-                        tokens.map_canvas_backdrop,
-                    );
-                    paint_tracker_map_overlay_snapshot(
-                        window,
-                        bounds,
-                        cx,
-                        camera,
-                        tokens,
-                        &snapshot,
-                        &bwiki_resources,
-                    );
-                    install_tracker_pip_navigation_handlers(window, entity.clone(), bounds);
-                },
+                        paint_bwiki_tile_layers(
+                            window,
+                            bounds,
+                            cx,
+                            camera,
+                            &bwiki_resources,
+                            &bwiki_tile_cache,
+                            tokens.map_canvas_backdrop,
+                        );
+                        paint_tracker_map_overlay_snapshot(
+                            window,
+                            bounds,
+                            cx,
+                            camera,
+                            tokens,
+                            &snapshot,
+                            &bwiki_resources,
+                        );
+                        install_tracker_pip_navigation_handlers(window, entity.clone(), bounds);
+                    },
+                )
+                .size_full(),
             )
-            .size_full(),
-        )
+            .child(pip_controls(self, cx, tokens))
     }
+}
+
+fn pip_controls(
+    this: &TrackerPipWindow,
+    cx: &mut Context<TrackerPipWindow>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .right(px(16.0))
+        .bottom(px(16.0))
+        .flex()
+        .items_center()
+        .gap_2()
+        .rounded_xl()
+        .bg(tokens.panel_bg.opacity(0.94))
+        .border_1()
+        .border_color(tokens.border_strong)
+        .px_3()
+        .py_3()
+        .shadow_xs()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_mouse_up(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .child(pip_control_button(
+            "tracker-pip-topmost-local",
+            tokens,
+            if this.always_on_top {
+                "取消置顶"
+            } else {
+                "置顶"
+            },
+            if this.always_on_top {
+                "让画中画恢复普通层级"
+            } else {
+                "让画中画保持在其他窗口上方"
+            },
+            if this.always_on_top {
+                PipControlTone::Primary
+            } else {
+                PipControlTone::Neutral
+            },
+            cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.toggle_always_on_top(window, cx);
+            }),
+        ))
+        .child(pip_control_button(
+            "tracker-pip-close-local",
+            tokens,
+            "关闭",
+            "关闭追踪画中画",
+            PipControlTone::Danger,
+            cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.close_window(window, cx);
+            }),
+        ))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PipControlTone {
+    Neutral,
+    Primary,
+    Danger,
+}
+
+fn pip_control_button(
+    id: impl Into<SharedString>,
+    tokens: WorkbenchThemeTokens,
+    label: &'static str,
+    tooltip: impl Into<SharedString>,
+    tone: PipControlTone,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let tooltip = tooltip.into();
+    let (background, hover_background, border_color) = match tone {
+        PipControlTone::Neutral => (
+            tokens.toolbar_button_bg,
+            tokens.toolbar_button_hover_bg,
+            tokens.border,
+        ),
+        PipControlTone::Primary => (
+            tokens.toolbar_button_primary_bg,
+            tokens.toolbar_button_primary_hover_bg,
+            tokens.border_strong,
+        ),
+        PipControlTone::Danger => (
+            tokens.toolbar_button_danger_bg,
+            tokens.toolbar_button_danger_hover_bg,
+            tokens.border_strong,
+        ),
+    };
+
+    div()
+        .id(id.into())
+        .h(px(32.0))
+        .px_3()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_lg()
+        .bg(background)
+        .border_1()
+        .border_color(border_color)
+        .cursor_pointer()
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .hover(move |style| style.bg(hover_background))
+        .active(|style| style.opacity(0.92))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_mouse_up(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_click(move |event, window, cx| {
+            cx.stop_propagation();
+            on_click(event, window, cx);
+        })
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(tokens.app_fg)
+                .child(label),
+        )
 }
 
 fn install_tracker_pip_navigation_handlers(
