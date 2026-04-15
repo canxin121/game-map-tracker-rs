@@ -1,12 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-
-#[cfg(all(
-    feature = "ai-candle",
-    any(feature = "ai-candle-cuda", feature = "ai-candle-metal")
-))]
-use anyhow::Context as _;
 #[cfg(feature = "ai-candle")]
 use image::GrayImage;
 #[cfg(feature = "ai-candle")]
@@ -14,19 +8,20 @@ use std::path::PathBuf;
 
 #[cfg(feature = "ai-candle")]
 use crate::{
-    config::{AiDevicePreference, AiTrackingConfig, AppConfig},
+    config::{AiTrackingConfig, AppConfig},
     domain::{
         geometry::WorldPoint,
         tracker::{PositionEstimate, TrackingSource},
     },
     tracking::{
+        candle_support::{available_candle_backends, candle_device_label, select_candle_device},
         capture::{CaptureSource, DesktopCapture},
         debug::{DebugField, TrackingDebugSnapshot},
         vision::{
             DebugOverlay, MapPyramid, MaskSet, MatchCandidate, SearchCrop, SearchStage,
             TrackerState, build_debug_snapshot, center_to_scaled, crop_around_center,
-            downscale_gray, load_logic_map_pyramid, preview_heatmap, preview_image,
-            preview_mask_image,
+            downscale_gray, load_logic_map_pyramid, mask_as_unit_vec, preview_heatmap,
+            preview_image, preview_mask_image,
         },
     },
 };
@@ -37,7 +32,7 @@ use crate::{
 };
 
 #[cfg(feature = "ai-candle")]
-use candle_core::{DType, Device, DeviceLocation, Tensor};
+use candle_core::{DType, Device, Tensor};
 #[cfg(feature = "ai-candle")]
 use candle_nn::{Conv2d, Conv2dConfig, Module, VarBuilder};
 
@@ -620,7 +615,7 @@ impl CandleTrackerInner {
         let template = self.encoder.encode(template)?;
         let (_, channels, _, _) = search.dims4()?;
         let mask = Tensor::from_vec(
-            repeated_mask(mask, channels),
+            mask_as_unit_vec(mask, channels),
             (1, channels, mask.height() as usize, mask.width() as usize),
             &self.encoder.device,
         )?;
@@ -676,86 +671,6 @@ impl CandleTrackerInner {
             accepted,
         })
     }
-}
-
-#[cfg(feature = "ai-candle")]
-fn repeated_mask(mask: &GrayImage, channels: usize) -> Vec<f32> {
-    let single = mask
-        .pixels()
-        .map(|pixel| f32::from(pixel.0[0]) / 255.0)
-        .collect::<Vec<_>>();
-    let mut values = Vec::with_capacity(single.len() * channels);
-    for _ in 0..channels {
-        values.extend(single.iter().copied());
-    }
-    values
-}
-
-#[cfg(feature = "ai-candle")]
-fn select_candle_device(config: &AiTrackingConfig) -> Result<Device> {
-    match config.device {
-        AiDevicePreference::Cpu => Ok(Device::Cpu),
-        AiDevicePreference::Cuda => build_cuda_device(config.device_index),
-        AiDevicePreference::Metal => build_metal_device(config.device_index),
-    }
-}
-
-#[cfg(feature = "ai-candle")]
-fn candle_device_label(device: &Device) -> String {
-    match device.location() {
-        DeviceLocation::Cpu => "CPU".to_owned(),
-        DeviceLocation::Cuda { gpu_id } => format!("CUDA:{gpu_id}"),
-        DeviceLocation::Metal { gpu_id } => format!("Metal:{gpu_id}"),
-    }
-}
-
-#[cfg(feature = "ai-candle")]
-fn available_candle_backends() -> &'static str {
-    #[cfg(all(feature = "ai-candle-cuda", feature = "ai-candle-metal"))]
-    {
-        return "CPU / CUDA / Metal";
-    }
-
-    #[cfg(all(feature = "ai-candle-cuda", not(feature = "ai-candle-metal")))]
-    {
-        return "CPU / CUDA";
-    }
-
-    #[cfg(all(not(feature = "ai-candle-cuda"), feature = "ai-candle-metal"))]
-    {
-        return "CPU / Metal";
-    }
-
-    #[cfg(all(not(feature = "ai-candle-cuda"), not(feature = "ai-candle-metal")))]
-    {
-        "CPU"
-    }
-}
-
-#[cfg(all(feature = "ai-candle", feature = "ai-candle-cuda"))]
-fn build_cuda_device(ordinal: usize) -> Result<Device> {
-    Device::new_cuda(ordinal)
-        .with_context(|| format!("无法初始化 CUDA 设备 {ordinal}，请检查驱动、运行库和显卡状态"))
-}
-
-#[cfg(all(feature = "ai-candle", not(feature = "ai-candle-cuda")))]
-fn build_cuda_device(_ordinal: usize) -> Result<Device> {
-    anyhow::bail!(
-        "配置选择了 CUDA 设备，但当前二进制未启用 `ai-candle-cuda` 特性；请使用 `cargo run --features ai-candle-cuda` 重新构建"
-    )
-}
-
-#[cfg(all(feature = "ai-candle", feature = "ai-candle-metal"))]
-fn build_metal_device(ordinal: usize) -> Result<Device> {
-    Device::new_metal(ordinal)
-        .with_context(|| format!("无法初始化 Metal 设备 {ordinal}，请检查系统和 GPU 支持状态"))
-}
-
-#[cfg(all(feature = "ai-candle", not(feature = "ai-candle-metal")))]
-fn build_metal_device(_ordinal: usize) -> Result<Device> {
-    anyhow::bail!(
-        "配置选择了 Metal 设备，但当前二进制未启用 `ai-candle-metal` 特性；请使用 `cargo run --features ai-candle-metal` 重新构建"
-    )
 }
 
 impl TrackingWorker for CandleTrackerWorker {

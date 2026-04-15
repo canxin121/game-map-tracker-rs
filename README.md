@@ -102,8 +102,8 @@ src/ui/                 GPUI 工作台、分页导航、双地图子页、标记
 
 - 纯 Rust 追踪运行时
   - 使用 `screenshots` 抓取桌面小地图
-  - 使用 `image` / `imageproc` 进行灰度化、直方图均衡、模板匹配
-  - 使用 `candle-core` / `candle-nn` 进行固定卷积特征编码与张量匹配
+  - 使用 `image` / `imageproc` 进行灰度化、缩放、直方图均衡和搜索裁剪
+  - 使用 `candle-core` / `candle-nn` 进行模板匹配张量计算与固定卷积特征编码
   - 统一状态机：`LocalTrack`、`GlobalRelocate`、`InertialHold`
   - 后台线程通过 channel 把状态、坐标和调试图送回 GPUI
 
@@ -119,6 +119,7 @@ src/ui/                 GPUI 工作台、分页导航、双地图子页、标记
 - 本地锁定时，在上次坐标附近做局部匹配。
 - 丢失时，切回全局低分辨率重定位，再局部精修。
 - 连续失败时，进入惯性保位，超过阈值后重新全局搜。
+- 匹配打分使用 Candle 重写的 masked normalized cross-correlation，可在 `cpu / cuda / metal` 间按运行时配置切换。
 
 `ConvolutionFeatureMatch` 使用卷积特征 + 张量相似度后端：
 
@@ -165,6 +166,8 @@ data/
 - `TEMPLATE_GLOBAL_MATCH_THRESHOLD`
 - `TEMPLATE_MASK_OUTER_RADIUS`
 - `TEMPLATE_MASK_INNER_RADIUS`
+- `TEMPLATE_DEVICE`
+- `TEMPLATE_DEVICE_INDEX`
 
 卷积特征匹配后端支持：
 
@@ -180,6 +183,12 @@ data/
 - `AI_WEIGHTS_PATH`
 
 `AI_DEVICE` 支持 `cpu`、`cuda`、`metal`，但运行时只能切换到当前二进制里实际编进来的后端。默认构建不会自动包含 GPU 后端，因此：
+
+- 默认构建可切换 `cpu`
+- `cargo run --features ai-candle-cuda` 可切换 `cpu / cuda`
+- `cargo run --features ai-candle-metal` 可切换 `cpu / metal`
+
+`TEMPLATE_DEVICE` 也支持 `cpu`、`cuda`、`metal`，遵循同样的构建约束：
 
 - 默认构建可切换 `cpu`
 - `cargo run --features ai-candle-cuda` 可切换 `cpu / cuda`

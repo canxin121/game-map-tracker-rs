@@ -129,6 +129,8 @@ pub(super) struct ConfigFormInputs {
     pub(super) template_global_match_threshold: gpui::Entity<InputState>,
     pub(super) template_mask_outer_radius: gpui::Entity<InputState>,
     pub(super) template_mask_inner_radius: gpui::Entity<InputState>,
+    pub(super) template_device: gpui::Entity<InputState>,
+    pub(super) template_device_index: gpui::Entity<InputState>,
     pub(super) network_http_port: gpui::Entity<InputState>,
     pub(super) network_websocket_port: gpui::Entity<InputState>,
 }
@@ -171,6 +173,8 @@ impl ConfigFormInputs {
             template_global_match_threshold: config_input(window, cx, "global_match_threshold"),
             template_mask_outer_radius: config_input(window, cx, "mask_outer_radius"),
             template_mask_inner_radius: config_input(window, cx, "mask_inner_radius"),
+            template_device: config_input(window, cx, "cpu / cuda / metal"),
+            template_device_index: config_input(window, cx, "device_index"),
             network_http_port: config_input(window, cx, "http_port"),
             network_websocket_port: config_input(window, cx, "websocket_port"),
         }
@@ -650,6 +654,12 @@ impl ConfigDraft {
                     mask_inner_radius: parse_input_value(
                         &form.template_mask_inner_radius,
                         "template.mask_inner_radius",
+                        cx,
+                    )?,
+                    device: parse_enum_input_value(&form.template_device, "template.device", cx)?,
+                    device_index: parse_input_value(
+                        &form.template_device_index,
+                        "template.device_index",
                         cx,
                     )?,
                 },

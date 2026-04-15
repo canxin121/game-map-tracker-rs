@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod candle_support;
 pub mod capture;
 pub mod debug;
 pub mod runtime;

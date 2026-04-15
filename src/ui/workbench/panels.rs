@@ -2226,6 +2226,10 @@ fn settings_config_page(
                             &this.config_form.template_mask_inner_radius,
                         )
                         .into_any_element(),
+                        labeled_input(tokens, "执行设备", &this.config_form.template_device)
+                            .into_any_element(),
+                        labeled_input(tokens, "设备序号", &this.config_form.template_device_index)
+                            .into_any_element(),
                     ])
                     .into_any_element(),
             ],

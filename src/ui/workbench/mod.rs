@@ -4309,6 +4309,18 @@ impl TrackerWorkbench {
             cx,
         );
         set_input_value(
+            &self.config_form.template_device,
+            config.template.device.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.template_device_index,
+            config.template.device_index.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
             &self.config_form.network_http_port,
             config.network.http_port.to_string(),
             window,

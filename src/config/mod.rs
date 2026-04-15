@@ -69,6 +69,8 @@ pub struct TemplateTrackingConfig {
     pub global_match_threshold: f32,
     pub mask_outer_radius: f32,
     pub mask_inner_radius: f32,
+    pub device: AiDevicePreference,
+    pub device_index: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -185,6 +187,8 @@ impl Default for TemplateTrackingConfig {
             global_match_threshold: 0.45,
             mask_outer_radius: 0.96,
             mask_inner_radius: 0.16,
+            device: AiDevicePreference::default(),
+            device_index: 0,
         }
     }
 }
