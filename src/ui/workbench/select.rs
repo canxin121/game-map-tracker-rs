@@ -782,12 +782,16 @@ where
                                         .child(Input::new(&self.search_input))
                                         .child(
                                             div()
+                                                .w_full()
+                                                .min_w_0()
                                                 .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .gap_2()
+                                                .flex_col()
+                                                .items_start()
+                                                .gap_1p5()
                                                 .child(
                                                     div()
+                                                        .w_full()
+                                                        .min_w_0()
                                                         .text_xs()
                                                         .text_color(cx.theme().muted_foreground)
                                                         .child(format!(
@@ -799,8 +803,12 @@ where
                                                 )
                                                 .child(
                                                     div()
+                                                        .w_full()
+                                                        .min_w_0()
                                                         .flex()
                                                         .items_center()
+                                                        .justify_end()
+                                                        .flex_wrap()
                                                         .gap_1()
                                                         .child(pager_button(
                                                             0,
@@ -835,7 +843,7 @@ where
                                                             cx,
                                                         ))
                                                         .child(
-                                                            div().w(px(58.0)).child(
+                                                            div().w(px(58.0)).min_w(px(58.0)).child(
                                                                 Input::new(&self.page_input)
                                                                     .appearance(false)
                                                                     .px(px(0.0))

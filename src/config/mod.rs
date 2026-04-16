@@ -27,16 +27,6 @@ pub struct LocalSearchConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
-pub struct SiftTrackingConfig {
-    pub refresh_rate_ms: u64,
-    pub clahe_limit: f32,
-    pub match_ratio: f32,
-    pub min_match_count: usize,
-    pub ransac_threshold: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(default)]
 pub struct AiTrackingConfig {
     pub refresh_rate_ms: u64,
     pub confidence_threshold: f32,
@@ -89,7 +79,6 @@ pub struct AppConfig {
     pub max_lost_frames: u32,
     pub teleport_link_distance: f32,
     pub local_search: LocalSearchConfig,
-    pub sift: SiftTrackingConfig,
     pub ai: AiTrackingConfig,
     pub template: TemplateTrackingConfig,
     pub network: NetworkConfig,
@@ -113,18 +102,6 @@ impl Default for LocalSearchConfig {
             radius_px: 280,
             lock_fail_threshold: 5,
             max_accepted_jump_px: 500,
-        }
-    }
-}
-
-impl Default for SiftTrackingConfig {
-    fn default() -> Self {
-        Self {
-            refresh_rate_ms: 50,
-            clahe_limit: 3.0,
-            match_ratio: 0.9,
-            min_match_count: 5,
-            ransac_threshold: 8.0,
         }
     }
 }
@@ -211,7 +188,6 @@ impl Default for AppConfig {
             max_lost_frames: 50,
             teleport_link_distance: DEFAULT_TELEPORT_LINK_DISTANCE,
             local_search: LocalSearchConfig::default(),
-            sift: SiftTrackingConfig::default(),
             ai: AiTrackingConfig::default(),
             template: TemplateTrackingConfig::default(),
             network: NetworkConfig::default(),

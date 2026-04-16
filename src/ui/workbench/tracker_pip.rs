@@ -146,6 +146,14 @@ impl TrackerPipWindow {
         }
         window.remove_window();
     }
+
+    fn toggle_minimap_region_picker(&mut self, cx: &mut Context<Self>) {
+        if let Some(workbench) = self.workbench.upgrade() {
+            let _ = workbench.update(cx, |this, cx| {
+                this.toggle_minimap_region_picker_from_pip(cx);
+            });
+        }
+    }
 }
 
 impl Render for TrackerPipWindow {
@@ -244,6 +252,16 @@ fn pip_titlebar(
                 .on_mouse_up(MouseButton::Left, |_, _, cx| {
                     cx.stop_propagation();
                 })
+                .child(pip_control_button(
+                    "tracker-pip-minimap-picker-local",
+                    tokens,
+                    "取区",
+                    "重新选择小地图圆形截图范围",
+                    PipControlTone::Toggle(false),
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.toggle_minimap_region_picker(cx);
+                    }),
+                ))
                 .child(pip_control_button(
                     "tracker-pip-topmost-local",
                     tokens,

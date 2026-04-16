@@ -7,6 +7,8 @@ param(
 
     [string]$ComputeCap,
 
+    [switch]$Release,
+
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$CargoArgs
 )
@@ -138,6 +140,64 @@ function Add-EnvironmentFlag {
     [Environment]::SetEnvironmentVariable($Name, $next.Trim())
 }
 
+function Resolve-TargetRoot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $targetDir = [Environment]::GetEnvironmentVariable("CARGO_TARGET_DIR")
+    if ([string]::IsNullOrWhiteSpace($targetDir)) {
+        return (Join-Path $RepoRoot "target")
+    }
+
+    if ([System.IO.Path]::IsPathRooted($targetDir)) {
+        return $targetDir
+    }
+
+    Join-Path $RepoRoot $targetDir
+}
+
+function Assert-BuildOutputUnlocked {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("build", "check", "run", "test")]
+        [string]$Command,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$Release
+    )
+
+    if ($Command -notin @("build", "run")) {
+        return
+    }
+
+    $profileDir = if ($Release) { "release" } else { "debug" }
+    $targetRoot = Resolve-TargetRoot -RepoRoot $RepoRoot
+    $binaryPath = [System.IO.Path]::GetFullPath(
+        (Join-Path (Join-Path $targetRoot $profileDir) "game-map-tracker-rs.exe")
+    )
+
+    $runningProcesses = @(Get-Process -Name "game-map-tracker-rs" -ErrorAction SilentlyContinue | Where-Object {
+        try {
+            -not [string]::IsNullOrWhiteSpace($_.Path) -and
+                ([System.IO.Path]::GetFullPath($_.Path) -eq $binaryPath)
+        } catch {
+            $false
+        }
+    })
+
+    if ($runningProcesses.Count -eq 0) {
+        return
+    }
+
+    $processIds = ($runningProcesses | Select-Object -ExpandProperty Id) -join ", "
+    throw "The build output is currently locked by a running app instance: $binaryPath (PID: $processIds). Close the app or set CARGO_TARGET_DIR to another directory, then rerun the build."
+}
+
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $vsDevCmd = Find-VsDevCmd
 $resolvedCudaRoot = Resolve-CudaRoot -RequestedRoot $CudaRoot
@@ -160,7 +220,15 @@ if (-not [string]::IsNullOrWhiteSpace($ComputeCap)) {
     [Environment]::SetEnvironmentVariable("CUDA_COMPUTE_CAP", $ComputeCap)
 }
 
-$fullCargoArgs = @($Command, "--features", "ai-candle-cuda") + $CargoArgs
+$fullCargoArgs = @($Command, "--features", "ai-candle-cuda")
+if ($Release) {
+    $fullCargoArgs += "--release"
+}
+foreach ($cargoArg in @($CargoArgs)) {
+    if (-not [string]::IsNullOrWhiteSpace($cargoArg)) {
+        $fullCargoArgs += $cargoArg
+    }
+}
 
 Write-Host "Visual Studio env: $vsDevCmd"
 Write-Host "CUDA root: $resolvedCudaRoot"
@@ -172,6 +240,7 @@ Write-Host ("cargo " + ($fullCargoArgs -join " "))
 
 Push-Location $repoRoot
 try {
+    Assert-BuildOutputUnlocked -RepoRoot $repoRoot -Command $Command -Release $Release.IsPresent
     & cargo @fullCargoArgs
     exit $LASTEXITCODE
 } finally {

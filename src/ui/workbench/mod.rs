@@ -22,7 +22,7 @@ use gpui::{
 use gpui_component::input::InputEvent;
 
 use crate::{
-    config::{AppConfig, CONFIG_FILE_NAME, save_config},
+    config::{AiDevicePreference, AppConfig, CONFIG_FILE_NAME, save_config},
     domain::{
         geometry::WorldPoint,
         marker::{MarkerIconStyle, MarkerStyle},
@@ -36,17 +36,22 @@ use crate::{
         WorkspaceLoadReport, WorkspaceSnapshot, default_map_dimensions,
     },
     tracking::{
-        TrackerSession, TrackingEvent, debug::TrackingDebugSnapshot, spawn_tracker_session,
+        TrackerSession, TrackingEvent,
+        candle_support::{
+            available_candle_backend_preferences, available_candle_device_descriptors,
+        },
+        debug::TrackingDebugSnapshot,
+        spawn_tracker_session,
     },
     ui::tile_cache::TileImageCache,
 };
 
 use self::{
     forms::{
-        BwikiIconPickerItem, ConfigDraft, ConfigFormInputs, GroupDraft, GroupFormInputs,
-        GroupInlineEditInputs, MarkerDraft, MarkerFormInputs, MarkerGroupPickerItem,
-        PagedListState, PlannerRouteDraft, PointReorderTargetItem, RoutePlannerFormInputs,
-        read_input_value, set_input_value,
+        BwikiIconPickerItem, ConfigDraft, ConfigFormInputs, DeviceIndexPickerItem,
+        DevicePreferencePickerItem, GroupDraft, GroupFormInputs, GroupInlineEditInputs,
+        MarkerDraft, MarkerFormInputs, MarkerGroupPickerItem, PagedListState, PlannerRouteDraft,
+        PointReorderTargetItem, RoutePlannerFormInputs, read_input_value, set_input_value,
     },
     minimap_picker::MinimapRegionPicker,
     page::{MapPage, SettingsPage, WorkbenchPage},
@@ -304,6 +309,7 @@ fn screen_bounds_contains(bounds: Bounds<Pixels>, x: f32, y: f32) -> bool {
 }
 
 pub struct TrackerWorkbench {
+    main_window_handle: AnyWindowHandle,
     pub(super) project_root: SharedString,
     pub(super) workspace: Arc<WorkspaceSnapshot>,
     pub(super) tracker_session: Option<TrackerSession>,
@@ -360,6 +366,14 @@ pub struct TrackerWorkbench {
     bwiki_planner_form: RoutePlannerFormInputs,
     bwiki_planner_icon: MarkerIconStyle,
     bwiki_planner_icon_picker: gpui::Entity<SelectState<BwikiIconPickerItem>>,
+    ai_device_preference: AiDevicePreference,
+    ai_device_index: usize,
+    ai_device_picker: gpui::Entity<SelectState<DevicePreferencePickerItem>>,
+    ai_device_index_picker: gpui::Entity<SelectState<DeviceIndexPickerItem>>,
+    template_device_preference: AiDevicePreference,
+    template_device_index: usize,
+    template_device_picker: gpui::Entity<SelectState<DevicePreferencePickerItem>>,
+    template_device_index_picker: gpui::Entity<SelectState<DeviceIndexPickerItem>>,
     marker_group_picker: gpui::Entity<SelectState<MarkerGroupPickerItem>>,
     group_icon_picker: gpui::Entity<SelectState<BwikiIconPickerItem>>,
     marker_icon_picker: gpui::Entity<SelectState<BwikiIconPickerItem>>,
@@ -408,6 +422,42 @@ impl TrackerWorkbench {
         let marker_icon_picker = cx.new(|cx| SelectState::new(Vec::new(), None, 10, window, cx));
         let bwiki_planner_icon_picker =
             cx.new(|cx| SelectState::new(Vec::new(), None, 10, window, cx));
+        let ai_device_picker = cx.new(|cx| {
+            SelectState::new(
+                Self::device_preference_picker_items(),
+                Some(AiDevicePreference::Cpu),
+                6,
+                window,
+                cx,
+            )
+        });
+        let ai_device_index_picker = cx.new(|cx| {
+            SelectState::new(
+                Self::device_index_picker_items(AiDevicePreference::Cpu),
+                Some(0),
+                6,
+                window,
+                cx,
+            )
+        });
+        let template_device_picker = cx.new(|cx| {
+            SelectState::new(
+                Self::device_preference_picker_items(),
+                Some(AiDevicePreference::Cpu),
+                6,
+                window,
+                cx,
+            )
+        });
+        let template_device_index_picker = cx.new(|cx| {
+            SelectState::new(
+                Self::device_index_picker_items(AiDevicePreference::Cpu),
+                Some(0),
+                6,
+                window,
+                cx,
+            )
+        });
         let point_reorder_picker = cx.new(|cx| SelectState::new(Vec::new(), None, 8, window, cx));
         let bwiki_tile_cache =
             TileImageCache::new(BWIKI_TILE_CACHE_MAX_ITEMS, BWIKI_TILE_CACHE_MAX_BYTES, cx);
@@ -443,6 +493,7 @@ impl TrackerWorkbench {
                     .map(PositionEstimate::manual);
 
                 Self {
+                    main_window_handle: window.window_handle(),
                     project_root: project_root.to_string_lossy().into_owned().into(),
                     workspace,
                     tracker_session: None,
@@ -511,6 +562,14 @@ impl TrackerWorkbench {
                     bwiki_planner_form: bwiki_planner_form.clone(),
                     bwiki_planner_icon: MarkerIconStyle::default(),
                     bwiki_planner_icon_picker: bwiki_planner_icon_picker.clone(),
+                    ai_device_preference: AiDevicePreference::Cpu,
+                    ai_device_index: 0,
+                    ai_device_picker: ai_device_picker.clone(),
+                    ai_device_index_picker: ai_device_index_picker.clone(),
+                    template_device_preference: AiDevicePreference::Cpu,
+                    template_device_index: 0,
+                    template_device_picker: template_device_picker.clone(),
+                    template_device_index_picker: template_device_index_picker.clone(),
                     marker_group_picker: marker_group_picker.clone(),
                     group_icon_picker: group_icon_picker.clone(),
                     marker_icon_picker: marker_icon_picker.clone(),
@@ -543,6 +602,7 @@ impl TrackerWorkbench {
                     Self::new_bwiki_resource_manager(workspace.assets.bwiki_cache_dir.clone());
                 let bwiki_version = bwiki_resources.version();
                 Self {
+                    main_window_handle: window.window_handle(),
                     project_root: project_root.to_string_lossy().into_owned().into(),
                     workspace,
                     tracker_session: None,
@@ -608,6 +668,14 @@ impl TrackerWorkbench {
                     bwiki_planner_form,
                     bwiki_planner_icon: MarkerIconStyle::default(),
                     bwiki_planner_icon_picker,
+                    ai_device_preference: AiDevicePreference::Cpu,
+                    ai_device_index: 0,
+                    ai_device_picker,
+                    ai_device_index_picker,
+                    template_device_preference: AiDevicePreference::Cpu,
+                    template_device_index: 0,
+                    template_device_picker,
+                    template_device_index_picker,
                     marker_group_picker,
                     group_icon_picker,
                     marker_icon_picker,
@@ -831,6 +899,58 @@ impl TrackerWorkbench {
                 cx.notify();
             },
         ));
+        let ai_device_picker = workbench.ai_device_picker.clone();
+        workbench.subscriptions.push(cx.subscribe_in(
+            &ai_device_picker,
+            window,
+            |this, _, event: &SelectEvent<DevicePreferencePickerItem>, window, cx| {
+                let SelectEvent::Confirm(Some(device)) = event else {
+                    return;
+                };
+                this.ai_device_preference = *device;
+                this.sync_ai_device_picker_state(window, cx);
+                cx.notify();
+            },
+        ));
+        let ai_device_index_picker = workbench.ai_device_index_picker.clone();
+        workbench.subscriptions.push(cx.subscribe_in(
+            &ai_device_index_picker,
+            window,
+            |this, _, event: &SelectEvent<DeviceIndexPickerItem>, window, cx| {
+                let SelectEvent::Confirm(Some(device_index)) = event else {
+                    return;
+                };
+                this.ai_device_index = *device_index;
+                this.sync_ai_device_picker_state(window, cx);
+                cx.notify();
+            },
+        ));
+        let template_device_picker = workbench.template_device_picker.clone();
+        workbench.subscriptions.push(cx.subscribe_in(
+            &template_device_picker,
+            window,
+            |this, _, event: &SelectEvent<DevicePreferencePickerItem>, window, cx| {
+                let SelectEvent::Confirm(Some(device)) = event else {
+                    return;
+                };
+                this.template_device_preference = *device;
+                this.sync_template_device_picker_state(window, cx);
+                cx.notify();
+            },
+        ));
+        let template_device_index_picker = workbench.template_device_index_picker.clone();
+        workbench.subscriptions.push(cx.subscribe_in(
+            &template_device_index_picker,
+            window,
+            |this, _, event: &SelectEvent<DeviceIndexPickerItem>, window, cx| {
+                let SelectEvent::Confirm(Some(device_index)) = event else {
+                    return;
+                };
+                this.template_device_index = *device_index;
+                this.sync_template_device_picker_state(window, cx);
+                cx.notify();
+            },
+        ));
         let marker_icon_picker = workbench.marker_icon_picker.clone();
         workbench.subscriptions.push(cx.subscribe_in(
             &marker_icon_picker,
@@ -1009,6 +1129,131 @@ impl TrackerWorkbench {
             self.status_text = format!("{} {}", self.status_text, suffix).into();
         }
         self
+    }
+
+    fn device_preference_picker_items() -> Vec<DevicePreferencePickerItem> {
+        available_candle_backend_preferences()
+            .into_iter()
+            .filter(|preference| !available_candle_device_descriptors(*preference).is_empty())
+            .map(|preference| match preference {
+                AiDevicePreference::Cpu => DevicePreferencePickerItem::new(
+                    preference,
+                    "CPU",
+                    "始终可用",
+                    "cpu processor host",
+                ),
+                AiDevicePreference::Cuda => DevicePreferencePickerItem::new(
+                    preference,
+                    "CUDA",
+                    format!(
+                        "NVIDIA CUDA · {} 台设备",
+                        available_candle_device_descriptors(preference).len()
+                    ),
+                    "cuda nvidia gpu rtx geforce",
+                ),
+                AiDevicePreference::Metal => DevicePreferencePickerItem::new(
+                    preference,
+                    "Metal",
+                    format!(
+                        "Apple GPU · {} 台设备",
+                        available_candle_device_descriptors(preference).len()
+                    ),
+                    "metal apple gpu",
+                ),
+            })
+            .collect()
+    }
+
+    fn device_index_picker_items(preference: AiDevicePreference) -> Vec<DeviceIndexPickerItem> {
+        let prefix = match preference {
+            AiDevicePreference::Cpu => "CPU",
+            AiDevicePreference::Cuda => "CUDA",
+            AiDevicePreference::Metal => "Metal",
+        };
+
+        available_candle_device_descriptors(preference)
+            .into_iter()
+            .map(|device| {
+                let title = format!("{prefix} #{}", device.ordinal);
+                let subtitle = if preference == AiDevicePreference::Cpu {
+                    device.name.clone()
+                } else {
+                    format!("{} · {}", device.name, prefix)
+                };
+                DeviceIndexPickerItem::new(
+                    device.ordinal,
+                    title,
+                    subtitle,
+                    format!("{prefix} {} {}", device.ordinal, device.name),
+                )
+            })
+            .collect()
+    }
+
+    fn normalized_device_selection(
+        preference: AiDevicePreference,
+        device_index: usize,
+    ) -> (AiDevicePreference, usize) {
+        let preference_items = Self::device_preference_picker_items();
+        let fallback_preference = preference_items
+            .first()
+            .map(|item| item.value)
+            .unwrap_or(AiDevicePreference::Cpu);
+        let preference = if preference_items.iter().any(|item| item.value == preference) {
+            preference
+        } else {
+            fallback_preference
+        };
+
+        let index_items = Self::device_index_picker_items(preference);
+        let fallback_index = index_items.first().map(|item| item.value).unwrap_or(0);
+        let device_index = if index_items.iter().any(|item| item.value == device_index) {
+            device_index
+        } else {
+            fallback_index
+        };
+
+        (preference, device_index)
+    }
+
+    fn sync_ai_device_picker_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (preference, device_index) =
+            Self::normalized_device_selection(self.ai_device_preference, self.ai_device_index);
+        self.ai_device_preference = preference;
+        self.ai_device_index = device_index;
+
+        let preference_items = Self::device_preference_picker_items();
+        self.ai_device_picker.update(cx, |picker, cx| {
+            picker.set_items(preference_items.clone(), window, cx);
+            picker.set_selected_value(&preference, window, cx);
+        });
+
+        let index_items = Self::device_index_picker_items(preference);
+        self.ai_device_index_picker.update(cx, |picker, cx| {
+            picker.set_items(index_items.clone(), window, cx);
+            picker.set_selected_value(&device_index, window, cx);
+        });
+    }
+
+    fn sync_template_device_picker_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (preference, device_index) = Self::normalized_device_selection(
+            self.template_device_preference,
+            self.template_device_index,
+        );
+        self.template_device_preference = preference;
+        self.template_device_index = device_index;
+
+        let preference_items = Self::device_preference_picker_items();
+        self.template_device_picker.update(cx, |picker, cx| {
+            picker.set_items(preference_items.clone(), window, cx);
+            picker.set_selected_value(&preference, window, cx);
+        });
+
+        let index_items = Self::device_index_picker_items(preference);
+        self.template_device_index_picker.update(cx, |picker, cx| {
+            picker.set_items(index_items.clone(), window, cx);
+            picker.set_selected_value(&device_index, window, cx);
+        });
     }
 
     pub(super) fn is_tracking_active(&self) -> bool {
@@ -4171,36 +4416,6 @@ impl TrackerWorkbench {
             cx,
         );
         set_input_value(
-            &self.config_form.sift_refresh_rate_ms,
-            config.sift.refresh_rate_ms.to_string(),
-            window,
-            cx,
-        );
-        set_input_value(
-            &self.config_form.sift_clahe_limit,
-            config.sift.clahe_limit.to_string(),
-            window,
-            cx,
-        );
-        set_input_value(
-            &self.config_form.sift_match_ratio,
-            config.sift.match_ratio.to_string(),
-            window,
-            cx,
-        );
-        set_input_value(
-            &self.config_form.sift_min_match_count,
-            config.sift.min_match_count.to_string(),
-            window,
-            cx,
-        );
-        set_input_value(
-            &self.config_form.sift_ransac_threshold,
-            config.sift.ransac_threshold.to_string(),
-            window,
-            cx,
-        );
-        set_input_value(
             &self.config_form.ai_refresh_rate_ms,
             config.ai.refresh_rate_ms.to_string(),
             window,
@@ -4242,18 +4457,9 @@ impl TrackerWorkbench {
             window,
             cx,
         );
-        set_input_value(
-            &self.config_form.ai_device,
-            config.ai.device.to_string(),
-            window,
-            cx,
-        );
-        set_input_value(
-            &self.config_form.ai_device_index,
-            config.ai.device_index.to_string(),
-            window,
-            cx,
-        );
+        self.ai_device_preference = config.ai.device;
+        self.ai_device_index = config.ai.device_index;
+        self.sync_ai_device_picker_state(window, cx);
         set_input_value(
             &self.config_form.ai_weights_path,
             config.ai.weights_path.unwrap_or_default(),
@@ -4308,18 +4514,9 @@ impl TrackerWorkbench {
             window,
             cx,
         );
-        set_input_value(
-            &self.config_form.template_device,
-            config.template.device.to_string(),
-            window,
-            cx,
-        );
-        set_input_value(
-            &self.config_form.template_device_index,
-            config.template.device_index.to_string(),
-            window,
-            cx,
-        );
+        self.template_device_preference = config.template.device;
+        self.template_device_index = config.template.device_index;
+        self.sync_template_device_picker_state(window, cx);
         set_input_value(
             &self.config_form.network_http_port,
             config.network.http_port.to_string(),
@@ -4598,13 +4795,49 @@ impl TrackerWorkbench {
     ) {
         if let Some(handle) = self.minimap_region_picker_window.take() {
             self.status_text = "已取消小地图取区。".into();
-            let _ = handle.update(cx, |_, picker_window, _| {
-                picker_window.remove_window();
+            let _ = handle.update(cx, |_, picker_window, cx| {
+                picker_window.defer(cx, |picker_window, _| {
+                    picker_window.remove_window();
+                });
             });
             return;
         }
 
         self.open_minimap_region_picker(window, cx);
+    }
+
+    pub(super) fn toggle_minimap_region_picker_from_pip(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.minimap_region_picker_window.take() {
+            self.status_text = "已取消小地图取区。".into();
+            let _ = handle.update(cx, |_, picker_window, cx| {
+                picker_window.defer(cx, |picker_window, _| {
+                    picker_window.remove_window();
+                });
+            });
+            return;
+        }
+
+        let workbench = cx.entity().downgrade();
+        let workbench_for_error = workbench.clone();
+        let main_window_handle = self.main_window_handle;
+        cx.defer(move |cx| {
+            match main_window_handle.update(cx, move |_, main_window, cx| {
+                if let Some(workbench) = workbench.upgrade() {
+                    let _ = workbench.update(cx, |this, cx| {
+                        this.open_minimap_region_picker(main_window, cx);
+                    });
+                }
+            }) {
+                Ok(()) => {}
+                Err(_) => {
+                    if let Some(workbench) = workbench_for_error.upgrade() {
+                        let _ = workbench.update(cx, |this, _| {
+                            this.status_text = "主工作区窗口已经关闭，无法打开小地图取区。".into();
+                        });
+                    }
+                }
+            }
+        });
     }
 
     fn open_minimap_region_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4628,11 +4861,7 @@ impl TrackerWorkbench {
                 is_minimizable: false,
                 display_id: Some(display_id),
                 window_background: WindowBackgroundAppearance::Transparent,
-                titlebar: Some(gpui::TitlebarOptions {
-                    title: Some("小地图取区".into()),
-                    appears_transparent: true,
-                    ..Default::default()
-                }),
+                titlebar: None,
                 ..Default::default()
             },
             move |picker_window, cx| {
@@ -4654,7 +4883,8 @@ impl TrackerWorkbench {
         match picker_result {
             Ok(handle) => {
                 self.minimap_region_picker_window = Some(handle.into());
-                self.status_text = "小地图取区已开启：拖动选择屏幕区域，右键取消。".into();
+                self.status_text =
+                    "小地图取区已开启：先拖出圆，再拖圆心移动、拖圆边改半径，最后点确认。".into();
             }
             Err(error) => {
                 self.status_text = format!("打开小地图取区窗口失败：{error:#}").into();

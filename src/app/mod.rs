@@ -59,12 +59,14 @@ pub fn launch() -> Result<()> {
 fn configure_windows_capture_compatibility() {
     #[cfg(target_os = "windows")]
     {
+        const GAME_MAP_TRACKER_CAPTURE_COMPAT: &str = "GAME_MAP_TRACKER_CAPTURE_COMPAT";
         const GPUI_DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
 
-        if std::env::var_os(GPUI_DISABLE_DIRECT_COMPOSITION).is_none() {
-            // GPUI's DirectComposition path uses WS_EX_NOREDIRECTIONBITMAP, which some
-            // screen recorders fail to capture reliably and can cause the content layer
-            // to blink or disappear. Default to the more compatible swap-chain path.
+        if std::env::var_os(GPUI_DISABLE_DIRECT_COMPOSITION).is_none()
+            && std::env::var_os(GAME_MAP_TRACKER_CAPTURE_COMPAT).is_some()
+        {
+            // Transparent picker overlays require DirectComposition on Windows.
+            // Keep the older capture-compatibility path as an explicit opt-in.
             unsafe {
                 std::env::set_var(GPUI_DISABLE_DIRECT_COMPOSITION, "1");
             }

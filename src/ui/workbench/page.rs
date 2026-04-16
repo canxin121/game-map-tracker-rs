@@ -28,8 +28,6 @@ pub(super) enum SettingsPage {
     Runtime,
     #[display("截图与局部搜索")]
     Capture,
-    #[display("SIFT 特征匹配")]
-    Sift,
     #[display("卷积特征匹配")]
     Convolution,
     #[display("多尺度模板匹配")]

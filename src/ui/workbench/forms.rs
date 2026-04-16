@@ -6,8 +6,8 @@ use gpui_component::{input::InputState, select::SelectItem};
 
 use crate::{
     config::{
-        AiTrackingConfig, AppConfig, CaptureRegion, LocalSearchConfig, NetworkConfig,
-        SiftTrackingConfig, TemplateTrackingConfig,
+        AiDevicePreference, AiTrackingConfig, AppConfig, CaptureRegion, LocalSearchConfig,
+        NetworkConfig, TemplateTrackingConfig,
     },
     domain::{
         geometry::WorldPoint,
@@ -106,11 +106,6 @@ pub(super) struct ConfigFormInputs {
     pub(super) local_search_radius_px: gpui::Entity<InputState>,
     pub(super) local_search_lock_fail_threshold: gpui::Entity<InputState>,
     pub(super) local_search_max_accepted_jump_px: gpui::Entity<InputState>,
-    pub(super) sift_refresh_rate_ms: gpui::Entity<InputState>,
-    pub(super) sift_clahe_limit: gpui::Entity<InputState>,
-    pub(super) sift_match_ratio: gpui::Entity<InputState>,
-    pub(super) sift_min_match_count: gpui::Entity<InputState>,
-    pub(super) sift_ransac_threshold: gpui::Entity<InputState>,
     pub(super) ai_refresh_rate_ms: gpui::Entity<InputState>,
     pub(super) ai_confidence_threshold: gpui::Entity<InputState>,
     pub(super) ai_min_match_count: gpui::Entity<InputState>,
@@ -118,8 +113,6 @@ pub(super) struct ConfigFormInputs {
     pub(super) ai_scan_size: gpui::Entity<InputState>,
     pub(super) ai_scan_step: gpui::Entity<InputState>,
     pub(super) ai_track_radius: gpui::Entity<InputState>,
-    pub(super) ai_device: gpui::Entity<InputState>,
-    pub(super) ai_device_index: gpui::Entity<InputState>,
     pub(super) ai_weights_path: gpui::Entity<InputState>,
     pub(super) template_refresh_rate_ms: gpui::Entity<InputState>,
     pub(super) template_local_downscale: gpui::Entity<InputState>,
@@ -129,8 +122,6 @@ pub(super) struct ConfigFormInputs {
     pub(super) template_global_match_threshold: gpui::Entity<InputState>,
     pub(super) template_mask_outer_radius: gpui::Entity<InputState>,
     pub(super) template_mask_inner_radius: gpui::Entity<InputState>,
-    pub(super) template_device: gpui::Entity<InputState>,
-    pub(super) template_device_index: gpui::Entity<InputState>,
     pub(super) network_http_port: gpui::Entity<InputState>,
     pub(super) network_websocket_port: gpui::Entity<InputState>,
 }
@@ -150,11 +141,6 @@ impl ConfigFormInputs {
             local_search_radius_px: config_input(window, cx, "radius_px"),
             local_search_lock_fail_threshold: config_input(window, cx, "lock_fail_threshold"),
             local_search_max_accepted_jump_px: config_input(window, cx, "max_accepted_jump_px"),
-            sift_refresh_rate_ms: config_input(window, cx, "refresh_rate_ms"),
-            sift_clahe_limit: config_input(window, cx, "clahe_limit"),
-            sift_match_ratio: config_input(window, cx, "match_ratio"),
-            sift_min_match_count: config_input(window, cx, "min_match_count"),
-            sift_ransac_threshold: config_input(window, cx, "ransac_threshold"),
             ai_refresh_rate_ms: config_input(window, cx, "refresh_rate_ms"),
             ai_confidence_threshold: config_input(window, cx, "confidence_threshold"),
             ai_min_match_count: config_input(window, cx, "min_match_count"),
@@ -162,8 +148,6 @@ impl ConfigFormInputs {
             ai_scan_size: config_input(window, cx, "scan_size"),
             ai_scan_step: config_input(window, cx, "scan_step"),
             ai_track_radius: config_input(window, cx, "track_radius"),
-            ai_device: config_input(window, cx, "cpu / cuda / metal"),
-            ai_device_index: config_input(window, cx, "通常填 0"),
             ai_weights_path: config_input(window, cx, "相对项目根目录或绝对路径，可留空"),
             template_refresh_rate_ms: config_input(window, cx, "refresh_rate_ms"),
             template_local_downscale: config_input(window, cx, "local_downscale"),
@@ -173,8 +157,6 @@ impl ConfigFormInputs {
             template_global_match_threshold: config_input(window, cx, "global_match_threshold"),
             template_mask_outer_radius: config_input(window, cx, "mask_outer_radius"),
             template_mask_inner_radius: config_input(window, cx, "mask_inner_radius"),
-            template_device: config_input(window, cx, "cpu / cuda / metal"),
-            template_device_index: config_input(window, cx, "通常填 0"),
             network_http_port: config_input(window, cx, "http_port"),
             network_websocket_port: config_input(window, cx, "websocket_port"),
         }
@@ -360,6 +342,134 @@ impl SelectItem for PointReorderTargetItem {
 
     fn value(&self) -> &Self::Value {
         &self.id
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        picker_menu_row(&self.title, &self.subtitle)
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        self.searchable_text
+            .to_lowercase()
+            .contains(&query.to_lowercase())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DevicePreferencePickerItem {
+    pub(super) value: AiDevicePreference,
+    pub(super) title: SharedString,
+    pub(super) subtitle: SharedString,
+    pub(super) searchable_text: SharedString,
+}
+
+impl DevicePreferencePickerItem {
+    pub(super) fn new(
+        value: AiDevicePreference,
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
+        searchable_text: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            value,
+            title: title.into(),
+            subtitle: subtitle.into(),
+            searchable_text: searchable_text.into(),
+        }
+    }
+}
+
+impl SelectItem for DevicePreferencePickerItem {
+    type Value = AiDevicePreference;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn display_title(&self) -> Option<AnyElement> {
+        let label = if self.subtitle.is_empty() {
+            self.title.to_string()
+        } else {
+            format!("{} · {}", self.title, self.subtitle)
+        };
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(label)
+                .into_any_element(),
+        )
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        picker_menu_row(&self.title, &self.subtitle)
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        self.searchable_text
+            .to_lowercase()
+            .contains(&query.to_lowercase())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DeviceIndexPickerItem {
+    pub(super) value: usize,
+    pub(super) title: SharedString,
+    pub(super) subtitle: SharedString,
+    pub(super) searchable_text: SharedString,
+}
+
+impl DeviceIndexPickerItem {
+    pub(super) fn new(
+        value: usize,
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
+        searchable_text: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            value,
+            title: title.into(),
+            subtitle: subtitle.into(),
+            searchable_text: searchable_text.into(),
+        }
+    }
+}
+
+impl SelectItem for DeviceIndexPickerItem {
+    type Value = usize;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn display_title(&self) -> Option<AnyElement> {
+        let label = if self.subtitle.is_empty() {
+            self.title.to_string()
+        } else {
+            format!("{} · {}", self.title, self.subtitle)
+        };
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(label)
+                .into_any_element(),
+        )
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
     }
 
     fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
@@ -568,25 +678,6 @@ impl ConfigDraft {
                         cx,
                     )?,
                 },
-                sift: SiftTrackingConfig {
-                    refresh_rate_ms: parse_input_value(
-                        &form.sift_refresh_rate_ms,
-                        "sift.refresh_rate_ms",
-                        cx,
-                    )?,
-                    clahe_limit: parse_input_value(&form.sift_clahe_limit, "sift.clahe_limit", cx)?,
-                    match_ratio: parse_input_value(&form.sift_match_ratio, "sift.match_ratio", cx)?,
-                    min_match_count: parse_input_value(
-                        &form.sift_min_match_count,
-                        "sift.min_match_count",
-                        cx,
-                    )?,
-                    ransac_threshold: parse_input_value(
-                        &form.sift_ransac_threshold,
-                        "sift.ransac_threshold",
-                        cx,
-                    )?,
-                },
                 ai: AiTrackingConfig {
                     refresh_rate_ms: parse_input_value(
                         &form.ai_refresh_rate_ms,
@@ -611,8 +702,8 @@ impl ConfigDraft {
                     scan_size: parse_input_value(&form.ai_scan_size, "ai.scan_size", cx)?,
                     scan_step: parse_input_value(&form.ai_scan_step, "ai.scan_step", cx)?,
                     track_radius: parse_input_value(&form.ai_track_radius, "ai.track_radius", cx)?,
-                    device: parse_enum_input_value(&form.ai_device, "ai.device", cx)?,
-                    device_index: parse_input_value(&form.ai_device_index, "ai.device_index", cx)?,
+                    device: workbench.ai_device_preference,
+                    device_index: workbench.ai_device_index,
                     weights_path: (!weights_path.is_empty()).then(|| weights_path.to_owned()),
                 },
                 template: TemplateTrackingConfig {
@@ -656,12 +747,8 @@ impl ConfigDraft {
                         "template.mask_inner_radius",
                         cx,
                     )?,
-                    device: parse_enum_input_value(&form.template_device, "template.device", cx)?,
-                    device_index: parse_input_value(
-                        &form.template_device_index,
-                        "template.device_index",
-                        cx,
-                    )?,
+                    device: workbench.template_device_preference,
+                    device_index: workbench.template_device_index,
                 },
                 network: NetworkConfig {
                     http_port: parse_input_value(&form.network_http_port, "network.http_port", cx)?,
@@ -728,21 +815,6 @@ fn parse_bool_input_value(
         "false" | "0" | "no" | "n" | "off" => Ok(false),
         _ => Err(format!("{field_name} 必须是 true 或 false。")),
     }
-}
-
-fn parse_enum_input_value<T>(
-    input: &gpui::Entity<InputState>,
-    field_name: &'static str,
-    cx: &mut Context<TrackerWorkbench>,
-) -> Result<T, String>
-where
-    T: std::str::FromStr,
-    T::Err: ToString,
-{
-    read_input_value(input, cx)
-        .trim()
-        .parse::<T>()
-        .map_err(|error| format!("{field_name} 配置无效：{}", error.to_string()))
 }
 
 fn picker_menu_row(title: &SharedString, subtitle: &SharedString) -> impl IntoElement {

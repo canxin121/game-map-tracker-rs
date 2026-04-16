@@ -189,18 +189,6 @@ fn navigation_sidebar(
                                 }),
                             ))
                             .child(sidebar_nav_item(
-                                "sidebar-nav-settings-sift",
-                                tokens,
-                                "SIFT 特征匹配",
-                                settings_is_active && this.settings_page == SettingsPage::Sift,
-                                tokens.nav_subitem_active_bg,
-                                None,
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.select_settings_page(SettingsPage::Sift);
-                                    cx.notify();
-                                }),
-                            ))
-                            .child(sidebar_nav_item(
                                 "sidebar-nav-settings-convolution",
                                 tokens,
                                 "卷积特征匹配",
@@ -1598,7 +1586,6 @@ fn settings_page(
     match this.settings_page {
         SettingsPage::Runtime => settings_runtime_page(this, cx, tokens).into_any_element(),
         SettingsPage::Capture => settings_capture_page(this, cx, tokens).into_any_element(),
-        SettingsPage::Sift => settings_sift_page(this, cx, tokens).into_any_element(),
         SettingsPage::Convolution => settings_convolution_page(this, cx, tokens).into_any_element(),
         SettingsPage::Template => settings_template_page(this, cx, tokens).into_any_element(),
         SettingsPage::Debug => settings_debug_page(this, tokens).into_any_element(),
@@ -2133,9 +2120,9 @@ fn settings_capture_page(
                                 "手动取区"
                             },
                             Some(if this.is_minimap_region_picker_active() {
-                                "小地图取区窗口已打开：拖动选择屏幕区域，右键取消。".into()
+                                "小地图取区窗口已打开：先拖出圆，再拖圆心移动、拖圆边改半径，最后点确认。最终会保存为圆的外接正方形截图框。".into()
                             } else {
-                                "打开屏幕取区窗口，拖动选择小地图截图范围。".into()
+                                "打开屏幕取区窗口，拖出并微调小地图圆形范围。".into()
                             }),
                             if this.is_minimap_region_picker_active() {
                                 ToolbarButtonTone::Primary
@@ -2197,42 +2184,6 @@ fn settings_capture_page(
     )
 }
 
-fn settings_sift_page(
-    this: &TrackerWorkbench,
-    cx: &mut Context<TrackerWorkbench>,
-    tokens: WorkbenchThemeTokens,
-) -> impl IntoElement {
-    settings_page_shell(
-        "SIFT 特征匹配",
-        "这一页保留传统特征匹配引擎的 CPU 参数：刷新节奏、对比度增强、匹配比和几何校验阈值。",
-        Some(settings_editor_toolbar(cx, tokens).into_any_element()),
-        vec![
-            editable_config_section(
-                "匹配参数",
-                vec![config_row(vec![
-                    labeled_input(tokens, "刷新间隔", &this.config_form.sift_refresh_rate_ms)
-                        .into_any_element(),
-                    labeled_input(tokens, "CLAHE", &this.config_form.sift_clahe_limit)
-                        .into_any_element(),
-                    labeled_input(tokens, "匹配比", &this.config_form.sift_match_ratio)
-                        .into_any_element(),
-                    labeled_input(tokens, "最小匹配数", &this.config_form.sift_min_match_count)
-                        .into_any_element(),
-                    labeled_input(
-                        tokens,
-                        "RANSAC 阈值",
-                        &this.config_form.sift_ransac_threshold,
-                    )
-                    .into_any_element(),
-                ])],
-                tokens,
-            )
-            .into_any_element(),
-        ],
-        tokens,
-    )
-}
-
 fn settings_convolution_page(
     this: &TrackerWorkbench,
     cx: &mut Context<TrackerWorkbench>,
@@ -2240,17 +2191,35 @@ fn settings_convolution_page(
 ) -> impl IntoElement {
     settings_page_shell(
         "卷积特征匹配",
-        "卷积特征匹配使用 Candle 后端。执行设备只能切到已编译进当前二进制的后端；Windows 全功能版通常是 cpu/cuda，macOS 则可切到 metal。",
+        "卷积特征匹配使用 Candle 后端。设备序号下拉只显示当前后端真实可见的设备；在 Windows 的 CUDA 模式下这里只列出 NVIDIA CUDA 设备，不包含 Intel/AMD 核显。",
         Some(settings_editor_toolbar(cx, tokens).into_any_element()),
         vec![
             editable_config_section(
                 "执行设备与模型",
                 vec![
                     config_row(vec![
-                        labeled_input(tokens, "执行设备", &this.config_form.ai_device)
-                            .into_any_element(),
-                        labeled_input(tokens, "设备序号", &this.config_form.ai_device_index)
-                            .into_any_element(),
+                        labeled_select(
+                            tokens,
+                            "执行设备",
+                            Select::new(&this.ai_device_picker)
+                                .w_full()
+                                .menu_width(px(420.0))
+                                .placeholder("选择执行设备")
+                                .search_placeholder("搜索 CPU / CUDA / Metal")
+                                .empty_message("当前没有可用设备。"),
+                        )
+                        .into_any_element(),
+                        labeled_select(
+                            tokens,
+                            "设备序号",
+                            Select::new(&this.ai_device_index_picker)
+                                .w_full()
+                                .menu_width(px(420.0))
+                                .placeholder("选择设备序号")
+                                .search_placeholder("搜索设备序号")
+                                .empty_message("当前后端没有可用设备。"),
+                        )
+                        .into_any_element(),
                     ]),
                     config_row(vec![
                         labeled_input(tokens, "权重路径", &this.config_form.ai_weights_path)
@@ -2304,16 +2273,34 @@ fn settings_template_page(
 ) -> impl IntoElement {
     settings_page_shell(
         "多尺度模板匹配",
-        "多尺度模板匹配现在同样走 Candle 设备抽象。这里拆开设备、金字塔采样和阈值遮罩三类参数，避免把 GPU 选项和算法阈值混在一起调。",
+        "多尺度模板匹配现在同样走 Candle 设备抽象。设备序号下拉只显示当前后端真实可见的设备；在 Windows 的 CUDA 模式下这里只列出 NVIDIA CUDA 设备，不包含 Intel/AMD 核显。",
         Some(settings_editor_toolbar(cx, tokens).into_any_element()),
         vec![
             editable_config_section(
                 "执行设备",
                 vec![config_row(vec![
-                    labeled_input(tokens, "执行设备", &this.config_form.template_device)
-                        .into_any_element(),
-                    labeled_input(tokens, "设备序号", &this.config_form.template_device_index)
-                        .into_any_element(),
+                    labeled_select(
+                        tokens,
+                        "执行设备",
+                        Select::new(&this.template_device_picker)
+                            .w_full()
+                            .menu_width(px(420.0))
+                            .placeholder("选择执行设备")
+                            .search_placeholder("搜索 CPU / CUDA / Metal")
+                            .empty_message("当前没有可用设备。"),
+                    )
+                    .into_any_element(),
+                    labeled_select(
+                        tokens,
+                        "设备序号",
+                        Select::new(&this.template_device_index_picker)
+                            .w_full()
+                            .menu_width(px(420.0))
+                            .placeholder("选择设备序号")
+                            .search_placeholder("搜索设备序号")
+                            .empty_message("当前后端没有可用设备。"),
+                    )
+                    .into_any_element(),
                 ])],
                 tokens,
             )
@@ -5091,6 +5078,25 @@ fn labeled_input(
         .gap_2()
         .child(field_label(tokens, label))
         .child(Input::new(input))
+}
+
+fn labeled_select<I>(
+    tokens: WorkbenchThemeTokens,
+    label: &'static str,
+    select: Select<I>,
+) -> impl IntoElement
+where
+    I: gpui_component::select::SelectItem + 'static,
+    I::Value: Clone + PartialEq + 'static,
+{
+    div()
+        .min_w(px(180.0))
+        .flex_1()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(field_label(tokens, label))
+        .child(select)
 }
 
 fn field_label(tokens: WorkbenchThemeTokens, title: impl Into<SharedString>) -> impl IntoElement {
