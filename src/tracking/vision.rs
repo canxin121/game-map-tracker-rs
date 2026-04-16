@@ -131,26 +131,19 @@ pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyram
     let config = &workspace.config;
     let local_scale = config.template.local_downscale.max(1);
     let global_scale = config.template.global_downscale.max(local_scale);
-    let local_map = load_logic_map_scaled_image(&workspace.assets.bwiki_cache_dir, local_scale)
-        .with_context(|| {
+    let base_map =
+        load_logic_map_scaled_image(&workspace.assets.bwiki_cache_dir, 1).with_context(|| {
             format!(
-                "failed to load local BWiki logic tiles from {}",
+                "failed to load base BWiki logic tiles from {}",
                 workspace.assets.bwiki_cache_dir.display()
             )
         })?;
-    let local_map = equalize_histogram(&local_map);
+    let base_map = equalize_histogram(&base_map);
+    let local_map = downscale_gray(&base_map, local_scale);
     let global_map = if global_scale == local_scale {
         local_map.clone()
     } else {
-        let global_map =
-            load_logic_map_scaled_image(&workspace.assets.bwiki_cache_dir, global_scale)
-                .with_context(|| {
-                    format!(
-                        "failed to load global BWiki logic tiles from {}",
-                        workspace.assets.bwiki_cache_dir.display()
-                    )
-                })?;
-        equalize_histogram(&global_map)
+        downscale_gray(&base_map, global_scale)
     };
 
     let pyramid = MapPyramid {
