@@ -68,7 +68,11 @@ fn ensure_default_config(root: &Path) -> Result<()> {
 }
 
 fn ensure_workspace_layout(root: &Path) -> Result<()> {
-    for path in [root.join("routes"), root.join("cache").join("bwiki")] {
+    for path in [
+        root.join("routes"),
+        root.join("cache").join("bwiki"),
+        root.join("cache").join("tracking"),
+    ] {
         fs::create_dir_all(&path)
             .with_context(|| format!("failed to create workspace directory {}", path.display()))?;
     }

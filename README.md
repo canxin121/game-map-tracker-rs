@@ -83,6 +83,7 @@ src/ui/                 GPUI 工作台、分页导航、双地图子页、标记
 - 独立数据目录引导
   - 首次启动自动生成默认 `config.toml`
 - 自动创建 `cache/bwiki/` 目录用于缓存点位、图标和瓦片
+- 自动创建 `cache/tracking/` 目录用于缓存追踪预计算结果
   - 不再内置任何默认 routes，标记组完全由用户导入或创建
 
 - GPUI 工作台
@@ -104,6 +105,7 @@ src/ui/                 GPUI 工作台、分页导航、双地图子页、标记
   - 使用 `screenshots` 抓取桌面小地图
   - 使用 `image` / `imageproc` 进行灰度化、缩放、直方图均衡和搜索裁剪
   - 使用 `candle-core` / `candle-nn` 进行模板匹配张量计算与固定卷积特征编码
+  - 预计算并持久化逻辑地图金字塔与全局搜索张量，减少追踪器再次启动时的初始化开销
   - 统一状态机：`LocalTrack`、`GlobalRelocate`、`InertialHold`
   - 后台线程通过 channel 把状态、坐标和调试图送回 GPUI
 
@@ -130,7 +132,7 @@ src/ui/                 GPUI 工作台、分页导航、双地图子页、标记
 
 ## 运行时数据目录
 
-默认数据目录位置由 `directories` crate 按平台解析，例如 Windows 下会落到本机用户数据目录。程序会在 `config.toml` 缺失时用 Rust 默认值生成一份新的配置，不会覆盖已有的用户编辑结果；`routes/`、`config.toml`、`.game-map-tracker-rs.toml` 和 `cache/bwiki/` 都固定从该数据目录读取。
+默认数据目录位置由 `directories` crate 按平台解析，例如 Windows 下会落到本机用户数据目录。程序会在 `config.toml` 缺失时用 Rust 默认值生成一份新的配置，不会覆盖已有的用户编辑结果；`routes/`、`config.toml`、`.game-map-tracker-rs.toml` 和 `cache/bwiki/` 都固定从该数据目录读取。追踪器额外会在 `cache/tracking/` 下缓存预处理地图金字塔和全局搜索张量；当 BWiki 瓦片、模板缩放配置或特征编码器权重发生变化时，会自动失效并重新生成。
 
 覆盖数据目录路径：
 
@@ -150,6 +152,9 @@ data/
       data/
       icons/
       tiles/
+    tracking/
+      pyramids/
+      tensors/
   routes/
     *.json
 ```

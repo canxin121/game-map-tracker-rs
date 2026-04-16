@@ -1,7 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-use image::{GrayImage, ImageBuffer, Luma};
+use image::GrayImage;
+#[cfg(not(feature = "ai-candle"))]
+use image::{ImageBuffer, Luma};
 #[cfg(not(feature = "ai-candle"))]
 use imageproc::template_matching::{MatchTemplateMethod, match_template_with_mask_parallel};
 
@@ -21,14 +23,21 @@ use crate::{
     tracking::{
         capture::{CaptureSource, DesktopCapture},
         debug::{DebugField, TrackingDebugSnapshot},
+        precompute::{clear_match_pyramid_caches, load_or_build_match_pyramid},
         runtime::{TrackingStatus, TrackingTick, TrackingWorker},
         vision::{
             DebugOverlay, MapPyramid, MaskSet, MatchCandidate, SearchCrop, SearchStage,
-            TrackerState, build_debug_snapshot, build_mask, center_to_scaled, crop_around_center,
-            load_logic_map_pyramid, preview_heatmap, preview_image, preview_mask_image,
-            scaled_dimension,
+            TrackerState, build_debug_snapshot, build_mask, build_match_representation,
+            center_to_scaled, crop_around_center, preview_heatmap, preview_image,
+            preview_mask_image, scaled_dimension,
         },
     },
+};
+
+#[cfg(feature = "ai-candle")]
+use crate::tracking::precompute::{
+    PersistedTensorCache, clear_tensor_caches_by_prefix, load_tensor_cache, save_tensor_cache,
+    tracker_tensor_cache_path,
 };
 
 #[cfg(feature = "ai-candle")]
@@ -88,13 +97,20 @@ impl TemplateTrackerWorker {
     pub fn new(workspace: Arc<WorkspaceSnapshot>) -> Result<Self> {
         let config = workspace.config.clone();
         let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
-        let (mut pyramid, _) = load_logic_map_pyramid(workspace.as_ref())?;
-        pyramid.local.image = build_match_representation(&pyramid.local.image);
-        pyramid.global.image = build_match_representation(&pyramid.global.image);
+        let prepared_pyramid = load_or_build_match_pyramid(workspace.as_ref())?;
+        #[cfg(feature = "ai-candle")]
+        let cache_key = prepared_pyramid.cache_key.clone();
+        let pyramid = prepared_pyramid.pyramid;
         let masks = build_template_masks(&config);
 
         #[cfg(feature = "ai-candle")]
-        let matcher = CandleTemplateMatcher::new(&config.template, &pyramid, &masks)?;
+        let matcher = CandleTemplateMatcher::new_cached(
+            workspace.as_ref(),
+            &config.template,
+            &pyramid,
+            &masks,
+            &cache_key,
+        )?;
 
         #[cfg(not(feature = "ai-candle"))]
         if config.template.device != AiDevicePreference::Cpu {
@@ -484,6 +500,33 @@ impl TemplateTrackerWorker {
     }
 }
 
+pub fn rebuild_template_engine_cache(workspace: &WorkspaceSnapshot) -> Result<()> {
+    clear_match_pyramid_caches(workspace)?;
+
+    #[cfg(feature = "ai-candle")]
+    clear_tensor_caches_by_prefix(workspace, "template-global-search")?;
+
+    #[cfg(feature = "ai-candle")]
+    let prepared_pyramid = load_or_build_match_pyramid(workspace)?;
+
+    #[cfg(not(feature = "ai-candle"))]
+    let _ = load_or_build_match_pyramid(workspace)?;
+
+    #[cfg(feature = "ai-candle")]
+    {
+        let masks = build_template_masks(&workspace.config);
+        let _ = CandleTemplateMatcher::new_cached(
+            workspace,
+            &workspace.config.template,
+            &prepared_pyramid.pyramid,
+            &masks,
+            &prepared_pyramid.cache_key,
+        )?;
+    }
+
+    Ok(())
+}
+
 fn prepare_capture_templates(
     captured: &GrayImage,
     config: &AppConfig,
@@ -554,37 +597,37 @@ fn build_template_masks(config: &AppConfig) -> MaskSet {
     }
 }
 
-fn build_match_representation(image: &GrayImage) -> GrayImage {
-    let edge = edge_enhance_gray(image);
-    let blended = ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
-        let base = u16::from(image.get_pixel(x, y).0[0]);
-        let edge = u16::from(edge.get_pixel(x, y).0[0]);
-        let value = ((base * 3) + (edge * 5)) / 8;
-        Luma([value.min(u16::from(u8::MAX)) as u8])
-    });
-
-    imageproc::contrast::equalize_histogram(&blended)
-}
-
-fn edge_enhance_gray(image: &GrayImage) -> GrayImage {
-    let grad_x = imageproc::gradients::horizontal_sobel(image);
-    let grad_y = imageproc::gradients::vertical_sobel(image);
-
-    let edge = ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
-        let gx = u32::from(grad_x.get_pixel(x, y).0[0].unsigned_abs());
-        let gy = u32::from(grad_y.get_pixel(x, y).0[0].unsigned_abs());
-        let magnitude = ((gx + gy) / 2).min(u32::from(u8::MAX)) as u8;
-        Luma([magnitude])
-    });
-
-    imageproc::contrast::equalize_histogram(&edge)
-}
-
 #[cfg(feature = "ai-candle")]
 impl CandleTemplateMatcher {
+    #[cfg_attr(not(test), allow(dead_code))]
     fn new(config: &TemplateTrackingConfig, pyramid: &MapPyramid, masks: &MaskSet) -> Result<Self> {
         let device = select_candle_device(config)?;
         let global_search = SearchTensorCache::from_gray_image(&pyramid.global.image, &device)?;
+        Self::from_parts(device, global_search, masks)
+    }
+
+    fn new_cached(
+        workspace: &WorkspaceSnapshot,
+        config: &TemplateTrackingConfig,
+        pyramid: &MapPyramid,
+        masks: &MaskSet,
+        map_cache_key: &str,
+    ) -> Result<Self> {
+        let device = select_candle_device(config)?;
+        let global_search = load_or_build_template_global_search(
+            workspace,
+            map_cache_key,
+            &pyramid.global.image,
+            &device,
+        )?;
+        Self::from_parts(device, global_search, masks)
+    }
+
+    fn from_parts(
+        device: Device,
+        global_search: SearchTensorCache,
+        masks: &MaskSet,
+    ) -> Result<Self> {
         let global_mask_squared = mask_squared_tensor(&masks.global, &device)?;
         let local_mask_squared = mask_squared_tensor(&masks.local, &device)?;
 
@@ -708,6 +751,73 @@ impl SearchTensorCache {
             height: image.height(),
         })
     }
+
+    fn from_persisted(cache: PersistedTensorCache, device: &Device) -> Result<Self> {
+        if cache.channels != 1 {
+            anyhow::bail!(
+                "template search tensor cache channel count {} is invalid",
+                cache.channels
+            );
+        }
+
+        let image = Tensor::from_vec(
+            cache.primary,
+            (1, 1, cache.height as usize, cache.width as usize),
+            device,
+        )?;
+        let squared = Tensor::from_vec(
+            cache.secondary,
+            (1, 1, cache.height as usize, cache.width as usize),
+            device,
+        )?;
+        Ok(Self {
+            image,
+            squared,
+            width: cache.width,
+            height: cache.height,
+        })
+    }
+
+    fn to_persisted(&self) -> Result<PersistedTensorCache> {
+        let image = self
+            .image
+            .squeeze(0)?
+            .squeeze(0)?
+            .to_vec2::<f32>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let squared = self
+            .squared
+            .squeeze(0)?
+            .squeeze(0)?
+            .to_vec2::<f32>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        PersistedTensorCache::from_parts(self.width, self.height, 1, image, squared)
+    }
+}
+
+#[cfg(feature = "ai-candle")]
+fn load_or_build_template_global_search(
+    workspace: &WorkspaceSnapshot,
+    map_cache_key: &str,
+    image: &GrayImage,
+    device: &Device,
+) -> Result<SearchTensorCache> {
+    let cache_path = tracker_tensor_cache_path(workspace, "template-global-search", map_cache_key);
+    if let Ok(Some(cache)) = load_tensor_cache(&cache_path) {
+        if let Ok(search) = SearchTensorCache::from_persisted(cache, device) {
+            return Ok(search);
+        }
+    }
+
+    let search = SearchTensorCache::from_gray_image(image, device)?;
+    if let Ok(persisted) = search.to_persisted() {
+        let _ = save_tensor_cache(&cache_path, &persisted);
+    }
+    Ok(search)
 }
 
 impl TrackingWorker for TemplateTrackerWorker {

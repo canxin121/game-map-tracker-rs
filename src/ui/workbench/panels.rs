@@ -8,7 +8,7 @@ use gpui::{
     prelude::FluentBuilder as _, px, size,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, Selectable, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Selectable, Sizable as _,
     button::{Button, ButtonGroup},
     input::Input,
     scroll::ScrollableElement as _,
@@ -29,7 +29,7 @@ use crate::{
 };
 
 use super::{
-    MapCanvasKind, TrackerMapRenderSnapshot, TrackerWorkbench,
+    MapCanvasKind, TrackerCacheKind, TrackerMapRenderSnapshot, TrackerWorkbench,
     forms::read_input_value,
     page::{MapPage, SettingsPage, WorkbenchPage},
     select::Select,
@@ -1970,6 +1970,40 @@ fn settings_editor_toolbar(
     ])
 }
 
+fn tracker_cache_rebuild_section(
+    this: &TrackerWorkbench,
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+    kind: TrackerCacheKind,
+    button_id: &'static str,
+    tooltip: &'static str,
+) -> AnyElement {
+    editable_config_section(
+        "缓存",
+        vec![
+            config_row(vec![
+                toolbar_button_with_tooltip(
+                    button_id,
+                    tokens,
+                    "R",
+                    "重建缓存",
+                    Some(tooltip.into()),
+                    ToolbarButtonTone::Neutral,
+                    this.is_cache_rebuild_running(kind),
+                    cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.rebuild_tracker_cache(kind, window, cx);
+                        cx.notify();
+                    }),
+                )
+                .into_any_element(),
+            ]),
+            body_text(tokens, this.cache_rebuild_summary(kind)).into_any_element(),
+        ],
+        tokens,
+    )
+    .into_any_element()
+}
+
 fn settings_page_shell(
     title: &'static str,
     description: impl Into<SharedString>,
@@ -2194,6 +2228,14 @@ fn settings_convolution_page(
         "卷积特征匹配使用 Candle 后端。设备序号下拉只显示当前后端真实可见的设备；在 Windows 的 CUDA 模式下这里只列出 NVIDIA CUDA 设备，不包含 Intel/AMD 核显。",
         Some(settings_editor_toolbar(cx, tokens).into_any_element()),
         vec![
+            tracker_cache_rebuild_section(
+                this,
+                cx,
+                tokens,
+                TrackerCacheKind::Convolution,
+                "settings-convolution-cache-rebuild",
+                "删除并立即重建卷积特征匹配相关的预处理地图与全局搜索缓存。运行中的追踪需先停止。",
+            ),
             editable_config_section(
                 "执行设备与模型",
                 vec![
@@ -2202,6 +2244,7 @@ fn settings_convolution_page(
                             tokens,
                             "执行设备",
                             Select::new(&this.ai_device_picker)
+                                .icon(Icon::new(IconName::ChevronsUpDown))
                                 .w_full()
                                 .menu_width(px(420.0))
                                 .placeholder("选择执行设备")
@@ -2213,6 +2256,7 @@ fn settings_convolution_page(
                             tokens,
                             "设备序号",
                             Select::new(&this.ai_device_index_picker)
+                                .icon(Icon::new(IconName::ChevronsUpDown))
                                 .w_full()
                                 .menu_width(px(420.0))
                                 .placeholder("选择设备序号")
@@ -2276,6 +2320,14 @@ fn settings_template_page(
         "多尺度模板匹配现在同样走 Candle 设备抽象。设备序号下拉只显示当前后端真实可见的设备；在 Windows 的 CUDA 模式下这里只列出 NVIDIA CUDA 设备，不包含 Intel/AMD 核显。",
         Some(settings_editor_toolbar(cx, tokens).into_any_element()),
         vec![
+            tracker_cache_rebuild_section(
+                this,
+                cx,
+                tokens,
+                TrackerCacheKind::Template,
+                "settings-template-cache-rebuild",
+                "删除并立即重建多尺度模板匹配相关的预处理地图与全局搜索缓存。运行中的追踪需先停止。",
+            ),
             editable_config_section(
                 "执行设备",
                 vec![config_row(vec![
@@ -2283,6 +2335,7 @@ fn settings_template_page(
                         tokens,
                         "执行设备",
                         Select::new(&this.template_device_picker)
+                            .icon(Icon::new(IconName::ChevronsUpDown))
                             .w_full()
                             .menu_width(px(420.0))
                             .placeholder("选择执行设备")
@@ -2294,6 +2347,7 @@ fn settings_template_page(
                         tokens,
                         "设备序号",
                         Select::new(&this.template_device_index_picker)
+                            .icon(Icon::new(IconName::ChevronsUpDown))
                             .w_full()
                             .menu_width(px(420.0))
                             .placeholder("选择设备序号")

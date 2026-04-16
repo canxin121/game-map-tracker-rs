@@ -790,7 +790,7 @@ fn config_input(
     cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
 }
 
-fn parse_input_value<T>(
+pub(super) fn parse_input_value<T>(
     input: &gpui::Entity<InputState>,
     field_name: &'static str,
     cx: &mut Context<TrackerWorkbench>,

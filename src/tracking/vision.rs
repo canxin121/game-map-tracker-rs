@@ -207,6 +207,32 @@ pub fn build_mask(width: u32, height: u32, inner_radius: f32, outer_radius: f32)
     })
 }
 
+pub fn build_match_representation(image: &GrayImage) -> GrayImage {
+    let edge = edge_enhance_gray(image);
+    let blended = ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
+        let base = u16::from(image.get_pixel(x, y).0[0]);
+        let edge = u16::from(edge.get_pixel(x, y).0[0]);
+        let value = ((base * 3) + (edge * 5)) / 8;
+        Luma([value.min(u16::from(u8::MAX)) as u8])
+    });
+
+    equalize_histogram(&blended)
+}
+
+fn edge_enhance_gray(image: &GrayImage) -> GrayImage {
+    let grad_x = imageproc::gradients::horizontal_sobel(image);
+    let grad_y = imageproc::gradients::vertical_sobel(image);
+
+    let edge = ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
+        let gx = u32::from(grad_x.get_pixel(x, y).0[0].unsigned_abs());
+        let gy = u32::from(grad_y.get_pixel(x, y).0[0].unsigned_abs());
+        let magnitude = ((gx + gy) / 2).min(u32::from(u8::MAX)) as u8;
+        Luma([magnitude])
+    });
+
+    equalize_histogram(&edge)
+}
+
 pub fn crop_around_center(
     image: &GrayImage,
     center: (u32, u32),

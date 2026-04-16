@@ -37,11 +37,13 @@ use crate::{
     },
     tracking::{
         TrackerSession, TrackingEvent,
+        ai::rebuild_convolution_engine_cache,
         candle_support::{
             available_candle_backend_preferences, available_candle_device_descriptors,
         },
         debug::TrackingDebugSnapshot,
         spawn_tracker_session,
+        template::rebuild_template_engine_cache,
     },
     ui::tile_cache::TileImageCache,
 };
@@ -51,7 +53,8 @@ use self::{
         BwikiIconPickerItem, ConfigDraft, ConfigFormInputs, DeviceIndexPickerItem,
         DevicePreferencePickerItem, GroupDraft, GroupFormInputs, GroupInlineEditInputs,
         MarkerDraft, MarkerFormInputs, MarkerGroupPickerItem, PagedListState, PlannerRouteDraft,
-        PointReorderTargetItem, RoutePlannerFormInputs, read_input_value, set_input_value,
+        PointReorderTargetItem, RoutePlannerFormInputs, parse_input_value, read_input_value,
+        set_input_value,
     },
     minimap_picker::MinimapRegionPicker,
     page::{MapPage, SettingsPage, WorkbenchPage},
@@ -224,6 +227,28 @@ enum TrackerPendingAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TrackerCacheKind {
+    Convolution,
+    Template,
+}
+
+impl TrackerCacheKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Convolution => "卷积特征匹配",
+            Self::Template => "多尺度模板匹配",
+        }
+    }
+
+    const fn idle_summary(self) -> &'static str {
+        match self {
+            Self::Convolution => "尚未手动重建卷积特征匹配缓存。",
+            Self::Template => "尚未手动重建多尺度模板匹配缓存。",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AsyncTaskPhase {
     Idle,
     Working,
@@ -337,6 +362,8 @@ pub struct TrackerWorkbench {
     tracker_pending_action: Option<TrackerPendingAction>,
     tracker_status_text: SharedString,
     route_import_status: AsyncTaskStatus,
+    convolution_cache_status: AsyncTaskStatus,
+    template_cache_status: AsyncTaskStatus,
     spinner_frame: usize,
     pub(super) map_point_insert_armed: bool,
     moving_point_id: Option<RoutePointId>,
@@ -533,6 +560,12 @@ impl TrackerWorkbench {
                     tracker_pending_action: None,
                     tracker_status_text: "追踪未启动。".into(),
                     route_import_status: AsyncTaskStatus::idle("尚未导入路线文件。"),
+                    convolution_cache_status: AsyncTaskStatus::idle(
+                        TrackerCacheKind::Convolution.idle_summary(),
+                    ),
+                    template_cache_status: AsyncTaskStatus::idle(
+                        TrackerCacheKind::Template.idle_summary(),
+                    ),
                     spinner_frame: 0,
                     map_point_insert_armed: false,
                     moving_point_id: None,
@@ -639,6 +672,12 @@ impl TrackerWorkbench {
                     tracker_pending_action: None,
                     tracker_status_text: "追踪未启动。".into(),
                     route_import_status: AsyncTaskStatus::idle("尚未导入路线文件。"),
+                    convolution_cache_status: AsyncTaskStatus::idle(
+                        TrackerCacheKind::Convolution.idle_summary(),
+                    ),
+                    template_cache_status: AsyncTaskStatus::idle(
+                        TrackerCacheKind::Template.idle_summary(),
+                    ),
                     spinner_frame: 0,
                     map_point_insert_armed: false,
                     moving_point_id: None,
@@ -4535,6 +4574,139 @@ impl TrackerWorkbench {
         let mut workspace = (*self.workspace).clone();
         workspace.config = config;
         self.workspace = Arc::new(workspace);
+    }
+
+    pub(super) fn cache_rebuild_summary(&self, kind: TrackerCacheKind) -> SharedString {
+        self.cache_rebuild_status(kind).summary.clone()
+    }
+
+    pub(super) fn is_cache_rebuild_running(&self, kind: TrackerCacheKind) -> bool {
+        self.cache_rebuild_status(kind).phase == AsyncTaskPhase::Working
+    }
+
+    fn cache_rebuild_config(
+        &self,
+        kind: TrackerCacheKind,
+        cx: &mut Context<Self>,
+    ) -> Result<AppConfig, String> {
+        let mut config = self.workspace.config.clone();
+        config.view_size = parse_input_value(&self.config_form.view_size, "view_size", cx)?;
+        config.template.local_downscale = parse_input_value(
+            &self.config_form.template_local_downscale,
+            "template.local_downscale",
+            cx,
+        )?;
+        config.template.global_downscale = parse_input_value(
+            &self.config_form.template_global_downscale,
+            "template.global_downscale",
+            cx,
+        )?;
+        config.template.mask_outer_radius = parse_input_value(
+            &self.config_form.template_mask_outer_radius,
+            "template.mask_outer_radius",
+            cx,
+        )?;
+        config.template.mask_inner_radius = parse_input_value(
+            &self.config_form.template_mask_inner_radius,
+            "template.mask_inner_radius",
+            cx,
+        )?;
+
+        match kind {
+            TrackerCacheKind::Convolution => {
+                let weights_path = read_input_value(&self.config_form.ai_weights_path, cx);
+                let weights_path = weights_path.trim();
+                config.ai.device = self.ai_device_preference;
+                config.ai.device_index = self.ai_device_index;
+                config.ai.weights_path =
+                    (!weights_path.is_empty()).then(|| weights_path.to_owned());
+            }
+            TrackerCacheKind::Template => {
+                config.template.device = self.template_device_preference;
+                config.template.device_index = self.template_device_index;
+            }
+        }
+
+        Ok(config)
+    }
+
+    pub(super) fn rebuild_tracker_cache(
+        &mut self,
+        kind: TrackerCacheKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_cache_rebuild_running(kind) {
+            return;
+        }
+
+        if self.is_tracking_active() || self.is_tracker_transition_pending() {
+            let message = format!("请先停止当前追踪，再重建{}缓存。", kind.label());
+            *self.cache_rebuild_status_mut(kind) = AsyncTaskStatus::failed(message.clone());
+            self.status_text = message.into();
+            return;
+        }
+
+        let config = match self.cache_rebuild_config(kind, cx) {
+            Ok(config) => config,
+            Err(message) => {
+                let detailed = format!("无法重建{}缓存：{message}", kind.label());
+                *self.cache_rebuild_status_mut(kind) = AsyncTaskStatus::failed(detailed.clone());
+                self.status_text = detailed.into();
+                return;
+            }
+        };
+
+        let mut workspace = (*self.workspace).clone();
+        workspace.config = config;
+
+        let started = format!("正在重建{}缓存。", kind.label());
+        *self.cache_rebuild_status_mut(kind) = AsyncTaskStatus::working(started.clone());
+        self.status_text = started.into();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move {
+                match kind {
+                    TrackerCacheKind::Convolution => rebuild_convolution_engine_cache(&workspace),
+                    TrackerCacheKind::Template => rebuild_template_engine_cache(&workspace),
+                }
+            });
+
+            let result = result.await;
+            this.update_in(cx, |this, _, cx| {
+                match result {
+                    Ok(()) => {
+                        let message = format!("{}缓存已按当前表单参数重建完成。", kind.label());
+                        *this.cache_rebuild_status_mut(kind) =
+                            AsyncTaskStatus::succeeded(message.clone());
+                        this.status_text = message.into();
+                    }
+                    Err(error) => {
+                        let message = format!("重建{}缓存失败：{error:#}", kind.label());
+                        *this.cache_rebuild_status_mut(kind) =
+                            AsyncTaskStatus::failed(message.clone());
+                        this.status_text = message.into();
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn cache_rebuild_status(&self, kind: TrackerCacheKind) -> &AsyncTaskStatus {
+        match kind {
+            TrackerCacheKind::Convolution => &self.convolution_cache_status,
+            TrackerCacheKind::Template => &self.template_cache_status,
+        }
+    }
+
+    fn cache_rebuild_status_mut(&mut self, kind: TrackerCacheKind) -> &mut AsyncTaskStatus {
+        match kind {
+            TrackerCacheKind::Convolution => &mut self.convolution_cache_status,
+            TrackerCacheKind::Template => &mut self.template_cache_status,
+        }
     }
 
     fn teleport_link_distance(&self) -> f32 {

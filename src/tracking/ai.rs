@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 #[cfg(feature = "ai-candle")]
-use image::{GrayImage, ImageBuffer, Luma};
+use image::GrayImage;
 #[cfg(feature = "ai-candle")]
 use std::path::PathBuf;
 
@@ -17,10 +17,15 @@ use crate::{
         candle_support::{available_candle_backends, candle_device_label, select_candle_device},
         capture::{CaptureSource, DesktopCapture},
         debug::{DebugField, TrackingDebugSnapshot},
+        precompute::{
+            PersistedTensorCache, clear_match_pyramid_caches, clear_tensor_caches_by_prefix,
+            load_or_build_match_pyramid, load_tensor_cache, metadata_fingerprint,
+            save_tensor_cache, tracker_tensor_cache_path,
+        },
         vision::{
             DebugOverlay, MapPyramid, MaskSet, MatchCandidate, SearchCrop, SearchStage,
-            TrackerState, build_debug_snapshot, build_mask, center_to_scaled, crop_around_center,
-            load_logic_map_pyramid, mask_as_unit_vec, preview_heatmap, preview_image,
+            TrackerState, build_debug_snapshot, build_mask, build_match_representation,
+            center_to_scaled, crop_around_center, mask_as_unit_vec, preview_heatmap, preview_image,
             preview_mask_image, scaled_dimension,
         },
     },
@@ -116,12 +121,17 @@ impl CandleTrackerWorker {
         {
             let config = workspace.config.clone();
             let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
-            let (mut pyramid, _) = load_logic_map_pyramid(workspace.as_ref())?;
-            pyramid.local.image = build_match_representation(&pyramid.local.image);
-            pyramid.global.image = build_match_representation(&pyramid.global.image);
+            let prepared_pyramid = load_or_build_match_pyramid(workspace.as_ref())?;
+            let map_cache_key = prepared_pyramid.cache_key;
+            let pyramid = prepared_pyramid.pyramid;
             let masks = build_template_masks(&config);
-            let matcher =
-                CandleFeatureMatcher::new(workspace.as_ref(), &config.ai, &pyramid, &masks)?;
+            let matcher = CandleFeatureMatcher::new(
+                workspace.as_ref(),
+                &config.ai,
+                &pyramid,
+                &masks,
+                &map_cache_key,
+            )?;
 
             Ok(Self {
                 inner: CandleTrackerInner {
@@ -143,11 +153,39 @@ impl CandleTrackerWorker {
     }
 }
 
+pub fn rebuild_convolution_engine_cache(workspace: &WorkspaceSnapshot) -> Result<()> {
+    #[cfg(feature = "ai-candle")]
+    {
+        clear_match_pyramid_caches(workspace)?;
+        clear_tensor_caches_by_prefix(workspace, "feature-global-search")?;
+
+        let prepared_pyramid = load_or_build_match_pyramid(workspace)?;
+        let masks = build_template_masks(&workspace.config);
+        let _ = CandleFeatureMatcher::new(
+            workspace,
+            &workspace.config.ai,
+            &prepared_pyramid.pyramid,
+            &masks,
+            &prepared_pyramid.cache_key,
+        )?;
+        return Ok(());
+    }
+
+    #[cfg(not(feature = "ai-candle"))]
+    {
+        let _ = workspace;
+        anyhow::bail!("卷积特征匹配后端被选中，但当前二进制未启用 `ai-candle` 特性")
+    }
+}
+
 #[cfg(feature = "ai-candle")]
 const CUDA_CONV_IM2COL_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 
 #[cfg(feature = "ai-candle")]
 const METAL_CONV_IM2COL_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+
+#[cfg(feature = "ai-candle")]
+const FEATURE_ENCODER_CACHE_VERSION: u32 = 1;
 
 #[cfg(feature = "ai-candle")]
 impl FixedFeatureEncoder {
@@ -160,6 +198,7 @@ impl FixedFeatureEncoder {
         Self::built_in_with_device(device)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn built_in(config: &AiTrackingConfig) -> Result<Self> {
         Self::built_in_with_device(select_candle_device(config)?)
     }
@@ -201,6 +240,23 @@ impl FixedFeatureEncoder {
 
     fn output_channels(&self) -> usize {
         self.output_channels
+    }
+
+    fn cache_key(&self) -> Result<String> {
+        let key = match &self.source {
+            EncoderSource::BuiltIn => {
+                format!(
+                    "ev{FEATURE_ENCODER_CACHE_VERSION}-builtin-c{}",
+                    self.output_channels
+                )
+            }
+            EncoderSource::Safetensors(path) => format!(
+                "ev{FEATURE_ENCODER_CACHE_VERSION}-sf-{}-c{}",
+                metadata_fingerprint(path)?,
+                self.output_channels
+            ),
+        };
+        Ok(key)
     }
 
     fn load_from_safetensors(
@@ -399,51 +455,49 @@ fn build_template_masks(config: &AppConfig) -> MaskSet {
 }
 
 #[cfg(feature = "ai-candle")]
-fn build_match_representation(image: &GrayImage) -> GrayImage {
-    let edge = edge_enhance_gray(image);
-    let blended = ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
-        let base = u16::from(image.get_pixel(x, y).0[0]);
-        let edge = u16::from(edge.get_pixel(x, y).0[0]);
-        let value = ((base * 3) + (edge * 5)) / 8;
-        Luma([value.min(u16::from(u8::MAX)) as u8])
-    });
-
-    imageproc::contrast::equalize_histogram(&blended)
-}
-
-#[cfg(feature = "ai-candle")]
-fn edge_enhance_gray(image: &GrayImage) -> GrayImage {
-    let grad_x = imageproc::gradients::horizontal_sobel(image);
-    let grad_y = imageproc::gradients::vertical_sobel(image);
-
-    let edge = ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
-        let gx = u32::from(grad_x.get_pixel(x, y).0[0].unsigned_abs());
-        let gy = u32::from(grad_y.get_pixel(x, y).0[0].unsigned_abs());
-        let magnitude = ((gx + gy) / 2).min(u32::from(u8::MAX)) as u8;
-        Luma([magnitude])
-    });
-
-    imageproc::contrast::equalize_histogram(&edge)
-}
-
-#[cfg(feature = "ai-candle")]
 impl CandleFeatureMatcher {
     fn new(
         workspace: &WorkspaceSnapshot,
         config: &AiTrackingConfig,
         pyramid: &MapPyramid,
         masks: &MaskSet,
+        map_cache_key: &str,
     ) -> Result<Self> {
         let encoder = FixedFeatureEncoder::new(workspace, config)?;
-        Self::with_encoder(encoder, pyramid, masks)
+        Self::with_encoder_cached(workspace, map_cache_key, encoder, pyramid, masks)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn with_encoder(
         encoder: FixedFeatureEncoder,
         pyramid: &MapPyramid,
         masks: &MaskSet,
     ) -> Result<Self> {
         let global_search = SearchTensorCache::from_gray_image(&pyramid.global.image, &encoder)?;
+        let global_mask = mask_tensor(&masks.global, encoder.output_channels(), &encoder.device)?;
+        let local_mask = mask_tensor(&masks.local, encoder.output_channels(), &encoder.device)?;
+
+        Ok(Self {
+            encoder,
+            global_search,
+            global_mask,
+            local_mask,
+        })
+    }
+
+    fn with_encoder_cached(
+        workspace: &WorkspaceSnapshot,
+        map_cache_key: &str,
+        encoder: FixedFeatureEncoder,
+        pyramid: &MapPyramid,
+        masks: &MaskSet,
+    ) -> Result<Self> {
+        let global_search = load_or_build_feature_global_search(
+            workspace,
+            map_cache_key,
+            &pyramid.global.image,
+            &encoder,
+        )?;
         let global_mask = mask_tensor(&masks.global, encoder.output_channels(), &encoder.device)?;
         let local_mask = mask_tensor(&masks.local, encoder.output_channels(), &encoder.device)?;
 
@@ -564,6 +618,84 @@ impl SearchTensorCache {
             channels,
         })
     }
+
+    fn from_persisted(cache: PersistedTensorCache, encoder: &FixedFeatureEncoder) -> Result<Self> {
+        if cache.channels != encoder.output_channels() {
+            anyhow::bail!(
+                "feature search tensor cache channel count {} does not match encoder output {}",
+                cache.channels,
+                encoder.output_channels()
+            );
+        }
+
+        let features = Tensor::from_vec(
+            cache.primary,
+            (
+                1,
+                cache.channels,
+                cache.height as usize,
+                cache.width as usize,
+            ),
+            &encoder.device,
+        )?;
+        let squared = Tensor::from_vec(
+            cache.secondary,
+            (
+                1,
+                cache.channels,
+                cache.height as usize,
+                cache.width as usize,
+            ),
+            &encoder.device,
+        )?;
+        Ok(Self {
+            features,
+            squared,
+            width: cache.width,
+            height: cache.height,
+            channels: cache.channels,
+        })
+    }
+
+    fn to_persisted(&self) -> Result<PersistedTensorCache> {
+        let features = self
+            .features
+            .squeeze(0)?
+            .to_vec3::<f32>()?
+            .into_iter()
+            .flat_map(|rows| rows.into_iter().flat_map(|row| row.into_iter()))
+            .collect::<Vec<_>>();
+        let squared = self
+            .squared
+            .squeeze(0)?
+            .to_vec3::<f32>()?
+            .into_iter()
+            .flat_map(|rows| rows.into_iter().flat_map(|row| row.into_iter()))
+            .collect::<Vec<_>>();
+        PersistedTensorCache::from_parts(self.width, self.height, self.channels, features, squared)
+    }
+}
+
+#[cfg(feature = "ai-candle")]
+fn load_or_build_feature_global_search(
+    workspace: &WorkspaceSnapshot,
+    map_cache_key: &str,
+    image: &GrayImage,
+    encoder: &FixedFeatureEncoder,
+) -> Result<SearchTensorCache> {
+    let cache_key = format!("{map_cache_key}-{}", encoder.cache_key()?);
+    let cache_path = tracker_tensor_cache_path(workspace, "feature-global-search", &cache_key);
+    if let Ok(Some(cache)) = load_tensor_cache(&cache_path) {
+        if let Ok(search) = SearchTensorCache::from_persisted(cache, encoder) {
+            return Ok(search);
+        }
+    }
+
+    let search = SearchTensorCache::from_gray_image(image, encoder)?;
+    if let Ok(persisted) = search.to_persisted() {
+        let _ = save_tensor_cache(&cache_path, &persisted);
+    }
+    Ok(search)
 }
 
 #[cfg(feature = "ai-candle")]
