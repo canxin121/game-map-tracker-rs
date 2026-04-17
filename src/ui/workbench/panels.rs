@@ -2253,6 +2253,12 @@ fn settings_capture_page(
                         &this.config_form.local_search_max_accepted_jump_px,
                     )
                     .into_any_element(),
+                    labeled_input(
+                        tokens,
+                        "恢复跳变阈值",
+                        &this.config_form.local_search_reacquire_jump_threshold_px,
+                    )
+                    .into_any_element(),
                 ])],
                 tokens,
             )

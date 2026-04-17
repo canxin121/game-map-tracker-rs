@@ -19,10 +19,11 @@ use crate::{
         presence::{MinimapPresenceDetector, MinimapPresenceSample},
         runtime::{TrackingStatus, TrackingTick, TrackingWorker},
         vision::{
-            DebugOverlay, MapPyramid, MaskSet, MatchCandidate, SearchCrop, SearchStage,
-            TrackerState, build_debug_snapshot, build_mask, build_match_representation,
-            center_to_scaled, coarse_global_downscale, crop_search_region, preview_heatmap,
-            preview_image, preview_mask_image, scaled_dimension, search_region_around_center,
+            DebugOverlay, LocalCandidateDecision, MapPyramid, MaskSet, MatchCandidate, SearchCrop,
+            SearchStage, TrackerState, build_debug_snapshot, build_mask,
+            build_match_representation, center_to_scaled, coarse_global_downscale,
+            crop_search_region, local_candidate_decision, preview_heatmap, preview_image,
+            preview_mask_image, scaled_dimension, search_region_around_center,
         },
     },
 };
@@ -223,6 +224,7 @@ impl TemplateTrackerWorker {
         let mut refine_crop = None;
         let mut refine_result = None;
         let mut local_result = None;
+        let mut forced_global_jump: Option<f32> = None;
 
         if self.config.local_search.enabled && matches!(self.state.stage, SearchStage::LocalTrack) {
             if let Some(last_world) = self.state.last_world {
@@ -248,29 +250,48 @@ impl TemplateTrackerWorker {
                 if let (Some(candidate), Some(last_world)) =
                     (result.accepted.clone(), self.state.last_world)
                 {
-                    let jump = (candidate.world.x - last_world.x).abs()
-                        + (candidate.world.y - last_world.y).abs();
-                    if jump <= self.config.local_search.max_accepted_jump_px as f32 {
-                        status.source = Some(TrackingSource::LocalTrack);
-                        status.match_score = Some(candidate.score);
-                        status.message = format!(
-                            "局部模板锁定成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
-                            candidate.score, candidate.world.x, candidate.world.y
-                        );
-                        estimate = Some(self.commit_success(candidate, TrackingSource::LocalTrack));
+                    match local_candidate_decision(
+                        last_world,
+                        candidate.world,
+                        self.config.local_search.max_accepted_jump_px,
+                        self.state.reacquire_anchor,
+                        self.config.local_search.reacquire_jump_threshold_px,
+                    ) {
+                        LocalCandidateDecision::Accept => {
+                            status.source = Some(TrackingSource::LocalTrack);
+                            status.match_score = Some(candidate.score);
+                            status.message = format!(
+                                "局部模板锁定成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
+                                candidate.score, candidate.world.x, candidate.world.y
+                            );
+                            estimate =
+                                Some(self.commit_success(candidate, TrackingSource::LocalTrack));
+                        }
+                        LocalCandidateDecision::ForceGlobalRelocate { jump, .. } => {
+                            self.state.force_global_relocate();
+                            forced_global_jump = Some(jump);
+                        }
+                        LocalCandidateDecision::Reject => {}
                     }
                 }
 
                 if estimate.is_none() {
-                    let switched = self
-                        .state
-                        .increment_local_fail(self.config.local_search.lock_fail_threshold);
-                    status.message = format!(
-                        "局部模板锁定失败，第 {} 次重试。",
-                        self.state.local_fail_streak
-                    );
-                    if switched {
-                        status.message = "局部锁定连续失败，切回全局重定位。".to_owned();
+                    if let Some(jump) = forced_global_jump {
+                        status.message = format!(
+                            "小地图恢复后局部模板候选跳变 {:.0}，超过阈值 {}，切回全局重定位。",
+                            jump, self.config.local_search.reacquire_jump_threshold_px
+                        );
+                    } else {
+                        let switched = self
+                            .state
+                            .increment_local_fail(self.config.local_search.lock_fail_threshold);
+                        status.message = format!(
+                            "局部模板锁定失败，第 {} 次重试。",
+                            self.state.local_fail_streak
+                        );
+                        if switched {
+                            status.message = "局部锁定连续失败，切回全局重定位。".to_owned();
+                        }
                     }
                 }
             }
@@ -396,29 +417,48 @@ impl TemplateTrackerWorker {
                 if let (Some(candidate), Some(last_world)) =
                     (result.accepted.clone(), self.state.last_world)
                 {
-                    let jump = (candidate.world.x - last_world.x).abs()
-                        + (candidate.world.y - last_world.y).abs();
-                    if jump <= self.config.local_search.max_accepted_jump_px as f32 {
-                        status.source = Some(TrackingSource::LocalTrack);
-                        status.match_score = Some(candidate.score);
-                        status.message = format!(
-                            "局部模板锁定成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
-                            candidate.score, candidate.world.x, candidate.world.y
-                        );
-                        estimate = Some(self.commit_success(candidate, TrackingSource::LocalTrack));
+                    match local_candidate_decision(
+                        last_world,
+                        candidate.world,
+                        self.config.local_search.max_accepted_jump_px,
+                        self.state.reacquire_anchor,
+                        self.config.local_search.reacquire_jump_threshold_px,
+                    ) {
+                        LocalCandidateDecision::Accept => {
+                            status.source = Some(TrackingSource::LocalTrack);
+                            status.match_score = Some(candidate.score);
+                            status.message = format!(
+                                "局部模板锁定成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
+                                candidate.score, candidate.world.x, candidate.world.y
+                            );
+                            estimate =
+                                Some(self.commit_success(candidate, TrackingSource::LocalTrack));
+                        }
+                        LocalCandidateDecision::ForceGlobalRelocate { jump, .. } => {
+                            self.state.force_global_relocate();
+                            forced_global_jump = Some(jump);
+                        }
+                        LocalCandidateDecision::Reject => {}
                     }
                 }
 
                 if estimate.is_none() {
-                    let switched = self
-                        .state
-                        .increment_local_fail(self.config.local_search.lock_fail_threshold);
-                    status.message = format!(
-                        "局部模板锁定失败，第 {} 次重试。",
-                        self.state.local_fail_streak
-                    );
-                    if switched {
-                        status.message = "局部锁定连续失败，切回全局重定位。".to_owned();
+                    if let Some(jump) = forced_global_jump {
+                        status.message = format!(
+                            "小地图恢复后局部模板候选跳变 {:.0}，超过阈值 {}，切回全局重定位。",
+                            jump, self.config.local_search.reacquire_jump_threshold_px
+                        );
+                    } else {
+                        let switched = self
+                            .state
+                            .increment_local_fail(self.config.local_search.lock_fail_threshold);
+                        status.message = format!(
+                            "局部模板锁定失败，第 {} 次重试。",
+                            self.state.local_fail_streak
+                        );
+                        if switched {
+                            status.message = "局部锁定连续失败，切回全局重定位。".to_owned();
+                        }
                     }
                 }
             }
@@ -702,6 +742,13 @@ impl TemplateTrackerWorker {
                     |world| format!("{:.0}, {:.0}", world.x, world.y),
                 ),
             ),
+            DebugField::new(
+                "重获锚点",
+                self.state.reacquire_anchor.map_or_else(
+                    || "--".to_owned(),
+                    |world| format!("{:.0}, {:.0}", world.x, world.y),
+                ),
+            ),
         ];
 
         #[cfg(feature = "ai-burn")]
@@ -765,6 +812,13 @@ impl TemplateTrackerWorker {
             DebugField::new(
                 "最后坐标",
                 self.state.last_world.map_or_else(
+                    || "--".to_owned(),
+                    |world| format!("{:.0}, {:.0}", world.x, world.y),
+                ),
+            ),
+            DebugField::new(
+                "重获锚点",
+                self.state.reacquire_anchor.map_or_else(
                     || "--".to_owned(),
                     |world| format!("{:.0}, {:.0}", world.x, world.y),
                 ),

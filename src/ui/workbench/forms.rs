@@ -112,6 +112,7 @@ pub(super) struct ConfigFormInputs {
     pub(super) local_search_radius_px: gpui::Entity<InputState>,
     pub(super) local_search_lock_fail_threshold: gpui::Entity<InputState>,
     pub(super) local_search_max_accepted_jump_px: gpui::Entity<InputState>,
+    pub(super) local_search_reacquire_jump_threshold_px: gpui::Entity<InputState>,
     pub(super) ai_refresh_rate_ms: gpui::Entity<InputState>,
     pub(super) ai_confidence_threshold: gpui::Entity<InputState>,
     pub(super) ai_min_match_count: gpui::Entity<InputState>,
@@ -153,6 +154,11 @@ impl ConfigFormInputs {
             local_search_radius_px: config_input(window, cx, "radius_px"),
             local_search_lock_fail_threshold: config_input(window, cx, "lock_fail_threshold"),
             local_search_max_accepted_jump_px: config_input(window, cx, "max_accepted_jump_px"),
+            local_search_reacquire_jump_threshold_px: config_input(
+                window,
+                cx,
+                "reacquire_jump_threshold_px",
+            ),
             ai_refresh_rate_ms: config_input(window, cx, "refresh_rate_ms"),
             ai_confidence_threshold: config_input(window, cx, "confidence_threshold"),
             ai_min_match_count: config_input(window, cx, "min_match_count"),
@@ -791,6 +797,11 @@ impl ConfigDraft {
                     max_accepted_jump_px: parse_input_value(
                         &form.local_search_max_accepted_jump_px,
                         "local_search.max_accepted_jump_px",
+                        cx,
+                    )?,
+                    reacquire_jump_threshold_px: parse_input_value(
+                        &form.local_search_reacquire_jump_threshold_px,
+                        "local_search.reacquire_jump_threshold_px",
                         cx,
                     )?,
                 },

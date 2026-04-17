@@ -4601,6 +4601,12 @@ impl TrackerWorkbench {
             cx,
         );
         set_input_value(
+            &self.config_form.local_search_reacquire_jump_threshold_px,
+            config.local_search.reacquire_jump_threshold_px.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
             &self.config_form.ai_refresh_rate_ms,
             config.ai.refresh_rate_ms.to_string(),
             window,

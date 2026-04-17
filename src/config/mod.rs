@@ -23,6 +23,7 @@ pub struct LocalSearchConfig {
     pub radius_px: u32,
     pub lock_fail_threshold: u32,
     pub max_accepted_jump_px: u32,
+    pub reacquire_jump_threshold_px: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -117,6 +118,7 @@ impl Default for LocalSearchConfig {
             radius_px: 280,
             lock_fail_threshold: 5,
             max_accepted_jump_px: 500,
+            reacquire_jump_threshold_px: 500,
         }
     }
 }

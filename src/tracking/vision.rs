@@ -31,6 +31,7 @@ pub enum SearchStage {
 pub struct TrackerState {
     pub stage: SearchStage,
     pub last_world: Option<WorldPoint>,
+    pub reacquire_anchor: Option<WorldPoint>,
     pub lost_frames: u32,
     pub local_fail_streak: u32,
     pub frame_index: u64,
@@ -41,6 +42,7 @@ impl Default for TrackerState {
         Self {
             stage: SearchStage::GlobalRelocate,
             last_world: None,
+            reacquire_anchor: None,
             lost_frames: 0,
             local_fail_streak: 0,
             frame_index: 0,
@@ -57,6 +59,7 @@ impl TrackerState {
     pub fn mark_success(&mut self, world: WorldPoint) {
         self.stage = SearchStage::LocalTrack;
         self.last_world = Some(world);
+        self.reacquire_anchor = None;
         self.lost_frames = 0;
         self.local_fail_streak = 0;
     }
@@ -73,12 +76,18 @@ impl TrackerState {
 
     pub fn next_inertial_position(&mut self, max_lost_frames: u32) -> Option<WorldPoint> {
         let world = self.last_world?;
+        self.reacquire_anchor.get_or_insert(world);
         self.lost_frames += 1;
         if self.lost_frames > max_lost_frames {
             self.stage = SearchStage::GlobalRelocate;
             return None;
         }
         Some(world)
+    }
+
+    pub fn force_global_relocate(&mut self) {
+        self.stage = SearchStage::GlobalRelocate;
+        self.local_fail_streak = 0;
     }
 }
 
@@ -106,6 +115,13 @@ pub struct MaskSet {
 pub struct MatchCandidate {
     pub world: WorldPoint,
     pub score: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LocalCandidateDecision {
+    Accept,
+    Reject,
+    ForceGlobalRelocate { jump: f32, anchor: WorldPoint },
 }
 
 #[derive(Debug, Clone)]
@@ -343,6 +359,29 @@ pub fn crop_around_center(
 }
 
 #[must_use]
+pub fn local_candidate_decision(
+    last_world: WorldPoint,
+    candidate_world: WorldPoint,
+    max_accepted_jump_px: u32,
+    reacquire_anchor: Option<WorldPoint>,
+    reacquire_jump_threshold_px: u32,
+) -> LocalCandidateDecision {
+    if let Some(anchor) = reacquire_anchor {
+        let jump = world_jump_distance(candidate_world, anchor);
+        if jump > reacquire_jump_threshold_px as f32 {
+            return LocalCandidateDecision::ForceGlobalRelocate { jump, anchor };
+        }
+    }
+
+    let jump = world_jump_distance(candidate_world, last_world);
+    if jump <= max_accepted_jump_px as f32 {
+        return LocalCandidateDecision::Accept;
+    }
+
+    LocalCandidateDecision::Reject
+}
+
+#[must_use]
 pub fn center_to_scaled(world: WorldPoint, scale: u32) -> (u32, u32) {
     (
         (world.x.max(0.0) as u32) / scale.max(1),
@@ -498,6 +537,10 @@ pub fn gray_image_as_unit_vec(image: &GrayImage) -> Vec<f32> {
         .collect()
 }
 
+fn world_jump_distance(lhs: WorldPoint, rhs: WorldPoint) -> f32 {
+    (lhs.x - rhs.x).abs() + (lhs.y - rhs.y).abs()
+}
+
 fn fit_preview_dimensions(width: u32, height: u32, max_side: u32) -> (u32, u32) {
     if width <= max_side && height <= max_side {
         return (width.max(1), height.max(1));
@@ -563,4 +606,55 @@ fn heatmap_color(value: f32) -> [u8; 4] {
     };
 
     [r.round() as u8, g.round() as u8, b.round() as u8, 255]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_candidate_accepts_normal_local_jump() {
+        let decision = local_candidate_decision(
+            WorldPoint::new(100.0, 100.0),
+            WorldPoint::new(120.0, 130.0),
+            60,
+            None,
+            40,
+        );
+
+        assert_eq!(decision, LocalCandidateDecision::Accept);
+    }
+
+    #[test]
+    fn local_candidate_forces_global_when_reacquire_jump_is_too_large() {
+        let decision = local_candidate_decision(
+            WorldPoint::new(100.0, 100.0),
+            WorldPoint::new(180.0, 180.0),
+            200,
+            Some(WorldPoint::new(100.0, 100.0)),
+            80,
+        );
+
+        assert_eq!(
+            decision,
+            LocalCandidateDecision::ForceGlobalRelocate {
+                jump: 160.0,
+                anchor: WorldPoint::new(100.0, 100.0),
+            }
+        );
+    }
+
+    #[test]
+    fn tracker_state_records_and_clears_reacquire_anchor() {
+        let world = WorldPoint::new(240.0, 320.0);
+        let mut state = TrackerState::default();
+        state.mark_success(world);
+
+        assert_eq!(state.reacquire_anchor, None);
+        assert_eq!(state.next_inertial_position(5), Some(world));
+        assert_eq!(state.reacquire_anchor, Some(world));
+
+        state.mark_success(WorldPoint::new(260.0, 340.0));
+        assert_eq!(state.reacquire_anchor, None);
+    }
 }
