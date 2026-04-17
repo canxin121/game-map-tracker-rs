@@ -14,7 +14,7 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use image::{
-    GrayImage,
+    GrayImage, Luma, RgbaImage,
     imageops::{FilterType, replace, resize},
 };
 use parking_lot::Mutex;
@@ -32,6 +32,9 @@ const TILE_URL_TEMPLATE: &str =
     "https://wiki-dev-patch-oss.oss-cn-hangzhou.aliyuncs.com/res/lkwg/map-3.0/{z}/tile-{x}_{y}.png";
 const TYPE_PARSE_URL: &str = "https://wiki.biligame.com/rocom/api.php?action=parse&page=Data:Mapnew/type/json&prop=text&format=json&formatversion=2";
 const POINT_PARSE_URL: &str = "https://wiki.biligame.com/rocom/api.php?action=parse&page=Data:Mapnew/point.json&prop=text&format=json&formatversion=2";
+const TRACKING_POI_MARK_TYPES: [u32; 7] = [201, 202, 203, 204, 205, 206, 210];
+const TRACKING_POI_ICON_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const TRACKING_POI_ICON_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct BwikiTileZoom {
@@ -596,6 +599,158 @@ pub fn load_logic_map_scaled_image(cache_root: &Path, scale: u32) -> Result<Gray
     let range = preferred_logic_zoom(scale);
     let output_tile_size = (range.world_tile_size() / scale.max(1)).max(1);
     assemble_gray_map(&cache, range, output_tile_size)
+}
+
+pub fn load_logic_map_with_tracking_poi_scaled_image(
+    cache_root: &Path,
+    scale: u32,
+    view_size: u32,
+) -> Result<GrayImage> {
+    let mut image = load_logic_map_scaled_image(cache_root, scale)?;
+    overlay_tracking_poi_icons(cache_root, scale, view_size, &mut image)?;
+    Ok(image)
+}
+
+fn overlay_tracking_poi_icons(
+    cache_root: &Path,
+    scale: u32,
+    view_size: u32,
+    image: &mut GrayImage,
+) -> Result<()> {
+    if view_size == 0 {
+        return Ok(());
+    }
+
+    let manager = BwikiResourceManager::new(cache_root.to_path_buf())
+        .context("failed to create BWiki resource manager for tracking POI overlays")?;
+    let dataset = wait_for_tracking_dataset(&manager)?;
+    let icon_diameter = (((view_size as f32) / 7.0) / scale.max(1) as f32)
+        .round()
+        .max(6.0) as u32;
+    let mut icons = HashMap::<u32, RgbaImage>::new();
+
+    for mark_type in TRACKING_POI_MARK_TYPES {
+        let Some(definition) = dataset.type_by_mark_type(mark_type).cloned() else {
+            bail!("missing BWiki tracking POI definition for mark type {mark_type}");
+        };
+        let Some(points) = dataset.points_by_type.get(&mark_type) else {
+            continue;
+        };
+        if points.is_empty() {
+            continue;
+        }
+
+        let path = wait_for_tracking_icon_path(&manager, &definition)?;
+        let icon = if let Some(icon) = icons.get(&mark_type) {
+            icon
+        } else {
+            let loaded = image::open(&path)
+                .with_context(|| format!("failed to open cached BWiki icon {}", path.display()))?
+                .to_rgba8();
+            icons.entry(mark_type).or_insert(loaded)
+        };
+
+        for point in points {
+            overlay_tracking_icon(image, icon, point.world, scale, icon_diameter);
+        }
+    }
+
+    Ok(())
+}
+
+fn wait_for_tracking_dataset(manager: &BwikiResourceManager) -> Result<Arc<BwikiDataset>> {
+    let started = SystemTime::now();
+    loop {
+        manager.ensure_dataset_loaded();
+        if let Some(dataset) = manager.dataset_snapshot() {
+            return Ok(dataset);
+        }
+        let elapsed = SystemTime::now()
+            .duration_since(started)
+            .unwrap_or_default();
+        if elapsed >= TRACKING_POI_ICON_WAIT_TIMEOUT {
+            let last_error = manager
+                .last_error()
+                .unwrap_or_else(|| "no bwiki worker error reported".to_owned());
+            bail!("timed out waiting for BWiki dataset; last_error={last_error}");
+        }
+        thread::sleep(TRACKING_POI_ICON_POLL_INTERVAL);
+    }
+}
+
+fn wait_for_tracking_icon_path(
+    manager: &BwikiResourceManager,
+    definition: &BwikiTypeDefinition,
+) -> Result<PathBuf> {
+    let started = SystemTime::now();
+    loop {
+        if let Some(path) = manager.ensure_icon_path(definition.mark_type, &definition.icon_url) {
+            return Ok(path);
+        }
+        let elapsed = SystemTime::now()
+            .duration_since(started)
+            .unwrap_or_default();
+        if elapsed >= TRACKING_POI_ICON_WAIT_TIMEOUT {
+            let last_error = manager
+                .last_error()
+                .unwrap_or_else(|| "no bwiki worker error reported".to_owned());
+            bail!(
+                "timed out waiting for cached tracking POI icon {} ({}) at mark type {}; last_error={last_error}",
+                definition.name,
+                definition.icon_url,
+                definition.mark_type
+            );
+        }
+        thread::sleep(TRACKING_POI_ICON_POLL_INTERVAL);
+    }
+}
+
+fn overlay_tracking_icon(
+    image: &mut GrayImage,
+    icon: &RgbaImage,
+    world: WorldPoint,
+    scale: u32,
+    diameter: u32,
+) {
+    if diameter == 0 {
+        return;
+    }
+
+    let resized = resize(icon, diameter, diameter, FilterType::CatmullRom);
+    let center_x = (world.x / scale.max(1) as f32).round() as i32;
+    let center_y = (world.y / scale.max(1) as f32).round() as i32;
+    let left = center_x - diameter as i32 / 2;
+    let top = center_y - diameter as i32 / 2;
+
+    for (x, y, pixel) in resized.enumerate_pixels() {
+        let dst_x = left + x as i32;
+        let dst_y = top + y as i32;
+        if dst_x < 0
+            || dst_y < 0
+            || dst_x >= image.width() as i32
+            || dst_y >= image.height() as i32
+        {
+            continue;
+        }
+
+        let alpha = f32::from(pixel.0[3]) / 255.0;
+        if alpha <= 0.0 {
+            continue;
+        }
+
+        let source = tracking_icon_luma(pixel.0[0], pixel.0[1], pixel.0[2]);
+        let base = f32::from(image.get_pixel(dst_x as u32, dst_y as u32).0[0]);
+        let blended = (base * (1.0 - alpha) + f32::from(source) * alpha)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        image.put_pixel(dst_x as u32, dst_y as u32, Luma([blended]));
+    }
+}
+
+fn tracking_icon_luma(r: u8, g: u8, b: u8) -> u8 {
+    let original = ((u32::from(r) * 77 + u32::from(g) * 150 + u32::from(b) * 29) / 256) as u8;
+    let muted = (108u32 + ((u32::from(original) * 72) / 255)).min(u32::from(u8::MAX)) as u8;
+    ((u16::from(original) + u16::from(muted)) / 2) as u8
 }
 
 fn run_bwiki_worker(inner: Arc<BwikiManagerInner>, job_rx: Receiver<BwikiJob>) {

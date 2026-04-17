@@ -11,15 +11,15 @@ use imageproc::contrast::equalize_histogram;
 
 use crate::{
     resources::{
-        BWIKI_WORLD_ZOOM, BwikiCachePaths, WorkspaceSnapshot, load_logic_map_scaled_image,
-        zoom_world_bounds,
+        BWIKI_WORLD_ZOOM, BwikiCachePaths, WorkspaceSnapshot,
+        load_logic_map_with_tracking_poi_scaled_image, zoom_world_bounds,
     },
     tracking::vision::{
         MapPyramid, ScaledMap, build_match_representation, coarse_global_downscale, downscale_gray,
     },
 };
 
-const MATCH_PYRAMID_CACHE_VERSION: u32 = 2;
+const MATCH_PYRAMID_CACHE_VERSION: u32 = 3;
 const TENSOR_CACHE_FORMAT_VERSION: u32 = 1;
 const TENSOR_CACHE_MAGIC: [u8; 8] = *b"GMTRTC01";
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -80,6 +80,7 @@ pub fn load_or_build_match_pyramid(workspace: &WorkspaceSnapshot) -> Result<Prep
     let coarse_scale = coarse_global_downscale(&workspace.config);
     let initial_key = match_pyramid_cache_key(
         &workspace.assets.bwiki_cache_dir,
+        workspace.config.view_size,
         local_scale,
         global_scale,
         coarse_scale,
@@ -99,10 +100,14 @@ pub fn load_or_build_match_pyramid(workspace: &WorkspaceSnapshot) -> Result<Prep
         });
     }
 
-    let base_map =
-        load_logic_map_scaled_image(&workspace.assets.bwiki_cache_dir, 1).with_context(|| {
+    let base_map = load_logic_map_with_tracking_poi_scaled_image(
+        &workspace.assets.bwiki_cache_dir,
+        1,
+        workspace.config.view_size,
+    )
+    .with_context(|| {
             format!(
-                "failed to load base BWiki logic tiles from {}",
+                "failed to load augmented BWiki logic tiles from {}",
                 workspace.assets.bwiki_cache_dir.display()
             )
         })?;
@@ -121,6 +126,7 @@ pub fn load_or_build_match_pyramid(workspace: &WorkspaceSnapshot) -> Result<Prep
 
     let final_key = match_pyramid_cache_key(
         &workspace.assets.bwiki_cache_dir,
+        workspace.config.view_size,
         local_scale,
         global_scale,
         coarse_scale,
@@ -453,6 +459,7 @@ fn match_pyramid_cache_dir(workspace: &WorkspaceSnapshot, cache_key: &str) -> Pa
 
 fn match_pyramid_cache_key(
     bwiki_cache_dir: &Path,
+    view_size: u32,
     local_scale: u32,
     global_scale: u32,
     coarse_scale: u32,
@@ -467,9 +474,10 @@ fn match_pyramid_cache_key(
         range.min_y,
         range.max_y,
     )?;
+    let poi_hash = tracking_poi_revision_hash(bwiki_cache_dir)?;
     Ok(format!(
-        "mv{MATCH_PYRAMID_CACHE_VERSION}-z{}-{tile_hash}-l{}-g{}-c{}",
-        range.zoom, local_scale, global_scale, coarse_scale
+        "mv{MATCH_PYRAMID_CACHE_VERSION}-z{}-{tile_hash}-poi{poi_hash}-v{}-l{}-g{}-c{}",
+        range.zoom, view_size, local_scale, global_scale, coarse_scale
     ))
 }
 
@@ -508,6 +516,54 @@ fn logic_tile_revision_hash(
     }
 
     Ok(format!("{hash:016x}"))
+}
+
+fn tracking_poi_revision_hash(bwiki_cache_dir: &Path) -> Result<String> {
+    const TRACKING_POI_MARK_TYPES: [u32; 7] = [201, 202, 203, 204, 205, 206, 210];
+
+    let cache = BwikiCachePaths::new(bwiki_cache_dir.to_path_buf());
+    cache.ensure_directories()?;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    let dataset_path = cache.data_dir.join("dataset.json");
+    update_hash_bytes(&mut hash, b"dataset.json");
+    hash_file_metadata(&mut hash, &dataset_path);
+
+    if let Ok(entries) = fs::read_dir(&cache.icons_dir) {
+        let paths = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        for mark_type in TRACKING_POI_MARK_TYPES {
+            let prefix = format!("{mark_type}.");
+            if let Some(path) = paths.iter().find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix))
+            })
+            {
+                update_hash_bytes(&mut hash, prefix.as_bytes());
+                hash_file_metadata(&mut hash, path);
+            }
+        }
+    }
+
+    Ok(format!("{hash:016x}"))
+}
+
+fn hash_file_metadata(hash: &mut u64, path: &Path) {
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            update_hash_u64(hash, metadata.len());
+            if let Ok(modified) = metadata.modified() {
+                if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+                    update_hash_u64(hash, duration.as_secs());
+                    update_hash_u64(hash, u64::from(duration.subsec_nanos()));
+                }
+            }
+        }
+        Err(_) => update_hash_u64(hash, 0),
+    }
 }
 
 fn element_count(width: u32, height: u32, channels: usize) -> Result<usize> {

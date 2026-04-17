@@ -15,7 +15,7 @@ use strum::Display;
 
 use crate::{
     domain::{geometry::WorldPoint, tracker::TrackerEngineKind},
-    resources::{WorkspaceSnapshot, load_logic_map_scaled_image},
+    resources::{WorkspaceSnapshot, load_logic_map_with_tracking_poi_scaled_image},
     tracking::debug::{DebugField, DebugImage, DebugImageKind, TrackingDebugSnapshot},
 };
 
@@ -158,10 +158,14 @@ pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyram
     let local_scale = config.template.local_downscale.max(1);
     let global_scale = config.template.global_downscale.max(local_scale);
     let coarse_scale = coarse_global_downscale(config);
-    let base_map =
-        load_logic_map_scaled_image(&workspace.assets.bwiki_cache_dir, 1).with_context(|| {
+    let base_map = load_logic_map_with_tracking_poi_scaled_image(
+        &workspace.assets.bwiki_cache_dir,
+        1,
+        config.view_size,
+    )
+    .with_context(|| {
             format!(
-                "failed to load base BWiki logic tiles from {}",
+                "failed to load augmented BWiki logic tiles from {}",
                 workspace.assets.bwiki_cache_dir.display()
             )
         })?;

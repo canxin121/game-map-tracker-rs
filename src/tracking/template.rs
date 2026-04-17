@@ -2054,7 +2054,7 @@ mod tests {
     use super::*;
     use crate::{
         config::{AiDevicePreference, AppConfig, CaptureRegion},
-        resources::{WorkspaceSnapshot, load_logic_map_scaled_image},
+        resources::{WorkspaceSnapshot, load_logic_map_with_tracking_poi_scaled_image},
         tracking::{
             precompute::load_or_build_match_pyramid,
             test_support::{
@@ -2098,8 +2098,12 @@ mod tests {
                 let workspace = build_test_workspace(config.clone(), "template");
                 let prepared_pyramid =
                     load_or_build_match_pyramid(&workspace).expect("failed to build match pyramid");
-                let raw_map = load_logic_map_scaled_image(&workspace.assets.bwiki_cache_dir, 1)
-                    .expect("failed to assemble z8 logic map");
+                let raw_map = load_logic_map_with_tracking_poi_scaled_image(
+                    &workspace.assets.bwiki_cache_dir,
+                    1,
+                    config.view_size,
+                )
+                .expect("failed to assemble augmented z8 logic map");
                 let map = imageproc::contrast::equalize_histogram(&raw_map);
                 let pyramid = prepared_pyramid.pyramid;
                 let masks = build_template_masks(&config);
@@ -2122,8 +2126,62 @@ mod tests {
         sample_world_positions(image, view_size, 2)
     }
 
+    fn stress_positions(image: &GrayImage, view_size: u32) -> Vec<(u32, u32)> {
+        sample_world_positions(image, view_size, 6)
+    }
+
     fn align_to(value: u32, step: u32) -> u32 {
         (value / step.max(1)) * step.max(1)
+    }
+
+    fn bounded_world_point(fixture: &TestFixture, x: i32, y: i32) -> (u32, u32) {
+        let min_center = align_to(fixture.config.view_size / 2 + 32, 4);
+        let max_x = align_to(
+            fixture
+                .map
+                .width()
+                .saturating_sub(fixture.config.view_size / 2 + 32),
+            4,
+        );
+        let max_y = align_to(
+            fixture
+                .map
+                .height()
+                .saturating_sub(fixture.config.view_size / 2 + 32),
+            4,
+        );
+        (
+            align_to(x.clamp(min_center as i32, max_x as i32) as u32, 4),
+            align_to(y.clamp(min_center as i32, max_y as i32) as u32, 4),
+        )
+    }
+
+    fn stress_paths(fixture: &TestFixture) -> Vec<[(u32, u32); 4]> {
+        sample_world_positions(&fixture.map, fixture.config.view_size, 3)
+            .into_iter()
+            .map(|start| {
+                let dir_x = if start.0 > fixture.map.width() / 2 { -1 } else { 1 };
+                let dir_y = if start.1 > fixture.map.height() / 2 { -1 } else { 1 };
+                [
+                    bounded_world_point(fixture, start.0 as i32, start.1 as i32),
+                    bounded_world_point(
+                        fixture,
+                        start.0 as i32 + dir_x * 96,
+                        start.1 as i32 + dir_y * 48,
+                    ),
+                    bounded_world_point(
+                        fixture,
+                        start.0 as i32 + dir_x * 176,
+                        start.1 as i32 + dir_y * 104,
+                    ),
+                    bounded_world_point(
+                        fixture,
+                        start.0 as i32 + dir_x * 236,
+                        start.1 as i32 + dir_y * 144,
+                    ),
+                ]
+            })
+            .collect()
     }
 
     fn synthetic_capture(fixture: &TestFixture, center: (u32, u32)) -> GrayImage {
@@ -2308,7 +2366,7 @@ mod tests {
         let (matcher, init_elapsed) =
             timed(|| matcher_for_device(fixture, AiDevicePreference::Cpu));
         print_perf_ms("template/cpu", "matcher_init", init_elapsed);
-        let points = sample_positions(&fixture.map, fixture.config.view_size);
+        let points = stress_positions(&fixture.map, fixture.config.view_size);
         if let Some(point) = points.first().copied() {
             let capture = synthetic_capture(fixture, point);
             let (candidate, locate_elapsed) =
@@ -2331,86 +2389,60 @@ mod tests {
         let (matcher, init_elapsed) =
             timed(|| matcher_for_device(fixture, AiDevicePreference::Cpu));
         print_perf_ms("template/cpu", "local_track_matcher_init", init_elapsed);
-        let path = [
-            (
-                align_to(fixture.map.width() / 3, 4),
-                align_to(fixture.map.height() / 3, 4),
-            ),
-            (
-                align_to(fixture.map.width() / 3 + 96, 4),
-                align_to(fixture.map.height() / 3 + 48, 4),
-            ),
-            (
-                align_to(fixture.map.width() / 3 + 176, 4),
-                align_to(fixture.map.height() / 3 + 104, 4),
-            ),
-            (
-                align_to(fixture.map.width() / 3 + 236, 4),
-                align_to(fixture.map.height() / 3 + 144, 4),
-            ),
-        ];
+        for (path_index, path) in stress_paths(fixture).into_iter().enumerate() {
+            let (first, first_elapsed) = timed(|| {
+                locate_fixture_burn(fixture, &matcher, &synthetic_capture(fixture, path[0]))
+            });
+            let first = first?;
+            if path_index == 0 {
+                print_perf_ms("template/cpu", "local_track_first_locate", first_elapsed);
+            }
+            assert_world_close(first.world, path[0], 4.0);
 
-        let (first, first_elapsed) =
-            timed(|| locate_fixture_burn(fixture, &matcher, &synthetic_capture(fixture, path[0])));
-        let first = first?;
-        print_perf_ms("template/cpu", "local_track_first_locate", first_elapsed);
-        assert_world_close(first.world, path[0], 4.0);
+            for (index, window) in path.windows(2).enumerate() {
+                let previous = WorldPoint::new(window[0].0 as f32, window[0].1 as f32);
+                let capture = synthetic_capture(fixture, window[1]);
+                let templates =
+                    matcher.prepare_capture_templates(&capture, &fixture.config, &fixture.pyramid)?;
+                let region = search_region_around_center(
+                    fixture.pyramid.local.image.width(),
+                    fixture.pyramid.local.image.height(),
+                    center_to_scaled(previous, fixture.pyramid.local.scale),
+                    fixture.config.local_search.radius_px / fixture.pyramid.local.scale.max(1),
+                    templates.local.width(),
+                    templates.local.height(),
+                )?;
+                if path_index == 0 && index == 0 {
+                    let (locate, elapsed) = benchmark_repeated(0, 1, || {
+                        let crop = crop_search_region(&fixture.pyramid.local.image, region)?;
+                        matcher.locate_local_prepared(
+                            &crop.image,
+                            &templates.local,
+                            fixture.config.template.local_match_threshold,
+                            crop.origin_x,
+                            crop.origin_y,
+                            fixture.pyramid.local.scale,
+                        )
+                    });
+                    print_perf_per_op("template/cpu", "local_track_step", 1, elapsed);
+                    let locate = locate?;
+                    let candidate = locate.accepted.expect("local track should accept");
+                    assert_world_close(candidate.world, window[1], 4.0);
+                    continue;
+                }
 
-        let mut windows = path.windows(2);
-        if let Some(window) = windows.next() {
-            let previous = WorldPoint::new(window[0].0 as f32, window[0].1 as f32);
-            let capture = synthetic_capture(fixture, window[1]);
-            let templates =
-                matcher.prepare_capture_templates(&capture, &fixture.config, &fixture.pyramid)?;
-            let region = search_region_around_center(
-                fixture.pyramid.local.image.width(),
-                fixture.pyramid.local.image.height(),
-                center_to_scaled(previous, fixture.pyramid.local.scale),
-                fixture.config.local_search.radius_px / fixture.pyramid.local.scale.max(1),
-                templates.local.width(),
-                templates.local.height(),
-            )?;
-            let (locate, elapsed) = benchmark_repeated(0, 1, || {
                 let crop = crop_search_region(&fixture.pyramid.local.image, region)?;
-                matcher.locate_local_prepared(
+                let locate = matcher.locate_local_prepared(
                     &crop.image,
                     &templates.local,
                     fixture.config.template.local_match_threshold,
                     crop.origin_x,
                     crop.origin_y,
                     fixture.pyramid.local.scale,
-                )
-            });
-            print_perf_per_op("template/cpu", "local_track_step", 1, elapsed);
-            let locate = locate?;
-            let candidate = locate.accepted.expect("local track should accept");
-            assert_world_close(candidate.world, window[1], 4.0);
-        }
-
-        for window in windows {
-            let previous = WorldPoint::new(window[0].0 as f32, window[0].1 as f32);
-            let capture = synthetic_capture(fixture, window[1]);
-            let templates =
-                matcher.prepare_capture_templates(&capture, &fixture.config, &fixture.pyramid)?;
-            let region = search_region_around_center(
-                fixture.pyramid.local.image.width(),
-                fixture.pyramid.local.image.height(),
-                center_to_scaled(previous, fixture.pyramid.local.scale),
-                fixture.config.local_search.radius_px / fixture.pyramid.local.scale.max(1),
-                templates.local.width(),
-                templates.local.height(),
-            )?;
-            let crop = crop_search_region(&fixture.pyramid.local.image, region)?;
-            let locate = matcher.locate_local_prepared(
-                &crop.image,
-                &templates.local,
-                fixture.config.template.local_match_threshold,
-                crop.origin_x,
-                crop.origin_y,
-                fixture.pyramid.local.scale,
-            )?;
-            let candidate = locate.accepted.expect("local track should accept");
-            assert_world_close(candidate.world, window[1], 4.0);
+                )?;
+                let candidate = locate.accepted.expect("local track should accept");
+                assert_world_close(candidate.world, window[1], 4.0);
+            }
         }
 
         Ok(())

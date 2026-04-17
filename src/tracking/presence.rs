@@ -1806,6 +1806,8 @@ mod tests {
             "no_map_2.png",
             "no_map_3.png",
             "no_map_4.png",
+            "no_map_5.png",
+            "no_map_6.png",
         ] {
             let image = load_test_image(name);
             let crop = crop_test_region(&image, &region);
