@@ -26,46 +26,18 @@
 cargo run
 ```
 
-默认启用 `ai-candle`，并会按当前平台自动编进对应的 GPU 后端：
+默认启用 `ai-burn`，并会按当前平台自动编进对应的 GPU 后端：
 
-- Windows 默认构建包含 `CPU / CUDA`
+- Windows 默认构建包含 `CPU / CUDA / Vulkan`
 - macOS 默认构建包含 `CPU / Metal`
-- 其他平台默认构建包含 `CPU`
+- 其他平台默认构建包含 `CPU / Vulkan`
 
 如果需要显式覆盖默认行为，仍然可以手动指定特性：
 
 ```powershell
 cargo run --no-default-features
-cargo run --features ai-candle
-cargo run --features ai-candle-cuda
-cargo run --features ai-candle-metal
+cargo run --features ai-burn
 ```
-
-Windows 下仓库内脚本仍然保留为便捷入口，但默认 `cargo build` / `cargo run` 已经会直接走 CUDA 版本，不再必须依赖脚本：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-cuda.ps1
-```
-
-这个脚本会自动：
-
-- 导入最新 Visual Studio Build Tools 的 `VsDevCmd.bat`
-- 解析本机 CUDA Toolkit 根目录并设置 `CUDA_HOME` / `CUDA_PATH`
-- 设置 `NVCC_CCBIN`
-- 为 CUDA 13.x + MSVC 注入 `/Zc:preprocessor`，修复 `moe_wmma*.cu` 的预处理器报错
-
-如果需要其他 Cargo 子命令，也可以直接用：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\Invoke-CudaCargo.ps1 check
-powershell -ExecutionPolicy Bypass -File .\scripts\Invoke-CudaCargo.ps1 build --release
-powershell -ExecutionPolicy Bypass -File .\scripts\Invoke-CudaCargo.ps1 run
-```
-
-必要时可以手动覆盖：
-
-- `-CudaRoot C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2`
-- `-ComputeCap 86`
 
 ## 当前结构
 
@@ -105,7 +77,7 @@ src/ui/                 GPUI 工作台、分页导航、双地图子页、标记
 - 纯 Rust 追踪运行时
   - 使用 `screenshots` 抓取桌面小地图
   - 使用 `image` / `imageproc` 进行灰度化、缩放、直方图均衡和搜索裁剪
-  - 使用 `candle-core` / `candle-nn` 进行模板匹配张量计算与固定卷积特征编码
+  - 使用 `burn` 进行模板匹配张量计算、固定卷积特征编码和 F1-P 标签探针 GPU/CPU 推理
   - 预计算并持久化逻辑地图金字塔与全局搜索张量，减少追踪器再次启动时的初始化开销
   - 统一状态机：`LocalTrack`、`GlobalRelocate`、`InertialHold`
   - 后台线程通过 channel 把状态、坐标和调试图送回 GPUI
@@ -122,7 +94,7 @@ src/ui/                 GPUI 工作台、分页导航、双地图子页、标记
 - 本地锁定时，在上次坐标附近做局部匹配。
 - 丢失时，切回全局低分辨率重定位，再局部精修。
 - 连续失败时，进入惯性保位，超过阈值后重新全局搜。
-- 匹配打分使用 Candle 重写的 masked normalized cross-correlation，可在 `cpu / cuda / metal` 间按运行时配置切换。
+- 匹配打分使用 Burn 张量后端实现的 masked normalized cross-correlation，可在 `cpu / cuda / vulkan / metal` 间按运行时配置切换。
 
 `ConvolutionFeatureMatch` 使用卷积特征 + 张量相似度后端：
 
@@ -188,21 +160,17 @@ data/
 - `AI_DEVICE_INDEX`
 - `AI_WEIGHTS_PATH`
 
-`AI_DEVICE` 支持 `cpu`、`cuda`、`metal`，但运行时只能切换到当前二进制里实际编进来的后端。默认构建会按平台自动包含对应 GPU 后端，因此：
+`AI_DEVICE` 支持 `cpu`、`cuda`、`vulkan`、`metal`，但运行时只能切换到当前二进制里实际编进来的后端。默认构建会按平台自动包含对应 GPU 后端，因此：
 
-- Windows 默认构建可切换 `cpu / cuda`
+- Windows 默认构建可切换 `cpu / cuda / vulkan`
 - macOS 默认构建可切换 `cpu / metal`
-- 其他平台默认构建可切换 `cpu`
-- `cargo run --features ai-candle-cuda` 可显式构建 `cpu / cuda`
-- `cargo run --features ai-candle-metal` 可显式构建 `cpu / metal`
+- 其他平台默认构建可切换 `cpu / vulkan`
 
-`TEMPLATE_DEVICE` 也支持 `cpu`、`cuda`、`metal`，遵循同样的构建约束：
+`TEMPLATE_DEVICE` 也支持 `cpu`、`cuda`、`vulkan`、`metal`，遵循同样的构建约束：
 
-- Windows 默认构建可切换 `cpu / cuda`
+- Windows 默认构建可切换 `cpu / cuda / vulkan`
 - macOS 默认构建可切换 `cpu / metal`
-- 其他平台默认构建可切换 `cpu`
-- `cargo run --features ai-candle-cuda` 可显式构建 `cpu / cuda`
-- `cargo run --features ai-candle-metal` 可显式构建 `cpu / metal`
+- 其他平台默认构建可切换 `cpu / vulkan`
 
 ## 验证
 
