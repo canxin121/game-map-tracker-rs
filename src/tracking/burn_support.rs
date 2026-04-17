@@ -1,3 +1,5 @@
+use std::{env, sync::OnceLock};
+
 use crate::config::AiDevicePreference;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +73,20 @@ pub(crate) fn available_burn_backend_preferences() -> Vec<AiDevicePreference> {
     .into_iter()
     .flatten()
     .collect()
+}
+
+pub(crate) fn burn_score_map_capture_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+
+    *ENABLED.get_or_init(|| {
+        env::var("GAME_MAP_TRACKER_DEBUG_HEATMAP")
+            .ok()
+            .map(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
+            })
+            .unwrap_or(false)
+    })
 }
 
 pub(crate) fn available_burn_device_descriptors(

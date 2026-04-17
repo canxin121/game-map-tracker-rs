@@ -4,7 +4,13 @@ use anyhow::Result;
 #[cfg(feature = "ai-burn")]
 use burn::{
     backend::ndarray::NdArrayDevice,
-    tensor::{Tensor, TensorData, backend::Backend, module::conv2d, ops::ConvOptions},
+    tensor::{
+        Tensor, TensorData,
+        backend::Backend,
+        cast::ToElement,
+        module::conv2d,
+        ops::ConvOptions,
+    },
 };
 #[cfg(feature = "ai-burn")]
 use image::GrayImage;
@@ -20,7 +26,8 @@ use crate::{
     },
     tracking::{
         burn_support::{
-            BurnDeviceSelection, available_burn_backends, burn_device_label, select_burn_device,
+            BurnDeviceSelection, available_burn_backends, burn_device_label,
+            burn_score_map_capture_enabled, select_burn_device,
         },
         capture::{CaptureSource, DesktopCapture},
         debug::{DebugField, TrackingDebugSnapshot},
@@ -51,7 +58,7 @@ struct LocateResult {
     best_score: f32,
     score_width: u32,
     score_height: u32,
-    score_map: Vec<f32>,
+    score_map: Option<Vec<f32>>,
     accepted: Option<MatchCandidate>,
 }
 
@@ -91,6 +98,7 @@ where
     encoder: FixedFeatureEncoder<B>,
     global_search: SearchTensorCache<B>,
     global_mask: Tensor<B, 4>,
+    global_search_patch_energy: Tensor<B, 4>,
     local_mask: Tensor<B, 4>,
     chunk_budget_bytes: Option<usize>,
 }
@@ -698,11 +706,18 @@ where
         let global_mask =
             mask_tensor::<B>(&masks.global, encoder.output_channels(), &encoder.device);
         let local_mask = mask_tensor::<B>(&masks.local, encoder.output_channels(), &encoder.device);
+        let global_search_patch_energy = conv2d(
+            global_search.squared.clone(),
+            global_mask.clone(),
+            None::<Tensor<B, 1>>,
+            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
+        );
 
         Ok(Self {
             encoder,
             global_search,
             global_mask,
+            global_search_patch_energy,
             local_mask,
             chunk_budget_bytes,
         })
@@ -728,6 +743,7 @@ where
             &self.global_search,
             template,
             &self.global_mask,
+            Some(self.global_search_patch_energy.clone()),
             threshold,
             origin_x,
             origin_y,
@@ -749,6 +765,7 @@ where
             &search,
             template,
             &self.local_mask,
+            None,
             threshold,
             origin_x,
             origin_y,
@@ -761,6 +778,7 @@ where
         search: &SearchTensorCache<B>,
         template: &GrayImage,
         mask: &Tensor<B, 4>,
+        precomputed_patch_energy: Option<Tensor<B, 4>>,
         threshold: f32,
         origin_x: u32,
         origin_y: u32,
@@ -789,6 +807,7 @@ where
                 search,
                 &weighted_template,
                 mask,
+                precomputed_patch_energy,
                 template_energy,
                 threshold,
                 origin_x,
@@ -806,17 +825,38 @@ where
             None::<Tensor<B, 1>>,
             ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
         );
-        let search_patch_energy = conv2d(
-            search.squared.clone(),
-            mask.clone(),
-            None::<Tensor<B, 1>>,
-            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
-        );
-        let score_map =
-            tensor4_to_flat_f32(numerator / (search_patch_energy * template_energy + 1e-6).sqrt())?;
+        let search_patch_energy = match precomputed_patch_energy {
+            Some(patch_energy) => patch_energy,
+            None => conv2d(
+                search.squared.clone(),
+                mask.clone(),
+                None::<Tensor<B, 1>>,
+                ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
+            ),
+        };
+        let normalized = numerator / (search_patch_energy * template_energy + 1e-6).sqrt();
 
-        Ok(locate_result_from_flat_scores(
-            score_map,
+        if burn_score_map_capture_enabled() {
+            let score_map = tensor4_to_flat_f32(normalized)?;
+            return Ok(locate_result_from_flat_scores(
+                score_map,
+                score_width,
+                score_height,
+                threshold,
+                origin_x,
+                origin_y,
+                scale,
+                template.width(),
+                template.height(),
+            ));
+        }
+
+        let (best_score, best_left, best_top) =
+            tensor_best_match(normalized, score_width, score_height)?;
+        Ok(locate_result_from_best(
+            best_score,
+            best_left,
+            best_top,
             score_width,
             score_height,
             threshold,
@@ -825,6 +865,7 @@ where
             scale,
             template.width(),
             template.height(),
+            None,
         ))
     }
 }
@@ -980,6 +1021,7 @@ fn locate_cached_in_chunks<B>(
     search: &SearchTensorCache<B>,
     weighted_template: &Tensor<B, 4>,
     mask: &Tensor<B, 4>,
+    precomputed_patch_energy: Option<Tensor<B, 4>>,
     template_energy: f32,
     threshold: f32,
     origin_x: u32,
@@ -994,8 +1036,13 @@ where
 {
     let score_width = search.width - template_width + 1;
     let score_height = search.height - template_height + 1;
-    let mut score_map = Vec::with_capacity(score_width as usize * score_height as usize);
+    let capture_score_map = burn_score_map_capture_enabled();
+    let mut score_map = capture_score_map
+        .then(|| Vec::with_capacity(score_width as usize * score_height as usize));
     let mut output_row = 0u32;
+    let mut best_score = f32::MIN;
+    let mut best_left = 0u32;
+    let mut best_top = 0u32;
 
     while output_row < score_height {
         let rows = chunk_rows.min(score_height - output_row).max(1);
@@ -1016,21 +1063,37 @@ where
             None::<Tensor<B, 1>>,
             ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
         );
-        let search_patch_energy = conv2d(
-            squared_chunk,
-            mask.clone(),
-            None::<Tensor<B, 1>>,
-            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
-        );
-        let chunk_scores =
-            tensor4_to_flat_f32(numerator / (search_patch_energy * template_energy + 1e-6).sqrt())?;
+        let search_patch_energy = match precomputed_patch_energy.as_ref() {
+            Some(cached) => (*cached).clone().narrow(2, output_row as usize, rows as usize),
+            None => conv2d(
+                squared_chunk,
+                mask.clone(),
+                None::<Tensor<B, 1>>,
+                ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
+            ),
+        };
+        let normalized = numerator / (search_patch_energy * template_energy + 1e-6).sqrt();
+        let chunk_scores = tensor4_to_flat_f32(normalized)?;
+        if let Some((chunk_best_score, chunk_best_left, chunk_best_top)) =
+            best_match_in_flat_scores(&chunk_scores, score_width)
+        {
+            if chunk_best_score > best_score {
+                best_score = chunk_best_score;
+                best_left = chunk_best_left;
+                best_top = output_row + chunk_best_top;
+            }
+        }
         let produced_rows = (chunk_scores.len() / score_width.max(1) as usize) as u32;
-        score_map.extend(chunk_scores);
+        if let Some(score_map) = score_map.as_mut() {
+            score_map.extend(chunk_scores);
+        }
         output_row += produced_rows.max(1);
     }
 
-    Ok(locate_result_from_flat_scores(
-        score_map,
+    Ok(locate_result_from_best(
+        best_score,
+        best_left,
+        best_top,
         score_width,
         score_height,
         threshold,
@@ -1039,6 +1102,7 @@ where
         scale,
         template_width,
         template_height,
+        score_map,
     ))
 }
 
@@ -1053,6 +1117,49 @@ where
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
+#[cfg(feature = "ai-burn")]
+fn tensor_best_match<B>(
+    tensor: Tensor<B, 4>,
+    score_width: u32,
+    score_height: u32,
+) -> Result<(f32, u32, u32)>
+where
+    B: Backend<FloatElem = f32>,
+{
+    let flat_len = score_width.max(1) as usize * score_height.max(1) as usize;
+    let flat: Tensor<B, 1> = tensor.reshape([flat_len]);
+    let (best_score, best_index) = flat.max_dim_with_indices(0);
+    let best_score = best_score.into_scalar();
+    let best_index = best_index.into_scalar().to_usize() as u32;
+    Ok((
+        best_score,
+        best_index % score_width.max(1),
+        best_index / score_width.max(1),
+    ))
+}
+
+fn best_match_in_flat_scores(score_map: &[f32], score_width: u32) -> Option<(f32, u32, u32)> {
+    if score_map.is_empty() {
+        return None;
+    }
+
+    let mut best_index = 0usize;
+    let mut best_score = f32::MIN;
+    for (index, score) in score_map.iter().copied().enumerate() {
+        if score > best_score {
+            best_score = score;
+            best_index = index;
+        }
+    }
+
+    let score_width = score_width.max(1);
+    Some((
+        best_score,
+        (best_index as u32) % score_width,
+        (best_index as u32) / score_width,
+    ))
+}
+
 fn empty_locate_result() -> LocateResult {
     LocateResult {
         best_left: 0,
@@ -1060,7 +1167,7 @@ fn empty_locate_result() -> LocateResult {
         best_score: f32::MIN,
         score_width: 0,
         score_height: 0,
-        score_map: Vec::new(),
+        score_map: None,
         accepted: None,
     }
 }
@@ -1076,18 +1183,39 @@ fn locate_result_from_flat_scores(
     template_width: u32,
     template_height: u32,
 ) -> LocateResult {
-    let mut best_left = 0u32;
-    let mut best_top = 0u32;
-    let mut best_score = f32::MIN;
+    let (best_score, best_left, best_top) =
+        best_match_in_flat_scores(&score_map, score_width).unwrap_or((f32::MIN, 0, 0));
 
-    for (index, score) in score_map.iter().enumerate() {
-        if *score > best_score {
-            best_score = *score;
-            best_left = (index as u32) % score_width.max(1);
-            best_top = (index as u32) / score_width.max(1);
-        }
-    }
+    locate_result_from_best(
+        best_score,
+        best_left,
+        best_top,
+        score_width,
+        score_height,
+        threshold,
+        origin_x,
+        origin_y,
+        scale,
+        template_width,
+        template_height,
+        Some(score_map),
+    )
+}
 
+fn locate_result_from_best(
+    best_score: f32,
+    best_left: u32,
+    best_top: u32,
+    score_width: u32,
+    score_height: u32,
+    threshold: f32,
+    origin_x: u32,
+    origin_y: u32,
+    scale: u32,
+    template_width: u32,
+    template_height: u32,
+    score_map: Option<Vec<f32>>,
+) -> LocateResult {
     let accepted = if best_score >= threshold {
         Some(MatchCandidate {
             world: WorldPoint::new(
@@ -1359,15 +1487,17 @@ impl BurnTrackerInner {
             196,
         );
         let global_mask = preview_mask_image("Global Mask", &self.masks.global, 196);
-        let global_heatmap = global_result.map(|result| {
+        let global_heatmap = global_result.and_then(|result| {
+            let score_map = result.score_map.as_ref()?;
+            Some(
             preview_heatmap(
                 "Tensor Coarse Heatmap",
                 result.score_width,
                 result.score_height,
-                &result.score_map,
+                score_map,
                 Some((result.best_left, result.best_top)),
                 196,
-            )
+            ))
         });
 
         let refine = if let Some(crop) = refine_crop {
@@ -1392,15 +1522,17 @@ impl BurnTrackerInner {
             preview_image("Tensor Refine", &self.pyramid.local.image, &[], 196)
         };
         let local_mask = preview_mask_image("Local Mask", &self.masks.local, 196);
-        let refine_heatmap = refine_result.map(|result| {
+        let refine_heatmap = refine_result.and_then(|result| {
+            let score_map = result.score_map.as_ref()?;
+            Some(
             preview_heatmap(
                 "Tensor Refine Heatmap",
                 result.score_width,
                 result.score_height,
-                &result.score_map,
+                score_map,
                 Some((result.best_left, result.best_top)),
                 196,
-            )
+            ))
         });
 
         let mut fields = vec![
