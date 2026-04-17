@@ -1731,13 +1731,17 @@ fn draw_synthetic_label(image: &mut GrayImage, left: u32, top: u32, width: u32, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tracking::test_support::{benchmark_repeated, print_perf_per_op};
 
     #[test]
     fn probe_score_stays_high_when_labels_remain_visible() {
-        let score = score_probe_images_cpu(
-            &synthetic_probe(true, false, false),
-            &synthetic_probe(true, true, false),
-        );
+        let (score, elapsed) = benchmark_repeated(1, 5, || {
+            score_probe_images_cpu(
+                &synthetic_probe(true, false, false),
+                &synthetic_probe(true, true, false),
+            )
+        });
+        print_perf_per_op("presence/cpu", "synthetic_visible_score", 5, elapsed);
 
         assert!(
             score.final_score >= 0.78,
@@ -1748,10 +1752,13 @@ mod tests {
 
     #[test]
     fn probe_score_drops_when_labels_disappear_into_unrelated_background() {
-        let score = score_probe_images_cpu(
-            &synthetic_probe(true, false, false),
-            &synthetic_probe(false, true, true),
-        );
+        let (score, elapsed) = benchmark_repeated(1, 5, || {
+            score_probe_images_cpu(
+                &synthetic_probe(true, false, false),
+                &synthetic_probe(false, true, true),
+            )
+        });
+        print_perf_per_op("presence/cpu", "synthetic_missing_score", 5, elapsed);
 
         assert!(
             score.final_score <= 0.32,
@@ -1763,7 +1770,8 @@ mod tests {
     #[test]
     fn badge_only_template_extracts_multiple_label_components() {
         let template = load_test_image("badge_only.png");
-        let signature = build_probe_signature(&template);
+        let (signature, elapsed) = benchmark_repeated(1, 5, || build_probe_signature(&template));
+        print_perf_per_op("presence/cpu", "badge_signature_build", 5, elapsed);
         assert!(
             signature.label_count >= 6,
             "expected badge template to yield 6 labels, got {}",
@@ -1778,7 +1786,9 @@ mod tests {
         for name in ["has_map_1.png", "has_map_2.png"] {
             let image = load_test_image(name);
             let crop = crop_test_region(&image, &region);
-            let score = score_probe_images_cpu(&template, &crop);
+            let (score, elapsed) =
+                benchmark_repeated(1, 5, || score_probe_images_cpu(&template, &crop));
+            print_perf_per_op("presence/cpu", &format!("{name}_score"), 5, elapsed);
             assert!(
                 score.final_score >= 0.70,
                 "expected {name} to keep a high probe score, got {:.3}",
@@ -1799,7 +1809,9 @@ mod tests {
         ] {
             let image = load_test_image(name);
             let crop = crop_test_region(&image, &region);
-            let score = score_probe_images_cpu(&template, &crop);
+            let (score, elapsed) =
+                benchmark_repeated(1, 5, || score_probe_images_cpu(&template, &crop));
+            print_perf_per_op("presence/cpu", &format!("{name}_score"), 5, elapsed);
             assert!(
                 score.final_score <= 0.35,
                 "expected {name} to stay low without badge labels, got {:.3}",

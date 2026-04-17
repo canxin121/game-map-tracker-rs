@@ -664,7 +664,7 @@ fn build_template_masks(config: &AppConfig) -> MaskSet {
 
 #[cfg(feature = "ai-burn")]
 impl TemplateMatcher {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     fn new(config: &TemplateTrackingConfig, pyramid: &MapPyramid, masks: &MaskSet) -> Result<Self> {
         let selection = select_burn_device(config)?;
         Self::from_selection(selection, pyramid, masks, None)
@@ -1355,23 +1355,30 @@ fn locate_result_from_flat_scores(
 
 #[cfg(all(test, feature = "ai-burn"))]
 mod tests {
-    use std::{fs, path::PathBuf, sync::OnceLock};
+    use std::sync::OnceLock;
 
     use super::*;
     use crate::{
         config::{AiDevicePreference, AppConfig, CaptureRegion},
-        resources::{load_logic_map_scaled_image, raw_coordinate_to_world},
-        tracking::vision::{ScaledMap, downscale_gray},
+        resources::{WorkspaceSnapshot, load_logic_map_scaled_image},
+        tracking::{
+            precompute::load_or_build_match_pyramid,
+            test_support::{
+                benchmark_repeated, build_test_workspace, print_perf_ms, print_perf_per_op,
+                sample_world_positions, timed,
+            },
+        },
     };
     use anyhow::Result;
     use image::{
         GrayImage, Luma,
         imageops::{FilterType, crop_imm, replace, resize},
     };
-    use serde::Deserialize;
 
     struct TestFixture {
         config: AppConfig,
+        workspace: WorkspaceSnapshot,
+        map_cache_key: String,
         map: GrayImage,
         pyramid: MapPyramid,
         masks: MaskSet,
@@ -1379,99 +1386,46 @@ mod tests {
 
     static FIXTURE: OnceLock<TestFixture> = OnceLock::new();
 
-    #[derive(Debug, Deserialize)]
-    struct FlatPointRecord {
-        point: FlatPointCoordinate,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct FlatPointCoordinate {
-        lat: i32,
-        lng: i32,
-    }
-
     fn fixture() -> &'static TestFixture {
         FIXTURE.get_or_init(|| {
-            let cache_root = bwiki_tiles_root();
-            let raw_map = load_logic_map_scaled_image(&cache_root, 1)
-                .expect("failed to assemble z8 logic map");
-            let map = imageproc::contrast::equalize_histogram(&raw_map);
+            let (fixture, elapsed) = timed(|| {
+                let mut config = AppConfig::default();
+                config.minimap = CaptureRegion {
+                    top: 0,
+                    left: 0,
+                    width: 255,
+                    height: 235,
+                };
+                config.view_size = 400;
+                config.template.local_downscale = 4;
+                config.template.global_downscale = 8;
+                config.template.local_match_threshold = 0.45;
+                config.template.global_match_threshold = 0.40;
+                let workspace = build_test_workspace(config.clone(), "template");
+                let prepared_pyramid =
+                    load_or_build_match_pyramid(&workspace).expect("failed to build match pyramid");
+                let raw_map = load_logic_map_scaled_image(&workspace.assets.bwiki_cache_dir, 1)
+                    .expect("failed to assemble z8 logic map");
+                let map = imageproc::contrast::equalize_histogram(&raw_map);
+                let pyramid = prepared_pyramid.pyramid;
+                let masks = build_template_masks(&config);
 
-            let mut config = AppConfig::default();
-            config.minimap = CaptureRegion {
-                top: 0,
-                left: 0,
-                width: 255,
-                height: 235,
-            };
-            config.view_size = 400;
-            config.template.local_downscale = 4;
-            config.template.global_downscale = 8;
-            config.template.local_match_threshold = 0.45;
-            config.template.global_match_threshold = 0.40;
-
-            let local_scale = config.template.local_downscale.max(1);
-            let global_scale = config.template.global_downscale.max(local_scale);
-            let local_map = build_match_representation(&downscale_gray(&map, local_scale));
-            let global_map = build_match_representation(&downscale_gray(&map, global_scale));
-            let pyramid = MapPyramid {
-                local: ScaledMap {
-                    scale: local_scale,
-                    image: local_map,
-                },
-                global: ScaledMap {
-                    scale: global_scale,
-                    image: global_map,
-                },
-            };
-            let masks = build_template_masks(&config);
-
-            TestFixture {
-                config,
-                map,
-                pyramid,
-                masks,
-            }
+                TestFixture {
+                    config,
+                    workspace,
+                    map_cache_key: prepared_pyramid.cache_key,
+                    map,
+                    pyramid,
+                    masks,
+                }
+            });
+            print_perf_ms("template", "fixture_prepare", elapsed);
+            fixture
         })
     }
 
-    fn bwiki_tiles_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join(".tmp-bwiki-rocom")
-            .join("tiles-z8-test")
-    }
-
-    fn flat_points_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join(".tmp-bwiki-rocom")
-            .join("flat-points.json")
-    }
-
     fn sample_positions(image: &GrayImage, view_size: u32) -> Vec<(u32, u32)> {
-        let min_center = align_to(view_size / 2 + 32, 4);
-        let max_x = align_to(image.width().saturating_sub(view_size / 2 + 32), 4);
-        let max_y = align_to(image.height().saturating_sub(view_size / 2 + 32), 4);
-
-        let raw = fs::read_to_string(flat_points_path()).expect("failed to read flat-points.json");
-        let records: Vec<FlatPointRecord> =
-            serde_json::from_str(&raw).expect("failed to parse flat-points.json");
-
-        let mut points = Vec::new();
-        for record in records {
-            let world = raw_coordinate_to_world(record.point.lat, record.point.lng);
-            let x = align_to(world.x.max(0.0) as u32, 4).clamp(min_center, max_x);
-            let y = align_to(world.y.max(0.0) as u32, 4).clamp(min_center, max_y);
-            if points
-                .iter()
-                .all(|(px, py)| x.abs_diff(*px) + y.abs_diff(*py) >= 1_500)
-            {
-                points.push((x, y));
-            }
-            if points.len() >= 6 {
-                break;
-            }
-        }
-        points
+        sample_world_positions(image, view_size, 2)
     }
 
     fn align_to(value: u32, step: u32) -> u32 {
@@ -1527,8 +1481,14 @@ mod tests {
     fn matcher_for_device(fixture: &TestFixture, device: AiDevicePreference) -> TemplateMatcher {
         let mut config = fixture.config.template.clone();
         config.device = device;
-        TemplateMatcher::new(&config, &fixture.pyramid, &fixture.masks)
-            .expect("failed to create template matcher")
+        TemplateMatcher::new_cached(
+            &fixture.workspace,
+            &config,
+            &fixture.pyramid,
+            &fixture.masks,
+            &fixture.map_cache_key,
+        )
+        .expect("failed to create template matcher")
     }
 
     fn locate_fixture_burn(
@@ -1580,18 +1540,24 @@ mod tests {
             fixture,
             sample_positions(&fixture.map, fixture.config.view_size)[0],
         );
-        let local = prepare_capture_template(
-            &capture,
-            fixture.config.view_size,
-            fixture.pyramid.local.scale,
-            fixture.config.template.mask_outer_radius,
-        );
-        let global = prepare_capture_template(
-            &capture,
-            fixture.config.view_size,
-            fixture.pyramid.global.scale,
-            fixture.config.template.mask_outer_radius,
-        );
+        let (local, local_elapsed) = timed(|| {
+            prepare_capture_template(
+                &capture,
+                fixture.config.view_size,
+                fixture.pyramid.local.scale,
+                fixture.config.template.mask_outer_radius,
+            )
+        });
+        let (global, global_elapsed) = timed(|| {
+            prepare_capture_template(
+                &capture,
+                fixture.config.view_size,
+                fixture.pyramid.global.scale,
+                fixture.config.template.mask_outer_radius,
+            )
+        });
+        print_perf_ms("template", "prepare_local_template", local_elapsed);
+        print_perf_ms("template", "prepare_global_template", global_elapsed);
 
         assert_eq!(
             local.width(),
@@ -1608,8 +1574,19 @@ mod tests {
     #[test]
     fn synthetic_captures_locate_many_positions_on_burn_cpu() -> Result<()> {
         let fixture = fixture();
-        let matcher = matcher_for_device(fixture, AiDevicePreference::Cpu);
-        for point in sample_positions(&fixture.map, fixture.config.view_size) {
+        let (matcher, init_elapsed) =
+            timed(|| matcher_for_device(fixture, AiDevicePreference::Cpu));
+        print_perf_ms("template/cpu", "matcher_init", init_elapsed);
+        let points = sample_positions(&fixture.map, fixture.config.view_size);
+        if let Some(point) = points.first().copied() {
+            let capture = synthetic_capture(fixture, point);
+            let (candidate, locate_elapsed) =
+                benchmark_repeated(0, 1, || locate_fixture_burn(fixture, &matcher, &capture));
+            print_perf_per_op("template/cpu", "reference_locate", 1, locate_elapsed);
+            let candidate = candidate?;
+            assert_world_close(candidate.world, point, 4.0);
+        }
+        for point in points.into_iter().skip(1) {
             let capture = synthetic_capture(fixture, point);
             let candidate = locate_fixture_burn(fixture, &matcher, &capture)?;
             assert_world_close(candidate.world, point, 4.0);
@@ -1620,7 +1597,9 @@ mod tests {
     #[test]
     fn local_track_sequence_stays_locked_on_burn_cpu() -> Result<()> {
         let fixture = fixture();
-        let matcher = matcher_for_device(fixture, AiDevicePreference::Cpu);
+        let (matcher, init_elapsed) =
+            timed(|| matcher_for_device(fixture, AiDevicePreference::Cpu));
+        print_perf_ms("template/cpu", "local_track_matcher_init", init_elapsed);
         let path = [
             (
                 align_to(fixture.map.width() / 3, 4),
@@ -1640,10 +1619,42 @@ mod tests {
             ),
         ];
 
-        let first = locate_fixture_burn(fixture, &matcher, &synthetic_capture(fixture, path[0]))?;
+        let (first, first_elapsed) =
+            timed(|| locate_fixture_burn(fixture, &matcher, &synthetic_capture(fixture, path[0])));
+        let first = first?;
+        print_perf_ms("template/cpu", "local_track_first_locate", first_elapsed);
         assert_world_close(first.world, path[0], 4.0);
 
-        for window in path.windows(2) {
+        let mut windows = path.windows(2);
+        if let Some(window) = windows.next() {
+            let previous = WorldPoint::new(window[0].0 as f32, window[0].1 as f32);
+            let capture = synthetic_capture(fixture, window[1]);
+            let (local_template, _) =
+                prepare_capture_templates(&capture, &fixture.config, &fixture.pyramid);
+            let crop = crop_around_center(
+                &fixture.pyramid.local.image,
+                center_to_scaled(previous, fixture.pyramid.local.scale),
+                fixture.config.local_search.radius_px / fixture.pyramid.local.scale.max(1),
+                local_template.width(),
+                local_template.height(),
+            )?;
+            let (locate, elapsed) = benchmark_repeated(0, 1, || {
+                matcher.locate_local(
+                    &crop.image,
+                    &local_template,
+                    fixture.config.template.local_match_threshold,
+                    crop.origin_x,
+                    crop.origin_y,
+                    fixture.pyramid.local.scale,
+                )
+            });
+            print_perf_per_op("template/cpu", "local_track_step", 1, elapsed);
+            let locate = locate?;
+            let candidate = locate.accepted.expect("local track should accept");
+            assert_world_close(candidate.world, window[1], 4.0);
+        }
+
+        for window in windows {
             let previous = WorldPoint::new(window[0].0 as f32, window[0].1 as f32);
             let capture = synthetic_capture(fixture, window[1]);
             let (local_template, _) =
@@ -1674,14 +1685,24 @@ mod tests {
     #[test]
     fn synthetic_captures_locate_many_positions_on_burn_cuda() -> Result<()> {
         let fixture = fixture();
-        let matcher = match std::panic::catch_unwind(|| {
-            matcher_for_device(fixture, AiDevicePreference::Cuda)
+        let (matcher, init_elapsed) = match std::panic::catch_unwind(|| {
+            timed(|| matcher_for_device(fixture, AiDevicePreference::Cuda))
         }) {
-            Ok(matcher) => matcher,
+            Ok(result) => result,
             Err(_) => return Ok(()),
         };
+        print_perf_ms("template/cuda", "matcher_init", init_elapsed);
 
-        for point in sample_positions(&fixture.map, fixture.config.view_size) {
+        let points = sample_positions(&fixture.map, fixture.config.view_size);
+        if let Some(point) = points.first().copied() {
+            let capture = synthetic_capture(fixture, point);
+            let (candidate, locate_elapsed) =
+                benchmark_repeated(0, 1, || locate_fixture_burn(fixture, &matcher, &capture));
+            print_perf_per_op("template/cuda", "reference_locate", 1, locate_elapsed);
+            let candidate = candidate?;
+            assert_world_close(candidate.world, point, 4.0);
+        }
+        for point in points.into_iter().skip(1) {
             let capture = synthetic_capture(fixture, point);
             let candidate = locate_fixture_burn(fixture, &matcher, &capture)?;
             assert_world_close(candidate.world, point, 4.0);
@@ -1693,14 +1714,24 @@ mod tests {
     #[test]
     fn synthetic_captures_locate_many_positions_on_burn_vulkan() -> Result<()> {
         let fixture = fixture();
-        let matcher = match std::panic::catch_unwind(|| {
-            matcher_for_device(fixture, AiDevicePreference::Vulkan)
+        let (matcher, init_elapsed) = match std::panic::catch_unwind(|| {
+            timed(|| matcher_for_device(fixture, AiDevicePreference::Vulkan))
         }) {
-            Ok(matcher) => matcher,
+            Ok(result) => result,
             Err(_) => return Ok(()),
         };
+        print_perf_ms("template/vulkan", "matcher_init", init_elapsed);
 
-        for point in sample_positions(&fixture.map, fixture.config.view_size) {
+        let points = sample_positions(&fixture.map, fixture.config.view_size);
+        if let Some(point) = points.first().copied() {
+            let capture = synthetic_capture(fixture, point);
+            let (candidate, locate_elapsed) =
+                benchmark_repeated(0, 1, || locate_fixture_burn(fixture, &matcher, &capture));
+            print_perf_per_op("template/vulkan", "reference_locate", 1, locate_elapsed);
+            let candidate = candidate?;
+            assert_world_close(candidate.world, point, 4.0);
+        }
+        for point in points.into_iter().skip(1) {
             let capture = synthetic_capture(fixture, point);
             let candidate = locate_fixture_burn(fixture, &matcher, &capture)?;
             assert_world_close(candidate.world, point, 4.0);
@@ -1712,14 +1743,24 @@ mod tests {
     #[test]
     fn synthetic_captures_locate_many_positions_on_burn_metal() -> Result<()> {
         let fixture = fixture();
-        let matcher = match std::panic::catch_unwind(|| {
-            matcher_for_device(fixture, AiDevicePreference::Metal)
+        let (matcher, init_elapsed) = match std::panic::catch_unwind(|| {
+            timed(|| matcher_for_device(fixture, AiDevicePreference::Metal))
         }) {
-            Ok(matcher) => matcher,
+            Ok(result) => result,
             Err(_) => return Ok(()),
         };
+        print_perf_ms("template/metal", "matcher_init", init_elapsed);
 
-        for point in sample_positions(&fixture.map, fixture.config.view_size) {
+        let points = sample_positions(&fixture.map, fixture.config.view_size);
+        if let Some(point) = points.first().copied() {
+            let capture = synthetic_capture(fixture, point);
+            let (candidate, locate_elapsed) =
+                benchmark_repeated(0, 1, || locate_fixture_burn(fixture, &matcher, &capture));
+            print_perf_per_op("template/metal", "reference_locate", 1, locate_elapsed);
+            let candidate = candidate?;
+            assert_world_close(candidate.world, point, 4.0);
+        }
+        for point in points.into_iter().skip(1) {
             let capture = synthetic_capture(fixture, point);
             let candidate = locate_fixture_burn(fixture, &matcher, &capture)?;
             assert_world_close(candidate.world, point, 4.0);

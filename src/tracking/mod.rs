@@ -8,4 +8,7 @@ pub mod runtime;
 pub mod template;
 pub mod vision;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use runtime::{TrackerSession, TrackingEvent, TrackingStatus, spawn_tracker_session};
