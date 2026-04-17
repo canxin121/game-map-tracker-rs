@@ -28,9 +28,14 @@ pub enum TrackerEngineKind {
     #[strum(
         to_string = "卷积特征匹配",
         serialize = "ConvolutionFeatureMatch",
-        serialize = "CandleAi"
+        serialize = "CandleAi",
+        serialize = "BurnAi"
     )]
-    #[serde(rename = "convolution_feature_match", alias = "CandleAi")]
+    #[serde(
+        rename = "convolution_feature_match",
+        alias = "CandleAi",
+        alias = "BurnAi"
+    )]
     ConvolutionFeatureMatch,
 }
 
@@ -54,7 +59,8 @@ pub enum TrackingSource {
     #[strum(to_string = "惯性保位")]
     InertialHold,
     #[strum(to_string = "卷积特征匹配")]
-    CandleEmbedding,
+    #[serde(rename = "FeatureEmbedding", alias = "CandleEmbedding")]
+    FeatureEmbedding,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -2269,7 +2269,7 @@ fn settings_convolution_page(
 ) -> impl IntoElement {
     settings_page_shell(
         "卷积特征匹配",
-        "卷积特征匹配使用 Candle 后端。设备序号下拉只显示当前后端真实可见的设备；在 Windows 的 CUDA 模式下这里只列出 NVIDIA CUDA 设备，不包含 Intel/AMD 核显。",
+        "卷积特征匹配现在统一走 Burn 后端。设备下拉只显示当前后端真实可见的设备；CUDA 只列 NVIDIA CUDA 设备，Vulkan 可以覆盖 Intel / AMD / NVIDIA 的核显或独显。",
         Some(settings_editor_toolbar(cx, tokens).into_any_element()),
         vec![
             tracker_cache_rebuild_section(
@@ -2292,7 +2292,7 @@ fn settings_convolution_page(
                                 .w_full()
                                 .menu_width(px(420.0))
                                 .placeholder("选择执行设备")
-                                .search_placeholder("搜索 CPU / CUDA / Metal")
+                                .search_placeholder("搜索 CPU / CUDA / Vulkan / Metal")
                                 .empty_message("当前没有可用设备。"),
                         )
                         .into_any_element(),
@@ -2361,7 +2361,7 @@ fn settings_template_page(
 ) -> impl IntoElement {
     settings_page_shell(
         "多尺度模板匹配",
-        "多尺度模板匹配现在同样走 Candle 设备抽象。设备序号下拉只显示当前后端真实可见的设备；在 Windows 的 CUDA 模式下这里只列出 NVIDIA CUDA 设备，不包含 Intel/AMD 核显。",
+        "多尺度模板匹配现在同样走 Burn 设备抽象。设备下拉只显示当前后端真实可见的设备；CUDA 只列 NVIDIA CUDA 设备，Vulkan 可以覆盖 Intel / AMD / NVIDIA 的核显或独显。",
         Some(settings_editor_toolbar(cx, tokens).into_any_element()),
         vec![
             tracker_cache_rebuild_section(
@@ -2383,7 +2383,7 @@ fn settings_template_page(
                             .w_full()
                             .menu_width(px(420.0))
                             .placeholder("选择执行设备")
-                            .search_placeholder("搜索 CPU / CUDA / Metal")
+                            .search_placeholder("搜索 CPU / CUDA / Vulkan / Metal")
                             .empty_message("当前没有可用设备。"),
                     )
                     .into_any_element(),

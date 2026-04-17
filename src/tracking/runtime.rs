@@ -13,7 +13,7 @@ use crate::{
     domain::tracker::{PositionEstimate, TrackerEngineKind, TrackerLifecycle, TrackingSource},
     resources::WorkspaceSnapshot,
     tracking::{
-        ai::CandleTrackerWorker, debug::TrackingDebugSnapshot, template::TemplateTrackerWorker,
+        ai::BurnTrackerWorker, debug::TrackingDebugSnapshot, template::TemplateTrackerWorker,
     },
 };
 
@@ -164,9 +164,7 @@ fn build_worker(
         TrackerEngineKind::MultiScaleTemplateMatch => {
             Box::new(TemplateTrackerWorker::new(workspace)?)
         }
-        TrackerEngineKind::ConvolutionFeatureMatch => {
-            Box::new(CandleTrackerWorker::new(workspace)?)
-        }
+        TrackerEngineKind::ConvolutionFeatureMatch => Box::new(BurnTrackerWorker::new(workspace)?),
     })
 }
 

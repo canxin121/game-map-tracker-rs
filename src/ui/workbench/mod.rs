@@ -39,9 +39,7 @@ use crate::{
     tracking::{
         TrackerSession, TrackingEvent,
         ai::rebuild_convolution_engine_cache,
-        candle_support::{
-            available_candle_backend_preferences, available_candle_device_descriptors,
-        },
+        burn_support::{available_burn_backend_preferences, available_burn_device_descriptors},
         debug::TrackingDebugSnapshot,
         presence::calibrate_minimap_presence_probe,
         spawn_tracker_session,
@@ -1237,9 +1235,9 @@ impl TrackerWorkbench {
     }
 
     fn device_preference_picker_items() -> Vec<DevicePreferencePickerItem> {
-        available_candle_backend_preferences()
+        available_burn_backend_preferences()
             .into_iter()
-            .filter(|preference| !available_candle_device_descriptors(*preference).is_empty())
+            .filter(|preference| !available_burn_device_descriptors(*preference).is_empty())
             .map(|preference| match preference {
                 AiDevicePreference::Cpu => DevicePreferencePickerItem::new(
                     preference,
@@ -1252,16 +1250,25 @@ impl TrackerWorkbench {
                     "CUDA",
                     format!(
                         "NVIDIA CUDA · {} 台设备",
-                        available_candle_device_descriptors(preference).len()
+                        available_burn_device_descriptors(preference).len()
                     ),
                     "cuda nvidia gpu rtx geforce",
+                ),
+                AiDevicePreference::Vulkan => DevicePreferencePickerItem::new(
+                    preference,
+                    "Vulkan",
+                    format!(
+                        "通用 GPU · {} 台设备",
+                        available_burn_device_descriptors(preference).len()
+                    ),
+                    "vulkan intel amd nvidia gpu integrated discrete",
                 ),
                 AiDevicePreference::Metal => DevicePreferencePickerItem::new(
                     preference,
                     "Metal",
                     format!(
                         "Apple GPU · {} 台设备",
-                        available_candle_device_descriptors(preference).len()
+                        available_burn_device_descriptors(preference).len()
                     ),
                     "metal apple gpu",
                 ),
@@ -1273,10 +1280,11 @@ impl TrackerWorkbench {
         let prefix = match preference {
             AiDevicePreference::Cpu => "CPU",
             AiDevicePreference::Cuda => "CUDA",
+            AiDevicePreference::Vulkan => "Vulkan",
             AiDevicePreference::Metal => "Metal",
         };
 
-        available_candle_device_descriptors(preference)
+        available_burn_device_descriptors(preference)
             .into_iter()
             .map(|device| {
                 let title = format!("{prefix} #{}", device.ordinal);

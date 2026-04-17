@@ -6,13 +6,12 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["ai-candle"]
-ai-candle = ["dep:candle-core", "dep:candle-nn"]
-ai-candle-cuda = ["ai-candle", "candle-core/cuda"]
-ai-candle-metal = ["ai-candle", "candle-core/metal"]
+default = ["ai-burn"]
+ai-burn = ["dep:burn", "dep:safetensors"]
 
 [dependencies]
 anyhow = "1.0"
+burn = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std", "ndarray"] }
 crossbeam-channel = "0.5"
 derive_more = { version = "2.0", features = ["display", "from"] }
 directories = "6.0"
@@ -30,6 +29,7 @@ schemars = "1.0"
 screenshots = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+safetensors = { version = "0.4", optional = true }
 strum = { version = "0.27", features = ["derive"] }
 thiserror = "2.0"
 toml = "0.8"
@@ -39,14 +39,14 @@ ureq = "2.12"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-candle-core = { version = "0.9.1", optional = true, features = ["cuda"] }
-candle-nn = { version = "0.9.1", optional = true }
+burn = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std", "ndarray", "cuda", "vulkan"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { version = "0.9.1", optional = true, features = ["metal"] }
-candle-nn = { version = "0.9.1", optional = true }
+burn = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std", "ndarray", "metal"] }
 
 [target.'cfg(not(any(target_os = "windows", target_os = "macos")))'.dependencies]
-candle-core = { version = "0.9.1", optional = true }
-candle-nn = { version = "0.9.1", optional = true }
+burn = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std", "ndarray", "vulkan"] }
+
+[patch.crates-io]
+cubecl-wgpu = { path = "vendor/cubecl-wgpu-0.10.0-pre.3" }

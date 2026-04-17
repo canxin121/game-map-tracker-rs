@@ -45,6 +45,7 @@ pub struct AiTrackingConfig {
 pub enum AiDevicePreference {
     Cpu,
     Cuda,
+    Vulkan,
     Metal,
 }
 
@@ -148,6 +149,7 @@ impl fmt::Display for AiDevicePreference {
         let value = match self {
             Self::Cpu => "cpu",
             Self::Cuda => "cuda",
+            Self::Vulkan => "vulkan",
             Self::Metal => "metal",
         };
         f.write_str(value)
@@ -161,8 +163,9 @@ impl FromStr for AiDevicePreference {
         match value.trim().to_ascii_lowercase().as_str() {
             "cpu" => Ok(Self::Cpu),
             "cuda" => Ok(Self::Cuda),
+            "vulkan" => Ok(Self::Vulkan),
             "metal" => Ok(Self::Metal),
-            _ => Err("ai.device 必须是 cpu、cuda 或 metal。".to_owned()),
+            _ => Err("ai.device 必须是 cpu、cuda、vulkan 或 metal。".to_owned()),
         }
     }
 }

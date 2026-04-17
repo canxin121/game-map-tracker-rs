@@ -1,17 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
-use anyhow::Result;
-use image::GrayImage;
-#[cfg(not(feature = "ai-candle"))]
-use image::{ImageBuffer, Luma};
-#[cfg(not(feature = "ai-candle"))]
-use imageproc::template_matching::{MatchTemplateMethod, match_template_with_mask_parallel};
-
-#[cfg(not(feature = "ai-candle"))]
-use crate::config::AiDevicePreference;
-#[cfg(feature = "ai-candle")]
 use crate::config::TemplateTrackingConfig;
-#[cfg(feature = "ai-candle")]
+#[cfg(feature = "ai-burn")]
 use crate::tracking::vision::{gray_image_as_unit_vec, mask_as_unit_vec};
 use crate::{
     config::AppConfig,
@@ -34,19 +24,24 @@ use crate::{
         },
     },
 };
+use anyhow::Result;
+#[cfg(feature = "ai-burn")]
+use burn::{
+    backend::ndarray::NdArrayDevice,
+    tensor::{Tensor, TensorData, backend::Backend, module::conv2d, ops::ConvOptions},
+};
+use image::GrayImage;
 
-#[cfg(feature = "ai-candle")]
+#[cfg(feature = "ai-burn")]
 use crate::tracking::precompute::{
     PersistedTensorCache, clear_tensor_caches_by_prefix, load_tensor_cache, save_tensor_cache,
     tracker_tensor_cache_path,
 };
 
-#[cfg(feature = "ai-candle")]
-use crate::tracking::candle_support::{
-    available_candle_backends, candle_device_label, select_candle_device,
+#[cfg(feature = "ai-burn")]
+use crate::tracking::burn_support::{
+    BurnDeviceSelection, available_burn_backends, burn_device_label, select_burn_device,
 };
-#[cfg(feature = "ai-candle")]
-use candle_core::{Device, DeviceLocation, Tensor};
 
 #[derive(Debug, Clone)]
 struct LocateResult {
@@ -59,7 +54,6 @@ struct LocateResult {
     accepted: Option<MatchCandidate>,
 }
 
-#[derive(Debug, Clone)]
 pub struct TemplateTrackerWorker {
     config: AppConfig,
     capture: DesktopCapture,
@@ -67,33 +61,51 @@ pub struct TemplateTrackerWorker {
     pyramid: MapPyramid,
     masks: MaskSet,
     state: TrackerState,
-    #[cfg(feature = "ai-candle")]
-    matcher: CandleTemplateMatcher,
+    #[cfg(feature = "ai-burn")]
+    matcher: TemplateMatcher,
 }
 
-#[cfg(feature = "ai-candle")]
-#[derive(Debug, Clone)]
-struct CandleTemplateMatcher {
-    device: Device,
-    global_search: SearchTensorCache,
-    global_mask_squared: Tensor,
-    local_mask_squared: Tensor,
+#[cfg(feature = "ai-burn")]
+enum TemplateMatcher {
+    NdArray(BurnTemplateMatcher<burn::backend::NdArray>),
+    #[cfg(burn_cuda_backend)]
+    Cuda(BurnTemplateMatcher<burn::backend::Cuda>),
+    #[cfg(burn_vulkan_backend)]
+    Vulkan(BurnTemplateMatcher<burn::backend::Vulkan>),
+    #[cfg(burn_metal_backend)]
+    Metal(BurnTemplateMatcher<burn::backend::Metal>),
 }
 
-#[cfg(feature = "ai-candle")]
-#[derive(Debug, Clone)]
-struct SearchTensorCache {
-    image: Tensor,
-    squared: Tensor,
+#[cfg(feature = "ai-burn")]
+struct BurnTemplateMatcher<B>
+where
+    B: Backend<FloatElem = f32>,
+    B::Device: Clone + Send + Sync + 'static,
+{
+    device: B::Device,
+    device_label: String,
+    global_search: SearchTensorCache<B>,
+    global_mask_squared: Tensor<B, 4>,
+    local_mask_squared: Tensor<B, 4>,
+    chunk_budget_bytes: Option<usize>,
+}
+
+#[cfg(feature = "ai-burn")]
+struct SearchTensorCache<B>
+where
+    B: Backend<FloatElem = f32>,
+{
+    image: Tensor<B, 4>,
+    squared: Tensor<B, 4>,
     width: u32,
     height: u32,
 }
 
-#[cfg(feature = "ai-candle")]
+#[cfg(feature = "ai-burn")]
 const CUDA_CONV_IM2COL_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 
-#[cfg(feature = "ai-candle")]
-const METAL_CONV_IM2COL_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+#[cfg(feature = "ai-burn")]
+const WGPU_CONV_IM2COL_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
 impl TemplateTrackerWorker {
     pub fn new(workspace: Arc<WorkspaceSnapshot>) -> Result<Self> {
@@ -101,27 +113,19 @@ impl TemplateTrackerWorker {
         let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
         let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
         let prepared_pyramid = load_or_build_match_pyramid(workspace.as_ref())?;
-        #[cfg(feature = "ai-candle")]
+        #[cfg(feature = "ai-burn")]
         let cache_key = prepared_pyramid.cache_key.clone();
         let pyramid = prepared_pyramid.pyramid;
         let masks = build_template_masks(&config);
 
-        #[cfg(feature = "ai-candle")]
-        let matcher = CandleTemplateMatcher::new_cached(
+        #[cfg(feature = "ai-burn")]
+        let matcher = TemplateMatcher::new_cached(
             workspace.as_ref(),
             &config.template,
             &pyramid,
             &masks,
             &cache_key,
         )?;
-
-        #[cfg(not(feature = "ai-candle"))]
-        if config.template.device != AiDevicePreference::Cpu {
-            anyhow::bail!(
-                "模板匹配引擎配置选择了 {} 设备，但当前二进制未启用 `ai-candle` 特性；请先使用默认构建或显式启用 Candle 后端重新构建",
-                config.template.device
-            );
-        }
 
         Ok(Self {
             config,
@@ -130,7 +134,7 @@ impl TemplateTrackerWorker {
             pyramid,
             masks,
             state: TrackerState::default(),
-            #[cfg(feature = "ai-candle")]
+            #[cfg(feature = "ai-burn")]
             matcher,
         })
     }
@@ -278,12 +282,10 @@ impl TemplateTrackerWorker {
     }
 
     fn locate_global_template(&self, template: &GrayImage) -> Result<LocateResult> {
-        #[cfg(feature = "ai-candle")]
+        #[cfg(feature = "ai-burn")]
         {
-            return self.matcher.locate_cached(
-                &self.matcher.global_search,
+            return self.matcher.locate_global(
                 template,
-                &self.matcher.global_mask_squared,
                 self.config.template.global_match_threshold,
                 0,
                 0,
@@ -291,17 +293,10 @@ impl TemplateTrackerWorker {
             );
         }
 
-        #[cfg(not(feature = "ai-candle"))]
+        #[cfg(not(feature = "ai-burn"))]
         {
-            locate_template_cpu(
-                &self.pyramid.global.image,
-                template,
-                &self.masks.global,
-                self.config.template.global_match_threshold,
-                0,
-                0,
-                self.pyramid.global.scale,
-            )
+            let _ = template;
+            anyhow::bail!("模板匹配引擎当前二进制未启用 `ai-burn` 特性")
         }
     }
 
@@ -314,30 +309,17 @@ impl TemplateTrackerWorker {
         origin_y: u32,
         scale: u32,
     ) -> Result<LocateResult> {
-        #[cfg(feature = "ai-candle")]
+        #[cfg(feature = "ai-burn")]
         {
-            return self.matcher.locate_dynamic(
-                image,
-                template,
-                &self.matcher.local_mask_squared,
-                threshold,
-                origin_x,
-                origin_y,
-                scale,
-            );
+            return self
+                .matcher
+                .locate_local(image, template, threshold, origin_x, origin_y, scale);
         }
 
-        #[cfg(not(feature = "ai-candle"))]
+        #[cfg(not(feature = "ai-burn"))]
         {
-            locate_template_cpu(
-                image,
-                template,
-                &self.masks.local,
-                threshold,
-                origin_x,
-                origin_y,
-                scale,
-            )
+            let _ = (image, template, threshold, origin_x, origin_y, scale);
+            anyhow::bail!("模板匹配引擎当前二进制未启用 `ai-burn` 特性")
         }
     }
 
@@ -494,7 +476,7 @@ impl TemplateTrackerWorker {
             ),
         ];
 
-        #[cfg(feature = "ai-candle")]
+        #[cfg(feature = "ai-burn")]
         fields.push(DebugField::new("设备", self.matcher.device_label()));
 
         if let Some(result) = global_result {
@@ -586,19 +568,19 @@ impl TemplateTrackerWorker {
 pub fn rebuild_template_engine_cache(workspace: &WorkspaceSnapshot) -> Result<()> {
     clear_match_pyramid_caches(workspace)?;
 
-    #[cfg(feature = "ai-candle")]
+    #[cfg(feature = "ai-burn")]
     clear_tensor_caches_by_prefix(workspace, "template-global-search")?;
 
-    #[cfg(feature = "ai-candle")]
+    #[cfg(feature = "ai-burn")]
     let prepared_pyramid = load_or_build_match_pyramid(workspace)?;
 
-    #[cfg(not(feature = "ai-candle"))]
+    #[cfg(not(feature = "ai-burn"))]
     let _ = load_or_build_match_pyramid(workspace)?;
 
-    #[cfg(feature = "ai-candle")]
+    #[cfg(feature = "ai-burn")]
     {
         let masks = build_template_masks(&workspace.config);
-        let _ = CandleTemplateMatcher::new_cached(
+        let _ = TemplateMatcher::new_cached(
             workspace,
             &workspace.config.template,
             &prepared_pyramid.pyramid,
@@ -680,13 +662,12 @@ fn build_template_masks(config: &AppConfig) -> MaskSet {
     }
 }
 
-#[cfg(feature = "ai-candle")]
-impl CandleTemplateMatcher {
+#[cfg(feature = "ai-burn")]
+impl TemplateMatcher {
     #[cfg_attr(not(test), allow(dead_code))]
     fn new(config: &TemplateTrackingConfig, pyramid: &MapPyramid, masks: &MaskSet) -> Result<Self> {
-        let device = select_candle_device(config)?;
-        let global_search = SearchTensorCache::from_gray_image(&pyramid.global.image, &device)?;
-        Self::from_parts(device, global_search, masks)
+        let selection = select_burn_device(config)?;
+        Self::from_selection(selection, pyramid, masks, None)
     }
 
     fn new_cached(
@@ -696,51 +677,292 @@ impl CandleTemplateMatcher {
         masks: &MaskSet,
         map_cache_key: &str,
     ) -> Result<Self> {
-        let device = select_candle_device(config)?;
-        let global_search = load_or_build_template_global_search(
-            workspace,
-            map_cache_key,
-            &pyramid.global.image,
-            &device,
-        )?;
-        Self::from_parts(device, global_search, masks)
+        let selection = select_burn_device(config)?;
+        Self::from_selection(selection, pyramid, masks, Some((workspace, map_cache_key)))
     }
 
-    fn from_parts(
-        device: Device,
-        global_search: SearchTensorCache,
+    fn from_selection(
+        selection: BurnDeviceSelection,
+        pyramid: &MapPyramid,
         masks: &MaskSet,
+        cache: Option<(&WorkspaceSnapshot, &str)>,
     ) -> Result<Self> {
-        let global_mask_squared = mask_squared_tensor(&masks.global, &device)?;
-        let local_mask_squared = mask_squared_tensor(&masks.local, &device)?;
-
-        Ok(Self {
-            device,
-            global_search,
-            global_mask_squared,
-            local_mask_squared,
-        })
+        match selection {
+            BurnDeviceSelection::Cpu => {
+                let matcher = match cache {
+                    Some((workspace, map_cache_key)) => {
+                        BurnTemplateMatcher::<burn::backend::NdArray>::new_cached(
+                            workspace,
+                            NdArrayDevice::Cpu,
+                            "CPU".to_owned(),
+                            None,
+                            pyramid,
+                            masks,
+                            map_cache_key,
+                        )?
+                    }
+                    None => BurnTemplateMatcher::<burn::backend::NdArray>::new(
+                        NdArrayDevice::Cpu,
+                        "CPU".to_owned(),
+                        None,
+                        pyramid,
+                        masks,
+                    )?,
+                };
+                Ok(Self::NdArray(matcher))
+            }
+            #[cfg(burn_cuda_backend)]
+            BurnDeviceSelection::Cuda(device) => {
+                let label = burn_device_label(&BurnDeviceSelection::Cuda(device.clone()));
+                let matcher = match cache {
+                    Some((workspace, map_cache_key)) => {
+                        BurnTemplateMatcher::<burn::backend::Cuda>::new_cached(
+                            workspace,
+                            device,
+                            label,
+                            Some(CUDA_CONV_IM2COL_BUDGET_BYTES),
+                            pyramid,
+                            masks,
+                            map_cache_key,
+                        )?
+                    }
+                    None => BurnTemplateMatcher::<burn::backend::Cuda>::new(
+                        device,
+                        label,
+                        Some(CUDA_CONV_IM2COL_BUDGET_BYTES),
+                        pyramid,
+                        masks,
+                    )?,
+                };
+                Ok(Self::Cuda(matcher))
+            }
+            #[cfg(burn_vulkan_backend)]
+            BurnDeviceSelection::Vulkan(device) => {
+                let label = burn_device_label(&BurnDeviceSelection::Vulkan(device.clone()));
+                let matcher = match cache {
+                    Some((workspace, map_cache_key)) => {
+                        BurnTemplateMatcher::<burn::backend::Vulkan>::new_cached(
+                            workspace,
+                            device,
+                            label,
+                            Some(WGPU_CONV_IM2COL_BUDGET_BYTES),
+                            pyramid,
+                            masks,
+                            map_cache_key,
+                        )?
+                    }
+                    None => BurnTemplateMatcher::<burn::backend::Vulkan>::new(
+                        device,
+                        label,
+                        Some(WGPU_CONV_IM2COL_BUDGET_BYTES),
+                        pyramid,
+                        masks,
+                    )?,
+                };
+                Ok(Self::Vulkan(matcher))
+            }
+            #[cfg(burn_metal_backend)]
+            BurnDeviceSelection::Metal(device) => {
+                let label = burn_device_label(&BurnDeviceSelection::Metal(device.clone()));
+                let matcher = match cache {
+                    Some((workspace, map_cache_key)) => {
+                        BurnTemplateMatcher::<burn::backend::Metal>::new_cached(
+                            workspace,
+                            device,
+                            label,
+                            Some(WGPU_CONV_IM2COL_BUDGET_BYTES),
+                            pyramid,
+                            masks,
+                            map_cache_key,
+                        )?
+                    }
+                    None => BurnTemplateMatcher::<burn::backend::Metal>::new(
+                        device,
+                        label,
+                        Some(WGPU_CONV_IM2COL_BUDGET_BYTES),
+                        pyramid,
+                        masks,
+                    )?,
+                };
+                Ok(Self::Metal(matcher))
+            }
+        }
     }
 
-    fn device_label(&self) -> String {
-        candle_device_label(&self.device)
-    }
-
-    fn locate_dynamic(
+    fn locate_global(
         &self,
-        image: &GrayImage,
         template: &GrayImage,
-        mask_squared: &Tensor,
         threshold: f32,
         origin_x: u32,
         origin_y: u32,
         scale: u32,
     ) -> Result<LocateResult> {
-        let search = SearchTensorCache::from_gray_image(image, &self.device)?;
+        match self {
+            Self::NdArray(matcher) => {
+                matcher.locate_global(template, threshold, origin_x, origin_y, scale)
+            }
+            #[cfg(burn_cuda_backend)]
+            Self::Cuda(matcher) => {
+                matcher.locate_global(template, threshold, origin_x, origin_y, scale)
+            }
+            #[cfg(burn_vulkan_backend)]
+            Self::Vulkan(matcher) => {
+                matcher.locate_global(template, threshold, origin_x, origin_y, scale)
+            }
+            #[cfg(burn_metal_backend)]
+            Self::Metal(matcher) => {
+                matcher.locate_global(template, threshold, origin_x, origin_y, scale)
+            }
+        }
+    }
+
+    fn locate_local(
+        &self,
+        image: &GrayImage,
+        template: &GrayImage,
+        threshold: f32,
+        origin_x: u32,
+        origin_y: u32,
+        scale: u32,
+    ) -> Result<LocateResult> {
+        match self {
+            Self::NdArray(matcher) => {
+                matcher.locate_local(image, template, threshold, origin_x, origin_y, scale)
+            }
+            #[cfg(burn_cuda_backend)]
+            Self::Cuda(matcher) => {
+                matcher.locate_local(image, template, threshold, origin_x, origin_y, scale)
+            }
+            #[cfg(burn_vulkan_backend)]
+            Self::Vulkan(matcher) => {
+                matcher.locate_local(image, template, threshold, origin_x, origin_y, scale)
+            }
+            #[cfg(burn_metal_backend)]
+            Self::Metal(matcher) => {
+                matcher.locate_local(image, template, threshold, origin_x, origin_y, scale)
+            }
+        }
+    }
+
+    fn device_label(&self) -> String {
+        match self {
+            Self::NdArray(matcher) => matcher.device_label(),
+            #[cfg(burn_cuda_backend)]
+            Self::Cuda(matcher) => matcher.device_label(),
+            #[cfg(burn_vulkan_backend)]
+            Self::Vulkan(matcher) => matcher.device_label(),
+            #[cfg(burn_metal_backend)]
+            Self::Metal(matcher) => matcher.device_label(),
+        }
+    }
+}
+
+#[cfg(feature = "ai-burn")]
+impl<B> BurnTemplateMatcher<B>
+where
+    B: Backend<FloatElem = f32>,
+    B::Device: Clone + Send + Sync + 'static,
+{
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn new(
+        device: B::Device,
+        device_label: String,
+        chunk_budget_bytes: Option<usize>,
+        pyramid: &MapPyramid,
+        masks: &MaskSet,
+    ) -> Result<Self> {
+        let global_search =
+            SearchTensorCache::<B>::from_gray_image(&pyramid.global.image, &device)?;
+        Self::from_parts(
+            device,
+            device_label,
+            chunk_budget_bytes,
+            global_search,
+            masks,
+        )
+    }
+
+    fn new_cached(
+        workspace: &WorkspaceSnapshot,
+        device: B::Device,
+        device_label: String,
+        chunk_budget_bytes: Option<usize>,
+        pyramid: &MapPyramid,
+        masks: &MaskSet,
+        map_cache_key: &str,
+    ) -> Result<Self> {
+        let global_search = load_or_build_template_global_search::<B>(
+            workspace,
+            map_cache_key,
+            &pyramid.global.image,
+            &device,
+        )?;
+        Self::from_parts(
+            device,
+            device_label,
+            chunk_budget_bytes,
+            global_search,
+            masks,
+        )
+    }
+
+    fn from_parts(
+        device: B::Device,
+        device_label: String,
+        chunk_budget_bytes: Option<usize>,
+        global_search: SearchTensorCache<B>,
+        masks: &MaskSet,
+    ) -> Result<Self> {
+        let global_mask_squared = mask_squared_tensor::<B>(&masks.global, &device);
+        let local_mask_squared = mask_squared_tensor::<B>(&masks.local, &device);
+
+        Ok(Self {
+            device,
+            device_label,
+            global_search,
+            global_mask_squared,
+            local_mask_squared,
+            chunk_budget_bytes,
+        })
+    }
+
+    fn device_label(&self) -> String {
+        self.device_label.clone()
+    }
+
+    fn locate_global(
+        &self,
+        template: &GrayImage,
+        threshold: f32,
+        origin_x: u32,
+        origin_y: u32,
+        scale: u32,
+    ) -> Result<LocateResult> {
+        self.locate_cached(
+            &self.global_search,
+            template,
+            &self.global_mask_squared,
+            threshold,
+            origin_x,
+            origin_y,
+            scale,
+        )
+    }
+
+    fn locate_local(
+        &self,
+        image: &GrayImage,
+        template: &GrayImage,
+        threshold: f32,
+        origin_x: u32,
+        origin_y: u32,
+        scale: u32,
+    ) -> Result<LocateResult> {
+        let search = SearchTensorCache::<B>::from_gray_image(image, &self.device)?;
         self.locate_cached(
             &search,
             template,
-            mask_squared,
+            &self.local_mask_squared,
             threshold,
             origin_x,
             origin_y,
@@ -750,46 +972,35 @@ impl CandleTemplateMatcher {
 
     fn locate_cached(
         &self,
-        search: &SearchTensorCache,
+        search: &SearchTensorCache<B>,
         template: &GrayImage,
-        mask_squared: &Tensor,
+        mask_squared: &Tensor<B, 4>,
         threshold: f32,
         origin_x: u32,
         origin_y: u32,
         scale: u32,
     ) -> Result<LocateResult> {
         if search.width <= template.width() || search.height <= template.height() {
-            return Ok(LocateResult {
-                best_left: 0,
-                best_top: 0,
-                best_score: f32::MIN,
-                score_width: 0,
-                score_height: 0,
-                score_map: Vec::new(),
-                accepted: None,
-            });
+            return Ok(empty_locate_result());
         }
 
-        let template_tensor = gray_image_tensor(template, &self.device)?;
-        let weighted_template = template_tensor.broadcast_mul(mask_squared)?;
-        let template_energy = template_tensor
-            .sqr()?
-            .broadcast_mul(mask_squared)?
-            .sum_all()?
-            .to_scalar::<f32>()?;
-        let chunk_rows = candle_match_chunk_rows(
-            &self.device,
+        let template_tensor = gray_image_tensor::<B>(template, &self.device);
+        let weighted_template = template_tensor.clone() * mask_squared.clone();
+        let template_energy = (template_tensor.powi_scalar(2) * mask_squared.clone())
+            .sum()
+            .into_scalar();
+        let score_width = search.width - template.width() + 1;
+        let score_height = search.height - template.height() + 1;
+        let chunk_rows = burn_match_chunk_rows(
+            self.chunk_budget_bytes,
             search.width,
             search.height,
             template.width(),
             template.height(),
+            1,
         );
-        if chunk_rows
-            < search
-                .height
-                .saturating_sub(template.height())
-                .saturating_add(1)
-        {
+
+        if chunk_rows < score_height {
             return locate_cached_in_chunks(
                 search,
                 &weighted_template,
@@ -805,28 +1016,43 @@ impl CandleTemplateMatcher {
             );
         }
 
-        let numerator = search.image.conv2d(&weighted_template, 0, 1, 1, 1)?;
-        let search_patch_energy = search.squared.conv2d(mask_squared, 0, 1, 1, 1)?;
-        let denominator = ((&search_patch_energy * template_energy as f64)? + 1e-6)?.sqrt()?;
-        let score_map = numerator.broadcast_div(&denominator)?;
+        let numerator = conv2d(
+            search.image.clone(),
+            weighted_template,
+            None::<Tensor<B, 1>>,
+            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
+        );
+        let search_patch_energy = conv2d(
+            search.squared.clone(),
+            mask_squared.clone(),
+            None::<Tensor<B, 1>>,
+            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
+        );
+        let score_map =
+            tensor_to_flat_f32(numerator / (search_patch_energy * template_energy + 1e-6).sqrt())?;
 
-        locate_result_from_score_map(
+        Ok(locate_result_from_flat_scores(
             score_map,
+            score_width,
+            score_height,
             threshold,
             origin_x,
             origin_y,
             scale,
             template.width(),
             template.height(),
-        )
+        ))
     }
 }
 
-#[cfg(feature = "ai-candle")]
-impl SearchTensorCache {
-    fn from_gray_image(image: &GrayImage, device: &Device) -> Result<Self> {
-        let image_tensor = gray_image_tensor(image, device)?;
-        let squared = image_tensor.sqr()?;
+#[cfg(feature = "ai-burn")]
+impl<B> SearchTensorCache<B>
+where
+    B: Backend<FloatElem = f32>,
+{
+    fn from_gray_image(image: &GrayImage, device: &B::Device) -> Result<Self> {
+        let image_tensor = gray_image_tensor::<B>(image, device);
+        let squared = image_tensor.clone().powi_scalar(2);
         Ok(Self {
             image: image_tensor,
             squared,
@@ -835,7 +1061,7 @@ impl SearchTensorCache {
         })
     }
 
-    fn from_persisted(cache: PersistedTensorCache, device: &Device) -> Result<Self> {
+    fn from_persisted(cache: PersistedTensorCache, device: &B::Device) -> Result<Self> {
         if cache.channels != 1 {
             anyhow::bail!(
                 "template search tensor cache channel count {} is invalid",
@@ -843,16 +1069,20 @@ impl SearchTensorCache {
             );
         }
 
-        let image = Tensor::from_vec(
-            cache.primary,
-            (1, 1, cache.height as usize, cache.width as usize),
+        let image = Tensor::<B, 4>::from_data(
+            TensorData::new(
+                cache.primary,
+                [1, 1, cache.height as usize, cache.width as usize],
+            ),
             device,
-        )?;
-        let squared = Tensor::from_vec(
-            cache.secondary,
-            (1, 1, cache.height as usize, cache.width as usize),
+        );
+        let squared = Tensor::<B, 4>::from_data(
+            TensorData::new(
+                cache.secondary,
+                [1, 1, cache.height as usize, cache.width as usize],
+            ),
             device,
-        )?;
+        );
         Ok(Self {
             image,
             squared,
@@ -862,41 +1092,30 @@ impl SearchTensorCache {
     }
 
     fn to_persisted(&self) -> Result<PersistedTensorCache> {
-        let image = self
-            .image
-            .squeeze(0)?
-            .squeeze(0)?
-            .to_vec2::<f32>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let squared = self
-            .squared
-            .squeeze(0)?
-            .squeeze(0)?
-            .to_vec2::<f32>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+        let image = tensor_to_flat_f32(self.image.clone())?;
+        let squared = tensor_to_flat_f32(self.squared.clone())?;
         PersistedTensorCache::from_parts(self.width, self.height, 1, image, squared)
     }
 }
 
-#[cfg(feature = "ai-candle")]
-fn load_or_build_template_global_search(
+#[cfg(feature = "ai-burn")]
+fn load_or_build_template_global_search<B>(
     workspace: &WorkspaceSnapshot,
     map_cache_key: &str,
     image: &GrayImage,
-    device: &Device,
-) -> Result<SearchTensorCache> {
+    device: &B::Device,
+) -> Result<SearchTensorCache<B>>
+where
+    B: Backend<FloatElem = f32>,
+{
     let cache_path = tracker_tensor_cache_path(workspace, "template-global-search", map_cache_key);
     if let Ok(Some(cache)) = load_tensor_cache(&cache_path) {
-        if let Ok(search) = SearchTensorCache::from_persisted(cache, device) {
+        if let Ok(search) = SearchTensorCache::<B>::from_persisted(cache, device) {
             return Ok(search);
         }
     }
 
-    let search = SearchTensorCache::from_gray_image(image, device)?;
+    let search = SearchTensorCache::<B>::from_gray_image(image, device)?;
     if let Ok(persisted) = search.to_persisted() {
         let _ = save_tensor_cache(&cache_path, &persisted);
     }
@@ -913,16 +1132,15 @@ impl TrackingWorker for TemplateTrackerWorker {
     }
 
     fn initial_status(&self) -> TrackingStatus {
-        #[cfg(feature = "ai-candle")]
+        #[cfg(feature = "ai-burn")]
         let message = format!(
-            "多尺度模板匹配引擎已启动：设备 {}，可用后端 {}，masked NCC 张量匹配 + 局部锁定 / 全局重定位 / 惯性保位。",
+            "多尺度模板匹配引擎已启动：设备 {}，可用后端 {}，Burn masked NCC 张量匹配 + 局部锁定 / 全局重定位 / 惯性保位。",
             self.matcher.device_label(),
-            available_candle_backends(),
+            available_burn_backends(),
         );
 
-        #[cfg(not(feature = "ai-candle"))]
-        let message =
-            "多尺度模板匹配引擎已启动：设备 CPU，局部锁定 + 全局重定位 + 惯性保位。".to_owned();
+        #[cfg(not(feature = "ai-burn"))]
+        let message = "多尺度模板匹配引擎当前二进制未启用 `ai-burn` 特性。".to_owned();
 
         TrackingStatus::new(TrackerEngineKind::MultiScaleTemplateMatch, message)
     }
@@ -932,35 +1150,46 @@ impl TrackingWorker for TemplateTrackerWorker {
     }
 }
 
-#[cfg(feature = "ai-candle")]
-fn gray_image_tensor(image: &GrayImage, device: &Device) -> Result<Tensor> {
-    Ok(Tensor::from_vec(
-        gray_image_as_unit_vec(image),
-        (1, 1, image.height() as usize, image.width() as usize),
+#[cfg(feature = "ai-burn")]
+fn gray_image_tensor<B>(image: &GrayImage, device: &B::Device) -> Tensor<B, 4>
+where
+    B: Backend<FloatElem = f32>,
+{
+    Tensor::<B, 4>::from_data(
+        TensorData::new(
+            gray_image_as_unit_vec(image),
+            [1, 1, image.height() as usize, image.width() as usize],
+        ),
         device,
-    )?)
+    )
 }
 
-#[cfg(feature = "ai-candle")]
-fn mask_squared_tensor(mask: &GrayImage, device: &Device) -> Result<Tensor> {
+#[cfg(feature = "ai-burn")]
+fn mask_squared_tensor<B>(mask: &GrayImage, device: &B::Device) -> Tensor<B, 4>
+where
+    B: Backend<FloatElem = f32>,
+{
     let values = mask_as_unit_vec(mask, 1)
         .into_iter()
         .map(|value| value * value)
         .collect::<Vec<_>>();
-    Ok(Tensor::from_vec(
-        values,
-        (1, 1, mask.height() as usize, mask.width() as usize),
+    Tensor::<B, 4>::from_data(
+        TensorData::new(
+            values,
+            [1, 1, mask.height() as usize, mask.width() as usize],
+        ),
         device,
-    )?)
+    )
 }
 
-#[cfg(feature = "ai-candle")]
-fn candle_match_chunk_rows(
-    device: &Device,
+#[cfg(feature = "ai-burn")]
+fn burn_match_chunk_rows(
+    chunk_budget_bytes: Option<usize>,
     search_width: u32,
     search_height: u32,
     template_width: u32,
     template_height: u32,
+    channels: usize,
 ) -> u32 {
     let output_height = search_height
         .saturating_sub(template_height)
@@ -972,15 +1201,14 @@ fn candle_match_chunk_rows(
         return 0;
     }
 
-    let budget_bytes = match device.location() {
-        DeviceLocation::Cpu => return output_height,
-        DeviceLocation::Cuda { .. } => CUDA_CONV_IM2COL_BUDGET_BYTES,
-        DeviceLocation::Metal { .. } => METAL_CONV_IM2COL_BUDGET_BYTES,
+    let Some(budget_bytes) = chunk_budget_bytes else {
+        return output_height;
     };
 
     let per_output_row_bytes = output_width as usize
         * template_width as usize
         * template_height as usize
+        * channels.max(1)
         * std::mem::size_of::<f32>();
     if per_output_row_bytes == 0 {
         return output_height;
@@ -989,11 +1217,11 @@ fn candle_match_chunk_rows(
     ((budget_bytes / per_output_row_bytes).max(1) as u32).min(output_height)
 }
 
-#[cfg(feature = "ai-candle")]
-fn locate_cached_in_chunks(
-    search: &SearchTensorCache,
-    weighted_template: &Tensor,
-    mask_squared: &Tensor,
+#[cfg(feature = "ai-burn")]
+fn locate_cached_in_chunks<B>(
+    search: &SearchTensorCache<B>,
+    weighted_template: &Tensor<B, 4>,
+    mask_squared: &Tensor<B, 4>,
     template_energy: f32,
     threshold: f32,
     origin_x: u32,
@@ -1002,7 +1230,10 @@ fn locate_cached_in_chunks(
     template_width: u32,
     template_height: u32,
     chunk_rows: u32,
-) -> Result<LocateResult> {
+) -> Result<LocateResult>
+where
+    B: Backend<FloatElem = f32>,
+{
     let score_width = search.width - template_width + 1;
     let score_height = search.height - template_height + 1;
     let mut score_map = Vec::with_capacity(score_width as usize * score_height as usize);
@@ -1011,22 +1242,33 @@ fn locate_cached_in_chunks(
     while output_row < score_height {
         let rows = chunk_rows.min(score_height - output_row).max(1);
         let slice_height = rows + template_height - 1;
-        let image_chunk = search
-            .image
-            .narrow(2, output_row as usize, slice_height as usize)?;
-        let squared_chunk = search
-            .squared
-            .narrow(2, output_row as usize, slice_height as usize)?;
-        let numerator = image_chunk.conv2d(weighted_template, 0, 1, 1, 1)?;
-        let search_patch_energy = squared_chunk.conv2d(mask_squared, 0, 1, 1, 1)?;
-        let denominator = ((&search_patch_energy * template_energy as f64)? + 1e-6)?.sqrt()?;
-        let chunk_scores = numerator.broadcast_div(&denominator)?;
-        let rows = chunk_scores.squeeze(0)?.squeeze(0)?.to_vec2::<f32>()?;
-        let produced_rows = rows.len() as u32;
-        for row in rows {
-            score_map.extend(row);
-        }
-        output_row += produced_rows;
+        let image_chunk =
+            search
+                .image
+                .clone()
+                .narrow(2, output_row as usize, slice_height as usize);
+        let squared_chunk =
+            search
+                .squared
+                .clone()
+                .narrow(2, output_row as usize, slice_height as usize);
+        let numerator = conv2d(
+            image_chunk,
+            weighted_template.clone(),
+            None::<Tensor<B, 1>>,
+            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
+        );
+        let search_patch_energy = conv2d(
+            squared_chunk,
+            mask_squared.clone(),
+            None::<Tensor<B, 1>>,
+            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
+        );
+        let chunk_scores =
+            tensor_to_flat_f32(numerator / (search_patch_energy * template_energy + 1e-6).sqrt())?;
+        let produced_rows = (chunk_scores.len() / score_width.max(1) as usize) as u32;
+        score_map.extend(chunk_scores);
+        output_row += produced_rows.max(1);
     }
 
     Ok(locate_result_from_flat_scores(
@@ -1042,34 +1284,29 @@ fn locate_cached_in_chunks(
     ))
 }
 
-#[cfg(feature = "ai-candle")]
-fn locate_result_from_score_map(
-    score_map: Tensor,
-    threshold: f32,
-    origin_x: u32,
-    origin_y: u32,
-    scale: u32,
-    template_width: u32,
-    template_height: u32,
-) -> Result<LocateResult> {
-    let scores = score_map.squeeze(0)?.squeeze(0)?.to_vec2::<f32>()?;
-    let score_height = scores.len() as u32;
-    let score_width = scores.first().map_or(0, |row| row.len() as u32);
-    let score_map = scores.into_iter().flatten().collect::<Vec<_>>();
-    Ok(locate_result_from_flat_scores(
-        score_map,
-        score_width,
-        score_height,
-        threshold,
-        origin_x,
-        origin_y,
-        scale,
-        template_width,
-        template_height,
-    ))
+#[cfg(feature = "ai-burn")]
+fn tensor_to_flat_f32<B>(tensor: Tensor<B, 4>) -> Result<Vec<f32>>
+where
+    B: Backend<FloatElem = f32>,
+{
+    tensor
+        .into_data()
+        .to_vec::<f32>()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
-#[cfg(feature = "ai-candle")]
+fn empty_locate_result() -> LocateResult {
+    LocateResult {
+        best_left: 0,
+        best_top: 0,
+        best_score: f32::MIN,
+        score_width: 0,
+        score_height: 0,
+        score_map: Vec::new(),
+        accepted: None,
+    }
+}
+
 fn locate_result_from_flat_scores(
     score_map: Vec<f32>,
     score_width: u32,
@@ -1116,92 +1353,13 @@ fn locate_result_from_flat_scores(
     }
 }
 
-#[cfg(not(feature = "ai-candle"))]
-fn locate_template_cpu(
-    image: &GrayImage,
-    template: &GrayImage,
-    mask: &GrayImage,
-    threshold: f32,
-    origin_x: u32,
-    origin_y: u32,
-    scale: u32,
-) -> Result<LocateResult> {
-    if image.width() <= template.width() || image.height() <= template.height() {
-        return Ok(LocateResult {
-            best_left: 0,
-            best_top: 0,
-            best_score: f32::MIN,
-            score_width: 0,
-            score_height: 0,
-            score_map: Vec::new(),
-            accepted: None,
-        });
-    }
-
-    let result = match_template_with_mask_parallel(
-        image,
-        template,
-        MatchTemplateMethod::CrossCorrelationNormalized,
-        mask,
-    );
-    let (best_left, best_top, best_score) = best_match_location(&result);
-    let score_width = result.width();
-    let score_height = result.height();
-    let score_map = result.pixels().map(|pixel| pixel.0[0]).collect::<Vec<_>>();
-
-    let accepted = if best_score >= threshold {
-        Some(MatchCandidate {
-            world: WorldPoint::new(
-                (origin_x + best_left + template.width() / 2) as f32 * scale as f32,
-                (origin_y + best_top + template.height() / 2) as f32 * scale as f32,
-            ),
-            score: best_score,
-        })
-    } else {
-        None
-    };
-
-    Ok(LocateResult {
-        best_left,
-        best_top,
-        best_score,
-        score_width,
-        score_height,
-        score_map,
-        accepted,
-    })
-}
-
-#[cfg(not(feature = "ai-candle"))]
-fn best_match_location(result: &GrayImageF32) -> (u32, u32, f32) {
-    let mut best_left = 0;
-    let mut best_top = 0;
-    let mut best_score = f32::MIN;
-
-    for (x, y, pixel) in result.enumerate_pixels() {
-        let score = pixel.0[0];
-        if score > best_score {
-            best_left = x;
-            best_top = y;
-            best_score = score;
-        }
-    }
-
-    (best_left, best_top, best_score)
-}
-
-#[cfg(not(feature = "ai-candle"))]
-type GrayImageF32 = ImageBuffer<Luma<f32>, Vec<f32>>;
-
-#[cfg(test)]
+#[cfg(all(test, feature = "ai-burn"))]
 mod tests {
     use std::{fs, path::PathBuf, sync::OnceLock};
 
     use super::*;
-    #[cfg(feature = "ai-candle")]
-    use crate::config::AiDevicePreference;
     use crate::{
-        config::{AppConfig, CaptureRegion},
+        config::{AiDevicePreference, AppConfig, CaptureRegion},
         resources::{load_logic_map_scaled_image, raw_coordinate_to_world},
         tracking::vision::{ScaledMap, downscale_gray},
     };
@@ -1366,71 +1524,22 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "ai-candle"))]
-    fn locate_fixture_cpu(fixture: &TestFixture, capture: &GrayImage) -> Result<MatchCandidate> {
-        let (local_template, global_template) =
-            prepare_capture_templates(capture, &fixture.config, &fixture.pyramid);
-        let coarse = locate_template_cpu(
-            &fixture.pyramid.global.image,
-            &global_template,
-            &fixture.masks.global,
-            fixture.config.template.global_match_threshold,
-            0,
-            0,
-            fixture.pyramid.global.scale,
-        )?;
-        let coarse = coarse.accepted.unwrap_or_else(|| {
-            panic!(
-                "global locate should accept, best_score={:.3}, best_left={}, best_top={}",
-                coarse.best_score, coarse.best_left, coarse.best_top
-            )
-        });
-        let crop = crop_around_center(
-            &fixture.pyramid.local.image,
-            center_to_scaled(coarse.world, fixture.pyramid.local.scale),
-            fixture.config.template.global_refine_radius_px / fixture.pyramid.local.scale.max(1),
-            local_template.width(),
-            local_template.height(),
-        )?;
-        let refine = locate_template_cpu(
-            &crop.image,
-            &local_template,
-            &fixture.masks.local,
-            fixture.config.template.global_match_threshold,
-            crop.origin_x,
-            crop.origin_y,
-            fixture.pyramid.local.scale,
-        )?;
-
-        Ok(refine
-            .accepted
-            .or(Some(coarse))
-            .expect("refine locate should accept"))
-    }
-
-    #[cfg(feature = "ai-candle")]
-    fn matcher_for_device(
-        fixture: &TestFixture,
-        device: AiDevicePreference,
-    ) -> CandleTemplateMatcher {
+    fn matcher_for_device(fixture: &TestFixture, device: AiDevicePreference) -> TemplateMatcher {
         let mut config = fixture.config.template.clone();
         config.device = device;
-        CandleTemplateMatcher::new(&config, &fixture.pyramid, &fixture.masks)
+        TemplateMatcher::new(&config, &fixture.pyramid, &fixture.masks)
             .expect("failed to create template matcher")
     }
 
-    #[cfg(feature = "ai-candle")]
-    fn locate_fixture_candle(
+    fn locate_fixture_burn(
         fixture: &TestFixture,
-        matcher: &CandleTemplateMatcher,
+        matcher: &TemplateMatcher,
         capture: &GrayImage,
     ) -> Result<MatchCandidate> {
         let (local_template, global_template) =
             prepare_capture_templates(capture, &fixture.config, &fixture.pyramid);
-        let coarse = matcher.locate_cached(
-            &matcher.global_search,
+        let coarse = matcher.locate_global(
             &global_template,
-            &matcher.global_mask_squared,
             fixture.config.template.global_match_threshold,
             0,
             0,
@@ -1449,10 +1558,9 @@ mod tests {
             local_template.width(),
             local_template.height(),
         )?;
-        let refine = matcher.locate_dynamic(
+        let refine = matcher.locate_local(
             &crop.image,
             &local_template,
-            &matcher.local_mask_squared,
             fixture.config.template.global_match_threshold,
             crop.origin_x,
             crop.origin_y,
@@ -1497,34 +1605,20 @@ mod tests {
         assert_eq!(global.width(), fixture.masks.global.width());
     }
 
-    #[cfg(not(feature = "ai-candle"))]
     #[test]
-    fn synthetic_captures_locate_many_positions_on_cpu() -> Result<()> {
-        let fixture = fixture();
-        for point in sample_positions(&fixture.map, fixture.config.view_size) {
-            let capture = synthetic_capture(fixture, point);
-            let candidate = locate_fixture_cpu(fixture, &capture)?;
-            assert_world_close(candidate.world, point, 4.0);
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "ai-candle")]
-    #[test]
-    fn synthetic_captures_locate_many_positions_on_candle_cpu() -> Result<()> {
+    fn synthetic_captures_locate_many_positions_on_burn_cpu() -> Result<()> {
         let fixture = fixture();
         let matcher = matcher_for_device(fixture, AiDevicePreference::Cpu);
         for point in sample_positions(&fixture.map, fixture.config.view_size) {
             let capture = synthetic_capture(fixture, point);
-            let candidate = locate_fixture_candle(fixture, &matcher, &capture)?;
+            let candidate = locate_fixture_burn(fixture, &matcher, &capture)?;
             assert_world_close(candidate.world, point, 4.0);
         }
         Ok(())
     }
 
-    #[cfg(feature = "ai-candle")]
     #[test]
-    fn local_track_sequence_stays_locked_on_candle_cpu() -> Result<()> {
+    fn local_track_sequence_stays_locked_on_burn_cpu() -> Result<()> {
         let fixture = fixture();
         let matcher = matcher_for_device(fixture, AiDevicePreference::Cpu);
         let path = [
@@ -1546,7 +1640,7 @@ mod tests {
             ),
         ];
 
-        let first = locate_fixture_candle(fixture, &matcher, &synthetic_capture(fixture, path[0]))?;
+        let first = locate_fixture_burn(fixture, &matcher, &synthetic_capture(fixture, path[0]))?;
         assert_world_close(first.world, path[0], 4.0);
 
         for window in path.windows(2) {
@@ -1561,10 +1655,9 @@ mod tests {
                 local_template.width(),
                 local_template.height(),
             )?;
-            let locate = matcher.locate_dynamic(
+            let locate = matcher.locate_local(
                 &crop.image,
                 &local_template,
-                &matcher.local_mask_squared,
                 fixture.config.template.local_match_threshold,
                 crop.origin_x,
                 crop.origin_y,
@@ -1577,9 +1670,9 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(candle_cuda_backend)]
+    #[cfg(burn_cuda_backend)]
     #[test]
-    fn synthetic_captures_locate_many_positions_on_candle_cuda() -> Result<()> {
+    fn synthetic_captures_locate_many_positions_on_burn_cuda() -> Result<()> {
         let fixture = fixture();
         let matcher = match std::panic::catch_unwind(|| {
             matcher_for_device(fixture, AiDevicePreference::Cuda)
@@ -1590,7 +1683,45 @@ mod tests {
 
         for point in sample_positions(&fixture.map, fixture.config.view_size) {
             let capture = synthetic_capture(fixture, point);
-            let candidate = locate_fixture_candle(fixture, &matcher, &capture)?;
+            let candidate = locate_fixture_burn(fixture, &matcher, &capture)?;
+            assert_world_close(candidate.world, point, 4.0);
+        }
+        Ok(())
+    }
+
+    #[cfg(burn_vulkan_backend)]
+    #[test]
+    fn synthetic_captures_locate_many_positions_on_burn_vulkan() -> Result<()> {
+        let fixture = fixture();
+        let matcher = match std::panic::catch_unwind(|| {
+            matcher_for_device(fixture, AiDevicePreference::Vulkan)
+        }) {
+            Ok(matcher) => matcher,
+            Err(_) => return Ok(()),
+        };
+
+        for point in sample_positions(&fixture.map, fixture.config.view_size) {
+            let capture = synthetic_capture(fixture, point);
+            let candidate = locate_fixture_burn(fixture, &matcher, &capture)?;
+            assert_world_close(candidate.world, point, 4.0);
+        }
+        Ok(())
+    }
+
+    #[cfg(burn_metal_backend)]
+    #[test]
+    fn synthetic_captures_locate_many_positions_on_burn_metal() -> Result<()> {
+        let fixture = fixture();
+        let matcher = match std::panic::catch_unwind(|| {
+            matcher_for_device(fixture, AiDevicePreference::Metal)
+        }) {
+            Ok(matcher) => matcher,
+            Err(_) => return Ok(()),
+        };
+
+        for point in sample_positions(&fixture.map, fixture.config.view_size) {
+            let capture = synthetic_capture(fixture, point);
+            let candidate = locate_fixture_burn(fixture, &matcher, &capture)?;
             assert_world_close(candidate.world, point, 4.0);
         }
         Ok(())

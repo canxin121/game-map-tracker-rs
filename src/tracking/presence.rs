@@ -5,6 +5,13 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
+#[cfg(feature = "ai-burn")]
+use burn::tensor::{
+    Tensor, TensorData,
+    backend::Backend,
+    module::{conv2d, interpolate, max_pool2d},
+    ops::{ConvOptions, InterpolateMode, InterpolateOptions},
+};
 use image::{
     GrayImage, Luma,
     imageops::{FilterType, blur, resize},
@@ -30,12 +37,10 @@ use crate::{
 #[cfg(test)]
 use image::imageops::crop_imm;
 
-#[cfg(feature = "ai-candle")]
-use crate::tracking::candle_support::{
-    CandleDeviceConfig, candle_device_label, select_candle_device,
+#[cfg(feature = "ai-burn")]
+use crate::tracking::burn_support::{
+    BurnDeviceConfig, BurnDeviceSelection, burn_device_label, select_burn_device,
 };
-#[cfg(feature = "ai-candle")]
-use candle_core::{Device, Tensor};
 #[cfg(test)]
 use directories::ProjectDirs;
 
@@ -53,7 +58,6 @@ const MAX_COMPONENT_HEIGHT_RATIO: f32 = 0.92;
 const MIN_COMPONENT_FILL_RATIO: f32 = 0.10;
 const MAX_SELECTED_COMPONENTS: usize = 8;
 const MIN_SUPPORT_COVERAGE: f32 = 0.08;
-#[derive(Debug, Clone)]
 pub struct MinimapPresenceDetector {
     capture: DesktopCapture,
     template_preview: GrayImage,
@@ -86,34 +90,43 @@ pub struct MinimapPresenceSample {
     pub expected_label_count: usize,
 }
 
-#[derive(Debug, Clone)]
 enum ProbeBackend {
     Cpu,
-    #[cfg(feature = "ai-candle")]
-    Candle(CandleProbeBackend),
+    #[cfg(feature = "ai-burn")]
+    Burn(Box<dyn ProbeTensorBackend>),
 }
 
-#[cfg(feature = "ai-candle")]
-#[derive(Debug, Clone)]
-struct CandleProbeBackend {
-    device: Device,
-    box3_kernel: Tensor,
-    box7_kernel: Tensor,
-    centered_template: Tensor,
-    mask: Tensor,
+#[cfg(feature = "ai-burn")]
+trait ProbeTensorBackend: Send + Sync {
+    fn signature(&self, image: &GrayImage) -> Result<ProbeSignature>;
+    fn score(&self, current_units: &[f32]) -> Result<f32>;
+    fn label(&self) -> String;
+}
+
+#[cfg(feature = "ai-burn")]
+struct BurnProbeBackend<B: Backend>
+where
+    B: Backend<FloatElem = f32>,
+    B::Device: Clone + Send + Sync + 'static,
+{
+    device: B::Device,
+    device_label: String,
+    box3_kernel: Tensor<B, 4>,
+    box7_kernel: Tensor<B, 4>,
+    centered_template: Tensor<B, 1>,
+    mask: Tensor<B, 1>,
     mask_weight_sum: f32,
     template_norm: f32,
 }
 
-#[cfg(feature = "ai-candle")]
 #[derive(Debug, Clone, Copy)]
 struct ProbeDeviceConfig {
     device: AiDevicePreference,
     device_index: usize,
 }
 
-#[cfg(feature = "ai-candle")]
-impl CandleDeviceConfig for ProbeDeviceConfig {
+#[cfg(feature = "ai-burn")]
+impl BurnDeviceConfig for ProbeDeviceConfig {
     fn device_preference(&self) -> AiDevicePreference {
         self.device
     }
@@ -327,24 +340,24 @@ impl MinimapPresenceDetector {
                 self.template_mean,
                 self.template_norm,
             )),
-            #[cfg(feature = "ai-candle")]
-            ProbeBackend::Candle(backend) => backend.score(current_units),
+            #[cfg(feature = "ai-burn")]
+            ProbeBackend::Burn(backend) => backend.score(current_units),
         }
     }
 
     fn sample_signature(&self, image: &GrayImage) -> Result<ProbeSignature> {
         match &self.backend {
             ProbeBackend::Cpu => Ok(build_probe_signature(image)),
-            #[cfg(feature = "ai-candle")]
-            ProbeBackend::Candle(backend) => backend.signature(image),
+            #[cfg(feature = "ai-burn")]
+            ProbeBackend::Burn(backend) => backend.signature(image),
         }
     }
 
     fn backend_label(&self) -> String {
         match &self.backend {
             ProbeBackend::Cpu => "CPU".to_owned(),
-            #[cfg(feature = "ai-candle")]
-            ProbeBackend::Candle(backend) => candle_device_label(&backend.device),
+            #[cfg(feature = "ai-burn")]
+            ProbeBackend::Burn(backend) => backend.label(),
         }
     }
 }
@@ -1034,50 +1047,80 @@ fn build_backend(
         return Ok(ProbeBackend::Cpu);
     }
 
-    #[cfg(feature = "ai-candle")]
+    #[cfg(feature = "ai-burn")]
     {
-        let device = select_candle_device(&ProbeDeviceConfig {
+        let device = select_burn_device(&ProbeDeviceConfig {
             device,
             device_index,
         })?;
-        return Ok(ProbeBackend::Candle(CandleProbeBackend::new(
-            device,
-            template_preview,
-        )?));
+        return Ok(match device {
+            BurnDeviceSelection::Cpu => ProbeBackend::Cpu,
+            #[cfg(burn_cuda_backend)]
+            BurnDeviceSelection::Cuda(device) => {
+                ProbeBackend::Burn(Box::new(BurnProbeBackend::<burn::backend::Cuda>::new(
+                    device.clone(),
+                    burn_device_label(&BurnDeviceSelection::Cuda(device)),
+                    template_preview,
+                )?))
+            }
+            #[cfg(burn_vulkan_backend)]
+            BurnDeviceSelection::Vulkan(device) => {
+                ProbeBackend::Burn(Box::new(BurnProbeBackend::<burn::backend::Vulkan>::new(
+                    device.clone(),
+                    burn_device_label(&BurnDeviceSelection::Vulkan(device)),
+                    template_preview,
+                )?))
+            }
+            #[cfg(burn_metal_backend)]
+            BurnDeviceSelection::Metal(device) => {
+                ProbeBackend::Burn(Box::new(BurnProbeBackend::<burn::backend::Metal>::new(
+                    device.clone(),
+                    burn_device_label(&BurnDeviceSelection::Metal(device)),
+                    template_preview,
+                )?))
+            }
+        });
     }
 
-    #[cfg(not(feature = "ai-candle"))]
+    #[cfg(not(feature = "ai-burn"))]
     {
         let _ = template_preview;
         let _ = device_index;
         bail!(
-            "小地图存在探针配置选择了 {} 设备，但当前二进制未启用 `ai-candle` 特性；请改回 cpu 或重新构建带 Candle 后端的版本",
+            "小地图存在探针配置选择了 {} 设备，但当前二进制未启用 `ai-burn` 特性；请改回 cpu 或重新构建带 Burn 后端的版本",
             device
         );
     }
 }
 
-#[cfg(feature = "ai-candle")]
-impl CandleProbeBackend {
-    fn new(device: Device, template_preview: &GrayImage) -> Result<Self> {
-        let box3_kernel = box_kernel_tensor(&device, 3)?;
-        let box7_kernel = box_kernel_tensor(&device, 7)?;
-        let template_signature =
-            extract_candle_probe_signature(&device, &box3_kernel, &box7_kernel, template_preview)?;
+#[cfg(feature = "ai-burn")]
+impl<B> BurnProbeBackend<B>
+where
+    B: Backend<FloatElem = f32>,
+    B::Device: Clone + Send + Sync + 'static,
+{
+    fn new(device: B::Device, device_label: String, template_preview: &GrayImage) -> Result<Self> {
+        let box3_kernel = box_kernel_tensor::<B>(&device, 3);
+        let box7_kernel = box_kernel_tensor::<B>(&device, 7);
+        let template_signature = extract_burn_probe_signature::<B>(
+            &device,
+            &box3_kernel,
+            &box7_kernel,
+            template_preview,
+        )?;
         let template_units = template_signature.feature_units;
         let weight_units = template_signature.weight_units;
+        let len = template_units.len();
         let mask_weight_sum = weight_units.iter().sum::<f32>().max(f32::EPSILON);
         let template_mean = weighted_mean(&template_units, &weight_units, mask_weight_sum);
         let template_norm = centered_weighted_norm(&template_units, &weight_units, template_mean);
-        let len = template_units.len();
-        let template = Tensor::from_vec(template_units, len, &device)?;
-        let mask = Tensor::from_vec(weight_units, len, &device)?;
-        let centered_template = template
-            .broadcast_sub(&Tensor::new(template_mean, &device)?)?
-            .broadcast_mul(&mask)?;
+        let template = Tensor::<B, 1>::from_data(TensorData::new(template_units, [len]), &device);
+        let mask = Tensor::<B, 1>::from_data(TensorData::new(weight_units, [len]), &device);
+        let centered_template = (template - template_mean) * mask.clone();
 
         Ok(Self {
             device,
+            device_label,
             box3_kernel,
             box7_kernel,
             centered_template,
@@ -1086,114 +1129,149 @@ impl CandleProbeBackend {
             template_norm,
         })
     }
+}
 
+#[cfg(feature = "ai-burn")]
+impl<B> ProbeTensorBackend for BurnProbeBackend<B>
+where
+    B: Backend<FloatElem = f32>,
+    B::Device: Clone + Send + Sync + 'static,
+{
     fn signature(&self, image: &GrayImage) -> Result<ProbeSignature> {
-        extract_candle_probe_signature(&self.device, &self.box3_kernel, &self.box7_kernel, image)
+        extract_burn_probe_signature::<B>(&self.device, &self.box3_kernel, &self.box7_kernel, image)
     }
 
     fn score(&self, current_units: &[f32]) -> Result<f32> {
-        let current = Tensor::from_vec(current_units.to_vec(), current_units.len(), &self.device)?;
-        let masked_sum = (&current * &self.mask)?.sum_all()?.to_scalar::<f32>()?;
+        let current = Tensor::<B, 1>::from_data(
+            TensorData::new(current_units.to_vec(), [current_units.len()]),
+            &self.device,
+        );
+        let masked_sum = (current.clone() * self.mask.clone()).sum().into_scalar();
         let current_mean = masked_sum / self.mask_weight_sum.max(f32::EPSILON);
-        let current_centered = current
-            .broadcast_sub(&Tensor::new(current_mean, &self.device)?)?
-            .broadcast_mul(&self.mask)?;
-        let dot = (&current_centered * &self.centered_template)?
-            .sum_all()?
-            .to_scalar::<f32>()?;
-        let current_norm = current_centered
-            .sqr()?
-            .sum_all()?
-            .to_scalar::<f32>()?
-            .sqrt();
+        let current_centered = (current - current_mean) * self.mask.clone();
+        let dot = (current_centered.clone() * self.centered_template.clone())
+            .sum()
+            .into_scalar();
+        let current_norm = current_centered.powi_scalar(2).sum().into_scalar().sqrt();
         if current_norm <= f32::EPSILON || self.template_norm <= f32::EPSILON {
             return Ok(0.0);
         }
 
         Ok((dot / (current_norm * self.template_norm)).clamp(0.0, 1.0))
     }
+
+    fn label(&self) -> String {
+        self.device_label.clone()
+    }
 }
 
-#[cfg(feature = "ai-candle")]
-fn extract_candle_probe_signature(
-    device: &Device,
-    box3_kernel: &Tensor,
-    box7_kernel: &Tensor,
+#[cfg(feature = "ai-burn")]
+fn extract_burn_probe_signature<B>(
+    device: &B::Device,
+    box3_kernel: &Tensor<B, 4>,
+    box7_kernel: &Tensor<B, 4>,
     image: &GrayImage,
-) -> Result<ProbeSignature> {
-    let image = gray_image_tensor(image, device)?;
-    let background = image.conv2d(box7_kernel, 3, 1, 1, 1)?;
-    let bright_local = (&image - &background)?.affine(5.2, 0.0)?.clamp(0.0, 1.0)?;
-    let bright_raw = image.affine(3.0, -1.50)?.clamp(0.0, 1.0)?;
-    let support_seed = bright_local.broadcast_mul(&bright_raw.affine(0.55, 0.45)?)?;
-    let support_dilated = support_seed
-        .pad_with_zeros(2, 1, 1)?
-        .pad_with_zeros(3, 1, 1)?
-        .max_pool2d_with_stride((3, 3), (1, 1))?;
-    let support_blurred = support_dilated.conv2d(box3_kernel, 1, 1, 1, 1)?;
-    let row_gate = support_blurred
-        .mean_keepdim(3)?
-        .affine(3.6, -0.10)?
-        .clamp(0.0, 1.0)?;
-    let support_soft = support_blurred
-        .broadcast_mul(&row_gate)?
-        .affine(1.8, -0.08)?
-        .clamp(0.0, 1.0)?;
+) -> Result<ProbeSignature>
+where
+    B: Backend<FloatElem = f32>,
+{
+    let image = gray_image_tensor::<B>(image, device);
+    let background = conv2d(
+        image.clone(),
+        box7_kernel.clone(),
+        None,
+        ConvOptions::new([1, 1], [3, 3], [1, 1], 1),
+    );
+    let bright_local = ((image.clone() - background.clone()) * 5.2).clamp(0.0, 1.0);
+    let bright_raw = (image.clone() * 3.0 - 1.50).clamp(0.0, 1.0);
+    let support_seed = bright_local * (bright_raw * 0.55 + 0.45);
+    let support_dilated = max_pool2d(support_seed, [3, 3], [1, 1], [1, 1], [1, 1], false);
+    let support_blurred = conv2d(
+        support_dilated,
+        box3_kernel.clone(),
+        None,
+        ConvOptions::new([1, 1], [1, 1], [1, 1], 1),
+    );
+    let row_gate = (support_blurred.clone().mean_dim(3) * 3.6 - 0.10)
+        .clamp(0.0, 1.0)
+        .unsqueeze_dim(3);
+    let support_soft = ((support_blurred * row_gate) * 1.8 - 0.08).clamp(0.0, 1.0);
 
-    let local_dark = (&background - &image)?.affine(5.0, 0.0)?.clamp(0.0, 1.0)?;
-    let dark_raw = image.affine(-3.2, 1.70)?.clamp(0.0, 1.0)?;
-    let ink_support = support_soft
-        .conv2d(box3_kernel, 1, 1, 1, 1)?
-        .affine(1.5, -0.05)?
-        .clamp(0.0, 1.0)?;
-    let ink_soft = local_dark
-        .broadcast_mul(&dark_raw.affine(0.55, 0.45)?)?
-        .broadcast_mul(&ink_support)?
-        .clamp(0.0, 1.0)?;
+    let local_dark = ((background - image.clone()) * 5.0).clamp(0.0, 1.0);
+    let dark_raw = (image * -3.2 + 1.70).clamp(0.0, 1.0);
+    let ink_support = (conv2d(
+        support_soft.clone(),
+        box3_kernel.clone(),
+        None,
+        ConvOptions::new([1, 1], [1, 1], [1, 1], 1),
+    ) * 1.5
+        - 0.05)
+        .clamp(0.0, 1.0);
+    let ink_soft = (local_dark * (dark_raw * 0.55 + 0.45) * ink_support).clamp(0.0, 1.0);
 
-    let support_small = support_soft
-        .upsample_bilinear2d(SIGNATURE_HEIGHT as usize, SIGNATURE_WIDTH as usize, false)?
-        .clamp(0.0, 1.0)?;
-    let ink_small = ink_soft
-        .upsample_bilinear2d(SIGNATURE_HEIGHT as usize, SIGNATURE_WIDTH as usize, false)?
-        .clamp(0.0, 1.0)?;
-    let support_rows = tensor_to_rows(&support_small)?;
-    let ink_rows = tensor_to_rows(&ink_small)?;
+    let support_small = interpolate(
+        support_soft,
+        [SIGNATURE_HEIGHT as usize, SIGNATURE_WIDTH as usize],
+        InterpolateOptions::new(InterpolateMode::Bilinear),
+    )
+    .clamp(0.0, 1.0);
+    let ink_small = interpolate(
+        ink_soft,
+        [SIGNATURE_HEIGHT as usize, SIGNATURE_WIDTH as usize],
+        InterpolateOptions::new(InterpolateMode::Bilinear),
+    )
+    .clamp(0.0, 1.0);
+    let support_rows = tensor_to_rows::<B>(support_small)?;
+    let ink_rows = tensor_to_rows::<B>(ink_small)?;
     Ok(build_probe_signature_from_soft_rows(
         &support_rows,
         &ink_rows,
     ))
 }
 
-#[cfg(feature = "ai-candle")]
-fn gray_image_tensor(image: &GrayImage, device: &Device) -> Result<Tensor> {
-    Ok(Tensor::from_vec(
-        gray_image_as_unit_vec(image),
-        (1, 1, image.height() as usize, image.width() as usize),
+#[cfg(feature = "ai-burn")]
+fn gray_image_tensor<B>(image: &GrayImage, device: &B::Device) -> Tensor<B, 4>
+where
+    B: Backend<FloatElem = f32>,
+{
+    Tensor::<B, 4>::from_data(
+        TensorData::new(
+            gray_image_as_unit_vec(image),
+            [1, 1, image.height() as usize, image.width() as usize],
+        ),
         device,
-    )?)
+    )
 }
 
-#[cfg(feature = "ai-candle")]
-fn box_kernel_tensor(device: &Device, size: usize) -> Result<Tensor> {
+#[cfg(feature = "ai-burn")]
+fn box_kernel_tensor<B>(device: &B::Device, size: usize) -> Tensor<B, 4>
+where
+    B: Backend<FloatElem = f32>,
+{
     let weight = 1.0f32 / (size * size).max(1) as f32;
-    Ok(Tensor::from_vec(
-        vec![weight; size * size],
-        (1, 1, size, size),
+    Tensor::<B, 4>::from_data(
+        TensorData::new(vec![weight; size * size], [1, 1, size, size]),
         device,
-    )?)
+    )
 }
 
-#[cfg(feature = "ai-candle")]
-fn tensor_to_rows(tensor: &Tensor) -> Result<Vec<Vec<f32>>> {
-    tensor
-        .squeeze(0)?
-        .squeeze(0)?
-        .to_vec2::<f32>()
-        .map_err(Into::into)
+#[cfg(feature = "ai-burn")]
+fn tensor_to_rows<B>(tensor: Tensor<B, 4>) -> Result<Vec<Vec<f32>>>
+where
+    B: Backend<FloatElem = f32>,
+{
+    let flat = tensor
+        .squeeze::<2>()
+        .into_data()
+        .to_vec::<f32>()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(flat
+        .chunks(SIGNATURE_WIDTH as usize)
+        .map(|row| row.to_vec())
+        .collect())
 }
 
-#[cfg(feature = "ai-candle")]
+#[cfg(feature = "ai-burn")]
 fn build_probe_signature_from_soft_rows(
     support_rows: &[Vec<f32>],
     ink_rows: &[Vec<f32>],
@@ -1226,7 +1304,7 @@ fn build_probe_signature_from_soft_rows(
     }
 }
 
-#[cfg(feature = "ai-candle")]
+#[cfg(feature = "ai-burn")]
 fn smoothed_soft_column_profile(rows: &[Vec<f32>]) -> Vec<f32> {
     let width = rows.first().map_or(0, Vec::len);
     let height = rows.len().max(1) as f32;
@@ -1236,7 +1314,7 @@ fn smoothed_soft_column_profile(rows: &[Vec<f32>]) -> Vec<f32> {
     smooth_profile(&profile, 2)
 }
 
-#[cfg(feature = "ai-candle")]
+#[cfg(feature = "ai-burn")]
 fn smoothed_soft_row_profile(rows: &[Vec<f32>]) -> Vec<f32> {
     let width = rows.first().map_or(0, Vec::len).max(1) as f32;
     let profile = rows
@@ -1246,7 +1324,7 @@ fn smoothed_soft_row_profile(rows: &[Vec<f32>]) -> Vec<f32> {
     smooth_profile(&profile, 1)
 }
 
-#[cfg(feature = "ai-candle")]
+#[cfg(feature = "ai-burn")]
 fn select_soft_label_components(
     bright_profile: &[f32],
     row_profile: &[f32],
@@ -1312,7 +1390,7 @@ fn select_soft_label_components(
     components
 }
 
-#[cfg(feature = "ai-candle")]
+#[cfg(feature = "ai-burn")]
 fn build_ink_mask_from_soft_rows(
     ink_rows: &[Vec<f32>],
     components: &[ProbeComponent],
@@ -1653,8 +1731,6 @@ fn draw_synthetic_label(image: &mut GrayImage, left: u32, top: u32, width: u32, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "ai-candle")]
-    use candle_core::Device;
 
     #[test]
     fn probe_score_stays_high_when_labels_remain_visible() {
@@ -1730,100 +1806,5 @@ mod tests {
                 score.final_score
             );
         }
-    }
-
-    #[cfg(feature = "ai-candle")]
-    fn score_probe_images_candle(
-        template: &GrayImage,
-        current: &GrayImage,
-        device: Device,
-    ) -> Result<ProbeScoreBreakdown> {
-        let template = normalize_probe_capture(template);
-        let current = resize_to_match(&normalize_probe_capture(current), &template);
-        let template_signature = build_probe_signature(&template);
-        let backend = CandleProbeBackend::new(device, &template)?;
-        let current_signature = backend.signature(&current)?;
-        let structure_score = backend.score(&current_signature.feature_units)?;
-        Ok(build_probe_score_breakdown(
-            &template_signature,
-            &current_signature,
-            structure_score,
-        ))
-    }
-
-    #[cfg(feature = "ai-candle")]
-    #[test]
-    fn candle_cpu_real_presence_regions_score_correctly() -> Result<()> {
-        let region = effective_test_probe_region();
-        let template = load_test_image("badge_only.png");
-
-        for name in ["has_map_1.png", "has_map_2.png"] {
-            let image = load_test_image(name);
-            let crop = crop_test_region(&image, &region);
-            let score = score_probe_images_candle(&template, &crop, Device::Cpu)?;
-            assert!(
-                score.final_score >= 0.62,
-                "expected {name} to keep a high candle score, got {:.3}",
-                score.final_score
-            );
-        }
-
-        for name in [
-            "no_map_1.png",
-            "no_map_2.png",
-            "no_map_3.png",
-            "no_map_4.png",
-        ] {
-            let image = load_test_image(name);
-            let crop = crop_test_region(&image, &region);
-            let score = score_probe_images_candle(&template, &crop, Device::Cpu)?;
-            assert!(
-                score.final_score <= 0.38,
-                "expected {name} to stay low on candle path, got {:.3}",
-                score.final_score
-            );
-        }
-
-        Ok(())
-    }
-
-    #[cfg(candle_cuda_backend)]
-    #[test]
-    fn candle_cuda_real_presence_regions_score_correctly() -> Result<()> {
-        let Ok(device) = Device::new_cuda(0) else {
-            return Ok(());
-        };
-
-        let region = effective_test_probe_region();
-        let template = load_test_image("badge_only.png");
-
-        for name in ["has_map_1.png", "has_map_2.png"] {
-            let image = load_test_image(name);
-            let crop = crop_test_region(&image, &region);
-            let score = score_probe_images_candle(&template, &crop, device.clone())?;
-            assert!(
-                score.final_score >= 0.62,
-                "expected {name} to keep a high cuda score, got {:.3}",
-                score.final_score
-            );
-        }
-
-        for name in [
-            "no_map_1.png",
-            "no_map_2.png",
-            "no_map_3.png",
-            "no_map_4.png",
-        ] {
-            let image = load_test_image(name);
-            let crop = crop_test_region(&image, &region);
-            let score = score_probe_images_candle(&template, &crop, device.clone())?;
-            assert!(
-                score.final_score <= 0.38,
-                "expected {name} to stay low on cuda path, got {:.3}",
-                score.final_score
-            );
-        }
-
-        Ok(())
     }
 }
