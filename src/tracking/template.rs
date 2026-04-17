@@ -91,10 +91,8 @@ where
 {
     device: B::Device,
     device_label: String,
-    global_search: SearchTensorCache<B>,
     coarse_search: SearchTensorCache<B>,
     global_mask_squared: Tensor<B, 4>,
-    global_search_patch_energy: Tensor<B, 4>,
     coarse_mask_squared: Tensor<B, 4>,
     coarse_search_patch_energy: Tensor<B, 4>,
     local_mask_squared: Tensor<B, 4>,
@@ -848,33 +846,6 @@ impl TemplateMatcher {
         }
     }
 
-    fn locate_global(
-        &self,
-        template: &GrayImage,
-        threshold: f32,
-        origin_x: u32,
-        origin_y: u32,
-        scale: u32,
-    ) -> Result<LocateResult> {
-        match self {
-            Self::NdArray(matcher) => {
-                matcher.locate_global(template, threshold, origin_x, origin_y, scale)
-            }
-            #[cfg(burn_cuda_backend)]
-            Self::Cuda(matcher) => {
-                matcher.locate_global(template, threshold, origin_x, origin_y, scale)
-            }
-            #[cfg(burn_vulkan_backend)]
-            Self::Vulkan(matcher) => {
-                matcher.locate_global(template, threshold, origin_x, origin_y, scale)
-            }
-            #[cfg(burn_metal_backend)]
-            Self::Metal(matcher) => {
-                matcher.locate_global(template, threshold, origin_x, origin_y, scale)
-            }
-        }
-    }
-
     fn locate_coarse(
         &self,
         template: &GrayImage,
@@ -985,18 +956,9 @@ where
         pyramid: &MapPyramid,
         masks: &MaskSet,
     ) -> Result<Self> {
-        let global_search =
-            SearchTensorCache::<B>::from_gray_image(&pyramid.global.image, &device)?;
         let coarse_search =
             SearchTensorCache::<B>::from_gray_image(&pyramid.coarse.image, &device)?;
-        Self::from_parts(
-            device,
-            device_label,
-            chunk_budget_bytes,
-            global_search,
-            coarse_search,
-            masks,
-        )
+        Self::from_parts(device, device_label, chunk_budget_bytes, coarse_search, masks)
     }
 
     fn new_cached(
@@ -1008,13 +970,6 @@ where
         masks: &MaskSet,
         map_cache_key: &str,
     ) -> Result<Self> {
-        let global_search = load_or_build_template_search::<B>(
-            workspace,
-            "template-global-search",
-            map_cache_key,
-            &pyramid.global.image,
-            &device,
-        )?;
         let coarse_search = load_or_build_template_search::<B>(
             workspace,
             "template-coarse-search",
@@ -1022,33 +977,19 @@ where
             &pyramid.coarse.image,
             &device,
         )?;
-        Self::from_parts(
-            device,
-            device_label,
-            chunk_budget_bytes,
-            global_search,
-            coarse_search,
-            masks,
-        )
+        Self::from_parts(device, device_label, chunk_budget_bytes, coarse_search, masks)
     }
 
     fn from_parts(
         device: B::Device,
         device_label: String,
         chunk_budget_bytes: Option<usize>,
-        global_search: SearchTensorCache<B>,
         coarse_search: SearchTensorCache<B>,
         masks: &MaskSet,
     ) -> Result<Self> {
         let global_mask_squared = mask_squared_tensor::<B>(&masks.global, &device);
         let coarse_mask_squared = mask_squared_tensor::<B>(&masks.coarse, &device);
         let local_mask_squared = mask_squared_tensor::<B>(&masks.local, &device);
-        let global_search_patch_energy = conv2d(
-            global_search.squared.clone(),
-            global_mask_squared.clone(),
-            None::<Tensor<B, 1>>,
-            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
-        );
         let coarse_search_patch_energy = conv2d(
             coarse_search.squared.clone(),
             coarse_mask_squared.clone(),
@@ -1059,10 +1000,8 @@ where
         Ok(Self {
             device,
             device_label,
-            global_search,
             coarse_search,
             global_mask_squared,
-            global_search_patch_energy,
             coarse_mask_squared,
             coarse_search_patch_energy,
             local_mask_squared,
@@ -1072,26 +1011,6 @@ where
 
     fn device_label(&self) -> String {
         self.device_label.clone()
-    }
-
-    fn locate_global(
-        &self,
-        template: &GrayImage,
-        threshold: f32,
-        origin_x: u32,
-        origin_y: u32,
-        scale: u32,
-    ) -> Result<LocateResult> {
-        self.locate_cached(
-            &self.global_search,
-            template,
-            &self.global_mask_squared,
-            Some(self.global_search_patch_energy.clone()),
-            threshold,
-            origin_x,
-            origin_y,
-            scale,
-        )
     }
 
     fn locate_coarse(

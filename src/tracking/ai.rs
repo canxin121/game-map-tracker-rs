@@ -97,10 +97,8 @@ where
     B::Device: Clone + Send + Sync + 'static,
 {
     encoder: FixedFeatureEncoder<B>,
-    global_search: SearchTensorCache<B>,
     coarse_search: SearchTensorCache<B>,
     global_mask: Tensor<B, 4>,
-    global_search_patch_energy: Tensor<B, 4>,
     coarse_mask: Tensor<B, 4>,
     coarse_search_patch_energy: Tensor<B, 4>,
     local_mask: Tensor<B, 4>,
@@ -644,33 +642,6 @@ impl BurnFeatureMatcher {
         }
     }
 
-    fn locate_cached(
-        &self,
-        template: &GrayImage,
-        threshold: f32,
-        origin_x: u32,
-        origin_y: u32,
-        scale: u32,
-    ) -> Result<LocateResult> {
-        match self {
-            Self::NdArray(matcher) => {
-                matcher.locate_global(template, threshold, origin_x, origin_y, scale)
-            }
-            #[cfg(burn_cuda_backend)]
-            Self::Cuda(matcher) => {
-                matcher.locate_global(template, threshold, origin_x, origin_y, scale)
-            }
-            #[cfg(burn_vulkan_backend)]
-            Self::Vulkan(matcher) => {
-                matcher.locate_global(template, threshold, origin_x, origin_y, scale)
-            }
-            #[cfg(burn_metal_backend)]
-            Self::Metal(matcher) => {
-                matcher.locate_global(template, threshold, origin_x, origin_y, scale)
-            }
-        }
-    }
-
     fn locate_coarse(
         &self,
         template: &GrayImage,
@@ -771,13 +742,6 @@ where
         map_cache_key: &str,
     ) -> Result<Self> {
         let encoder = FixedFeatureEncoder::<B>::new(workspace, device, device_label)?;
-        let global_search = load_or_build_feature_search::<B>(
-            workspace,
-            "feature-global-search",
-            map_cache_key,
-            &pyramid.global.image,
-            &encoder,
-        )?;
         let coarse_search = load_or_build_feature_search::<B>(
             workspace,
             "feature-coarse-search",
@@ -790,12 +754,6 @@ where
         let coarse_mask =
             mask_tensor::<B>(&masks.coarse, encoder.output_channels(), &encoder.device);
         let local_mask = mask_tensor::<B>(&masks.local, encoder.output_channels(), &encoder.device);
-        let global_search_patch_energy = conv2d(
-            global_search.squared.clone(),
-            global_mask.clone(),
-            None::<Tensor<B, 1>>,
-            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
-        );
         let coarse_search_patch_energy = conv2d(
             coarse_search.squared.clone(),
             coarse_mask.clone(),
@@ -805,10 +763,8 @@ where
 
         Ok(Self {
             encoder,
-            global_search,
             coarse_search,
             global_mask,
-            global_search_patch_energy,
             coarse_mask,
             coarse_search_patch_energy,
             local_mask,
@@ -822,26 +778,6 @@ where
 
     fn source_label(&self) -> String {
         self.encoder.source_label()
-    }
-
-    fn locate_global(
-        &self,
-        template: &GrayImage,
-        threshold: f32,
-        origin_x: u32,
-        origin_y: u32,
-        scale: u32,
-    ) -> Result<LocateResult> {
-        self.locate_cached(
-            &self.global_search,
-            template,
-            &self.global_mask,
-            Some(self.global_search_patch_energy.clone()),
-            threshold,
-            origin_x,
-            origin_y,
-            scale,
-        )
     }
 
     fn locate_coarse(
