@@ -98,6 +98,12 @@ pub(super) struct ConfigFormInputs {
     pub(super) minimap_left: gpui::Entity<InputState>,
     pub(super) minimap_width: gpui::Entity<InputState>,
     pub(super) minimap_height: gpui::Entity<InputState>,
+    pub(super) minimap_presence_probe_enabled: gpui::Entity<InputState>,
+    pub(super) minimap_presence_probe_top: gpui::Entity<InputState>,
+    pub(super) minimap_presence_probe_left: gpui::Entity<InputState>,
+    pub(super) minimap_presence_probe_width: gpui::Entity<InputState>,
+    pub(super) minimap_presence_probe_height: gpui::Entity<InputState>,
+    pub(super) minimap_presence_probe_match_threshold: gpui::Entity<InputState>,
     pub(super) window_geometry: gpui::Entity<InputState>,
     pub(super) view_size: gpui::Entity<InputState>,
     pub(super) max_lost_frames: gpui::Entity<InputState>,
@@ -133,6 +139,12 @@ impl ConfigFormInputs {
             minimap_left: config_input(window, cx, "left"),
             minimap_width: config_input(window, cx, "width"),
             minimap_height: config_input(window, cx, "height"),
+            minimap_presence_probe_enabled: config_input(window, cx, "true / false"),
+            minimap_presence_probe_top: config_input(window, cx, "top"),
+            minimap_presence_probe_left: config_input(window, cx, "left"),
+            minimap_presence_probe_width: config_input(window, cx, "width"),
+            minimap_presence_probe_height: config_input(window, cx, "height"),
+            minimap_presence_probe_match_threshold: config_input(window, cx, "match_threshold"),
             window_geometry: config_input(window, cx, "窗口几何"),
             view_size: config_input(window, cx, "view_size"),
             max_lost_frames: config_input(window, cx, "max_lost_frames"),
@@ -483,6 +495,76 @@ impl SelectItem for DeviceIndexPickerItem {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PipCapturePickerTarget {
+    Minimap,
+    MinimapPresenceProbe,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PipCapturePickerItem {
+    pub(super) value: PipCapturePickerTarget,
+    pub(super) title: SharedString,
+    pub(super) subtitle: SharedString,
+    pub(super) searchable_text: SharedString,
+}
+
+impl PipCapturePickerItem {
+    pub(super) fn new(
+        value: PipCapturePickerTarget,
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
+        searchable_text: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            value,
+            title: title.into(),
+            subtitle: subtitle.into(),
+            searchable_text: searchable_text.into(),
+        }
+    }
+}
+
+impl SelectItem for PipCapturePickerItem {
+    type Value = PipCapturePickerTarget;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn display_title(&self) -> Option<AnyElement> {
+        let label = if self.subtitle.is_empty() {
+            self.title.to_string()
+        } else {
+            format!("{} · {}", self.title, self.subtitle)
+        };
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(label)
+                .into_any_element(),
+        )
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        picker_menu_row(&self.title, &self.subtitle)
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        self.searchable_text
+            .to_lowercase()
+            .contains(&query.to_lowercase())
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct PagedListState {
     pub(super) search: gpui::Entity<InputState>,
@@ -647,6 +729,40 @@ impl ConfigDraft {
                     left: parse_input_value(&form.minimap_left, "minimap.left", cx)?,
                     width: parse_input_value(&form.minimap_width, "minimap.width", cx)?,
                     height: parse_input_value(&form.minimap_height, "minimap.height", cx)?,
+                },
+                minimap_presence_probe: crate::config::MinimapPresenceProbeConfig {
+                    enabled: parse_bool_input_value(
+                        &form.minimap_presence_probe_enabled,
+                        "minimap_presence_probe.enabled",
+                        cx,
+                    )?,
+                    top: parse_input_value(
+                        &form.minimap_presence_probe_top,
+                        "minimap_presence_probe.top",
+                        cx,
+                    )?,
+                    left: parse_input_value(
+                        &form.minimap_presence_probe_left,
+                        "minimap_presence_probe.left",
+                        cx,
+                    )?,
+                    width: parse_input_value(
+                        &form.minimap_presence_probe_width,
+                        "minimap_presence_probe.width",
+                        cx,
+                    )?,
+                    height: parse_input_value(
+                        &form.minimap_presence_probe_height,
+                        "minimap_presence_probe.height",
+                        cx,
+                    )?,
+                    match_threshold: parse_input_value(
+                        &form.minimap_presence_probe_match_threshold,
+                        "minimap_presence_probe.match_threshold",
+                        cx,
+                    )?,
+                    device: workbench.minimap_presence_probe_device_preference,
+                    device_index: workbench.minimap_presence_probe_device_index,
                 },
                 window_geometry: read_input_value(&form.window_geometry, cx),
                 view_size: parse_input_value(&form.view_size, "view_size", cx)?,

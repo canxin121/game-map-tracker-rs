@@ -22,6 +22,7 @@ use crate::{
             load_or_build_match_pyramid, load_tensor_cache, metadata_fingerprint,
             save_tensor_cache, tracker_tensor_cache_path,
         },
+        presence::{MinimapPresenceDetector, MinimapPresenceSample},
         vision::{
             DebugOverlay, MapPyramid, MaskSet, MatchCandidate, SearchCrop, SearchStage,
             TrackerState, build_debug_snapshot, build_mask, build_match_representation,
@@ -64,6 +65,7 @@ pub struct CandleTrackerWorker {
 struct CandleTrackerInner {
     config: AppConfig,
     capture: DesktopCapture,
+    presence_detector: Option<MinimapPresenceDetector>,
     pyramid: MapPyramid,
     masks: MaskSet,
     state: TrackerState,
@@ -121,6 +123,7 @@ impl CandleTrackerWorker {
         {
             let config = workspace.config.clone();
             let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
+            let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
             let prepared_pyramid = load_or_build_match_pyramid(workspace.as_ref())?;
             let map_cache_key = prepared_pyramid.cache_key;
             let pyramid = prepared_pyramid.pyramid;
@@ -137,6 +140,7 @@ impl CandleTrackerWorker {
                 inner: CandleTrackerInner {
                     config,
                     capture,
+                    presence_detector,
                     pyramid,
                     masks,
                     state: TrackerState::default(),
@@ -876,6 +880,22 @@ fn locate_result_from_flat_scores(
 impl CandleTrackerInner {
     fn run_frame(&mut self) -> Result<TrackingTick> {
         self.state.begin_frame();
+        let probe_sample = self
+            .presence_detector
+            .as_ref()
+            .map(MinimapPresenceDetector::sample)
+            .transpose()?;
+        if let Some(sample) = probe_sample.as_ref().filter(|sample| !sample.present) {
+            let mut status = self.base_status();
+            let estimate = self.apply_probe_absent_fallback(&mut status);
+            let debug = Some(self.build_probe_miss_debug_snapshot(sample, estimate.as_ref()));
+            return Ok(TrackingTick {
+                status,
+                estimate,
+                debug,
+            });
+        }
+
         let captured = self.capture.capture_gray()?;
         let (local_template, global_template) =
             prepare_capture_templates(&captured, &self.config, &self.pyramid);
@@ -1003,6 +1023,7 @@ impl CandleTrackerInner {
             refine_crop.as_ref(),
             refine_result.as_ref().or(local_result.as_ref()),
             estimate.as_ref(),
+            probe_sample.as_ref(),
         ));
 
         Ok(TrackingTick {
@@ -1051,6 +1072,22 @@ impl CandleTrackerInner {
         ))
     }
 
+    fn apply_probe_absent_fallback(
+        &mut self,
+        status: &mut TrackingStatus,
+    ) -> Option<PositionEstimate> {
+        let estimate = self.apply_inertial_fallback(status);
+        if estimate.is_some() {
+            status.message = format!("F1-P 标签探针未命中，小地图疑似被遮挡，{}", status.message);
+            return estimate;
+        }
+
+        status.source = None;
+        status.match_score = None;
+        status.message = "F1-P 标签探针未命中，小地图疑似被遮挡，等待界面恢复。".to_owned();
+        None
+    }
+
     fn build_debug_snapshot(
         &self,
         captured: &GrayImage,
@@ -1059,6 +1096,7 @@ impl CandleTrackerInner {
         refine_crop: Option<&SearchCrop>,
         refine_result: Option<&LocateResult>,
         estimate: Option<&PositionEstimate>,
+        probe_sample: Option<&MinimapPresenceSample>,
     ) -> TrackingDebugSnapshot {
         let minimap = preview_image(
             "Minimap",
@@ -1159,24 +1197,66 @@ impl CandleTrackerInner {
                 format!("{:.0}, {:.0}", position.world.x, position.world.y),
             ));
         }
+        if let (Some(detector), Some(sample)) = (self.presence_detector.as_ref(), probe_sample) {
+            fields.extend(detector.debug_fields(sample));
+        }
+
+        let mut images = vec![
+            minimap,
+            global_mask,
+            global_heatmap.unwrap_or_else(|| {
+                preview_mask_image("Tensor Coarse Heatmap", &self.masks.global, 196)
+            }),
+            global,
+            local_mask,
+            refine_heatmap.unwrap_or_else(|| {
+                preview_mask_image("Tensor Refine Heatmap", &self.masks.local, 196)
+            }),
+            refine,
+        ];
+        if let (Some(detector), Some(sample)) = (self.presence_detector.as_ref(), probe_sample) {
+            images.extend(detector.debug_images(sample));
+        }
 
         build_debug_snapshot(
             TrackerEngineKind::ConvolutionFeatureMatch,
             self.state.frame_index,
             self.state.stage,
-            vec![
-                minimap,
-                global_mask,
-                global_heatmap.unwrap_or_else(|| {
-                    preview_mask_image("Tensor Coarse Heatmap", &self.masks.global, 196)
-                }),
-                global,
-                local_mask,
-                refine_heatmap.unwrap_or_else(|| {
-                    preview_mask_image("Tensor Refine Heatmap", &self.masks.local, 196)
-                }),
-                refine,
-            ],
+            images,
+            fields,
+        )
+    }
+
+    fn build_probe_miss_debug_snapshot(
+        &self,
+        sample: &MinimapPresenceSample,
+        estimate: Option<&PositionEstimate>,
+    ) -> TrackingDebugSnapshot {
+        let mut fields = vec![
+            DebugField::new("阶段", self.state.stage.to_string()),
+            DebugField::new("设备", self.matcher.device_label()),
+            DebugField::new("编码器", self.matcher.source_label()),
+            DebugField::new("局部失败", self.state.local_fail_streak.to_string()),
+            DebugField::new("丢失帧", self.state.lost_frames.to_string()),
+        ];
+        let mut images = Vec::new();
+
+        if let Some(detector) = self.presence_detector.as_ref() {
+            fields.extend(detector.debug_fields(sample));
+            images.extend(detector.debug_images(sample));
+        }
+        if let Some(position) = estimate {
+            fields.push(DebugField::new(
+                "输出坐标",
+                format!("{:.0}, {:.0}", position.world.x, position.world.y),
+            ));
+        }
+
+        build_debug_snapshot(
+            TrackerEngineKind::ConvolutionFeatureMatch,
+            self.state.frame_index,
+            self.state.stage,
+            images,
             fields,
         )
     }
@@ -1553,7 +1633,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "ai-candle-cuda")]
+    #[cfg(candle_cuda_backend)]
     #[test]
     fn synthetic_captures_locate_many_positions_on_candle_cuda() -> Result<()> {
         let fixture = fixture();

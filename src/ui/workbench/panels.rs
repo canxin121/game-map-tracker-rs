@@ -1047,49 +1047,6 @@ fn toolbar_cluster(children: Vec<AnyElement>) -> impl IntoElement {
         .children(children)
 }
 
-fn status_chip(
-    tokens: WorkbenchThemeTokens,
-    icon: &'static str,
-    value: impl Into<SharedString>,
-) -> impl IntoElement {
-    div()
-        .rounded_lg()
-        .bg(tokens.toolbar_chip_bg)
-        .border_1()
-        .border_color(tokens.border)
-        .px_3()
-        .py_2()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(18.0))
-                        .h(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(tokens.nav_item_bg)
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(tokens.text_soft)
-                                .child(icon),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(tokens.app_fg)
-                        .child(value.into()),
-                ),
-        )
-}
-
 fn toolbar_button(
     id: impl Into<SharedString>,
     tokens: WorkbenchThemeTokens,
@@ -1324,23 +1281,6 @@ fn page_header(
     .into_any_element();
     let controls = match (this.active_page, this.map_page) {
         (WorkbenchPage::Map, MapPage::Tracker) => vec![
-            toolbar_cluster(vec![
-                status_chip(tokens, "G", format!("当前组 {}", this.active_group_name()))
-                    .into_any_element(),
-                status_chip(
-                    tokens,
-                    "N",
-                    format!("当前节点 {}", this.current_point_label()),
-                )
-                .into_any_element(),
-                status_chip(
-                    tokens,
-                    "X",
-                    format!("坐标 {}", this.current_position_label()),
-                )
-                .into_any_element(),
-            ])
-            .into_any_element(),
             toolbar_cluster(vec![
                 toolbar_icon_button(
                     "preview-prev-top",
@@ -2181,6 +2121,110 @@ fn settings_capture_page(
                             .into_any_element(),
                         labeled_input(tokens, "Height", &this.config_form.minimap_height)
                             .into_any_element(),
+                    ]),
+                ],
+                tokens,
+            )
+            .into_any_element(),
+            editable_config_section(
+                "F1-P 标签探针",
+                vec![
+                    toolbar_cluster(vec![
+                        toolbar_button_with_tooltip(
+                            "settings-minimap-presence-probe-picker",
+                            tokens,
+                            if this.is_minimap_presence_probe_picker_active() {
+                                this.busy_spinner_icon()
+                            } else {
+                                "F"
+                            },
+                            if this.is_minimap_presence_probe_picker_active() {
+                                "取区中"
+                            } else {
+                                "标签取区"
+                            },
+                            Some(if this.is_minimap_presence_probe_picker_active() {
+                                "F1-P 标签探针取区窗口已打开：请只框住标签带，不要包含上方图标；确认后会把当前区域抓成模板。".into()
+                            } else {
+                                "打开屏幕取区窗口，手动框选 F1 到 P 这排标签，并在确认时抓取模板。".into()
+                            }),
+                            if this.is_minimap_presence_probe_picker_active() {
+                                ToolbarButtonTone::Primary
+                            } else {
+                                ToolbarButtonTone::Neutral
+                            },
+                            false,
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.toggle_minimap_presence_probe_picker(window, cx);
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element(),
+                    ])
+                    .into_any_element(),
+                    config_row(vec![
+                        labeled_input(
+                            tokens,
+                            "启用 true/false",
+                            &this.config_form.minimap_presence_probe_enabled,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "Top",
+                            &this.config_form.minimap_presence_probe_top,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "Left",
+                            &this.config_form.minimap_presence_probe_left,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "Width",
+                            &this.config_form.minimap_presence_probe_width,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "Height",
+                            &this.config_form.minimap_presence_probe_height,
+                        )
+                        .into_any_element(),
+                    ]),
+                    config_row(vec![
+                        labeled_input(
+                            tokens,
+                            "匹配阈值",
+                            &this.config_form.minimap_presence_probe_match_threshold,
+                        )
+                        .into_any_element(),
+                        labeled_select(
+                            tokens,
+                            "设备",
+                            Select::new(&this.minimap_presence_probe_device_picker)
+                                .icon(Icon::new(IconName::ChevronsUpDown))
+                                .w_full()
+                                .menu_width(px(420.0))
+                                .placeholder("选择执行设备")
+                                .search_placeholder("搜索 CPU / CUDA / Metal")
+                                .empty_message("当前没有可用设备。"),
+                        )
+                        .into_any_element(),
+                        labeled_select(
+                            tokens,
+                            "设备序号",
+                            Select::new(&this.minimap_presence_probe_device_index_picker)
+                                .icon(Icon::new(IconName::ChevronsUpDown))
+                                .w_full()
+                                .menu_width(px(420.0))
+                                .placeholder("选择设备序号")
+                                .search_placeholder("搜索设备序号")
+                                .empty_message("当前后端没有可用设备。"),
+                        )
+                        .into_any_element(),
                     ]),
                 ],
                 tokens,

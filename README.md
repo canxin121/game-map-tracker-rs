@@ -26,12 +26,13 @@
 cargo run
 ```
 
-默认启用 `ai-candle`。GPU 后端仍然需要显式开启，因为它们不能安全地作为跨平台默认构建的一部分：
+默认启用 `ai-candle`，并会按当前平台自动编进对应的 GPU 后端：
 
-- `Metal` 依赖 Apple 平台，不能在 Windows 默认构建里一起编进去
-- `CUDA` 会触发 `nvcc` / MSVC 等工具链要求，不适合强行塞进默认 `cargo run`
+- Windows 默认构建包含 `CPU / CUDA`
+- macOS 默认构建包含 `CPU / Metal`
+- 其他平台默认构建包含 `CPU`
 
-需要 GPU 二进制时，显式追加对应特性：
+如果需要显式覆盖默认行为，仍然可以手动指定特性：
 
 ```powershell
 cargo run --no-default-features
@@ -40,7 +41,7 @@ cargo run --features ai-candle-cuda
 cargo run --features ai-candle-metal
 ```
 
-Windows 下如果要稳定构建 CUDA 版本，优先使用仓库内脚本：
+Windows 下仓库内脚本仍然保留为便捷入口，但默认 `cargo build` / `cargo run` 已经会直接走 CUDA 版本，不再必须依赖脚本：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build-cuda.ps1
@@ -187,17 +188,21 @@ data/
 - `AI_DEVICE_INDEX`
 - `AI_WEIGHTS_PATH`
 
-`AI_DEVICE` 支持 `cpu`、`cuda`、`metal`，但运行时只能切换到当前二进制里实际编进来的后端。默认构建不会自动包含 GPU 后端，因此：
+`AI_DEVICE` 支持 `cpu`、`cuda`、`metal`，但运行时只能切换到当前二进制里实际编进来的后端。默认构建会按平台自动包含对应 GPU 后端，因此：
 
-- 默认构建可切换 `cpu`
-- `cargo run --features ai-candle-cuda` 可切换 `cpu / cuda`
-- `cargo run --features ai-candle-metal` 可切换 `cpu / metal`
+- Windows 默认构建可切换 `cpu / cuda`
+- macOS 默认构建可切换 `cpu / metal`
+- 其他平台默认构建可切换 `cpu`
+- `cargo run --features ai-candle-cuda` 可显式构建 `cpu / cuda`
+- `cargo run --features ai-candle-metal` 可显式构建 `cpu / metal`
 
 `TEMPLATE_DEVICE` 也支持 `cpu`、`cuda`、`metal`，遵循同样的构建约束：
 
-- 默认构建可切换 `cpu`
-- `cargo run --features ai-candle-cuda` 可切换 `cpu / cuda`
-- `cargo run --features ai-candle-metal` 可切换 `cpu / metal`
+- Windows 默认构建可切换 `cpu / cuda`
+- macOS 默认构建可切换 `cpu / metal`
+- 其他平台默认构建可切换 `cpu`
+- `cargo run --features ai-candle-cuda` 可显式构建 `cpu / cuda`
+- `cargo run --features ai-candle-metal` 可显式构建 `cpu / metal`
 
 ## 验证
 

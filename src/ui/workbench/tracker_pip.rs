@@ -1,10 +1,10 @@
 use gpui::{
-    Bounds, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    WindowControlArea, canvas, div, px,
+    AppContext, Bounds, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, WindowControlArea, canvas, div, px,
 };
-use gpui_component::{ActiveTheme as _, tooltip::Tooltip};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, tooltip::Tooltip};
 
 use crate::{
     domain::geometry::{MapCamera, WorldPoint},
@@ -14,7 +14,9 @@ use crate::{
 
 use super::{
     TrackerMapRenderSnapshot, TrackerWorkbench,
+    forms::{PipCapturePickerItem, PipCapturePickerTarget},
     panels::{paint_bwiki_tile_layers, paint_tracker_map_overlay_snapshot},
+    select::{ActionMenu, ActionMenuEvent, ActionMenuState},
     theme::WorkbenchThemeTokens,
 };
 
@@ -27,6 +29,8 @@ pub(super) struct TrackerPipWindow {
     always_on_top: bool,
     bwiki_resources: BwikiResourceManager,
     bwiki_tile_cache: gpui::Entity<TileImageCache>,
+    capture_menu: gpui::Entity<ActionMenuState<PipCapturePickerItem>>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl TrackerPipWindow {
@@ -37,9 +41,23 @@ impl TrackerPipWindow {
         snapshot: TrackerMapRenderSnapshot,
         bwiki_resources: BwikiResourceManager,
         bwiki_tile_cache: gpui::Entity<TileImageCache>,
-        _: &mut Window,
-        _: &mut Context<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let capture_menu =
+            cx.new(|cx| ActionMenuState::new(Self::capture_picker_items(), 6, window, cx));
+        let mut subscriptions = Vec::new();
+        let capture_menu_subscription = capture_menu.clone();
+        subscriptions.push(cx.subscribe_in(
+            &capture_menu_subscription,
+            window,
+            |this, _, event: &ActionMenuEvent<PipCapturePickerItem>, _, cx| {
+                let ActionMenuEvent::Confirm(target) = event;
+                this.open_capture_picker(*target, cx);
+                cx.notify();
+            },
+        ));
+
         Self {
             workbench,
             viewport: MapViewportState {
@@ -52,6 +70,8 @@ impl TrackerPipWindow {
             snapshot,
             bwiki_resources,
             bwiki_tile_cache,
+            capture_menu,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -147,12 +167,32 @@ impl TrackerPipWindow {
         window.remove_window();
     }
 
-    fn toggle_minimap_region_picker(&mut self, cx: &mut Context<Self>) {
+    fn open_capture_picker(&mut self, target: PipCapturePickerTarget, cx: &mut Context<Self>) {
         if let Some(workbench) = self.workbench.upgrade() {
-            let _ = workbench.update(cx, |this, cx| {
-                this.toggle_minimap_region_picker_from_pip(cx);
+            let _ = workbench.update(cx, |this, cx| match target {
+                PipCapturePickerTarget::Minimap => this.toggle_minimap_region_picker_from_pip(cx),
+                PipCapturePickerTarget::MinimapPresenceProbe => {
+                    this.toggle_minimap_presence_probe_picker_from_pip(cx);
+                }
             });
         }
+    }
+
+    fn capture_picker_items() -> Vec<PipCapturePickerItem> {
+        vec![
+            PipCapturePickerItem::new(
+                PipCapturePickerTarget::Minimap,
+                "小地图",
+                "圆形外接截图区域",
+                "minimap capture picker 小地图 截图 取区",
+            ),
+            PipCapturePickerItem::new(
+                PipCapturePickerTarget::MinimapPresenceProbe,
+                "F1-P 标签",
+                "标签带存在性探针区域",
+                "f1 p label probe 标签 探针 取区",
+            ),
+        ]
     }
 }
 
@@ -252,16 +292,7 @@ fn pip_titlebar(
                 .on_mouse_up(MouseButton::Left, |_, _, cx| {
                     cx.stop_propagation();
                 })
-                .child(pip_control_button(
-                    "tracker-pip-minimap-picker-local",
-                    tokens,
-                    "取区",
-                    "重新选择小地图圆形截图范围",
-                    PipControlTone::Toggle(false),
-                    cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.toggle_minimap_region_picker(cx);
-                    }),
-                ))
+                .child(pip_capture_menu(this, tokens))
                 .child(pip_control_button(
                     "tracker-pip-topmost-local",
                     tokens,
@@ -287,6 +318,23 @@ fn pip_titlebar(
                     }),
                 )),
         )
+}
+
+fn pip_capture_menu(this: &TrackerPipWindow, tokens: WorkbenchThemeTokens) -> impl IntoElement {
+    ActionMenu::new(&this.capture_menu)
+        .icon(Icon::new(IconName::ChevronDown))
+        .with_size(Size::Small)
+        .h(px(32.0))
+        .min_w(px(72.0))
+        .px_3()
+        .rounded_lg()
+        .bg(tokens.toolbar_button_bg)
+        .border_1()
+        .border_color(tokens.border)
+        .menu_width(px(280.0))
+        .label("取区")
+        .search_placeholder("搜索 小地图 / F1-P 标签")
+        .empty_message("当前没有可用的取区目标。")
 }
 
 #[derive(Debug, Clone, Copy)]

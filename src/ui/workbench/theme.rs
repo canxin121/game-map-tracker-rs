@@ -18,7 +18,6 @@ pub(super) struct WorkbenchThemeTokens {
     pub(super) nav_item_active_bg: Hsla,
     pub(super) nav_subitem_active_bg: Hsla,
     pub(super) nav_branch_bg: Hsla,
-    pub(super) toolbar_chip_bg: Hsla,
     pub(super) toolbar_button_bg: Hsla,
     pub(super) toolbar_button_hover_bg: Hsla,
     pub(super) toolbar_button_primary_bg: Hsla,
@@ -75,9 +74,6 @@ impl WorkbenchThemeTokens {
             nav_branch_bg: theme
                 .background
                 .mix(theme.sidebar, if is_dark { 0.42 } else { 0.8 }),
-            toolbar_chip_bg: theme
-                .background
-                .mix(theme.popover, if is_dark { 0.52 } else { 0.84 }),
             toolbar_button_bg: theme
                 .background
                 .mix(theme.secondary, if is_dark { 0.62 } else { 0.9 }),

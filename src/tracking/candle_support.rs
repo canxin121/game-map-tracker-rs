@@ -1,21 +1,21 @@
 #[cfg(feature = "ai-candle")]
 pub(crate) fn available_candle_backends() -> &'static str {
-    #[cfg(all(feature = "ai-candle-cuda", feature = "ai-candle-metal"))]
+    #[cfg(all(candle_cuda_backend, candle_metal_backend))]
     {
         return "CPU / CUDA / Metal";
     }
 
-    #[cfg(all(feature = "ai-candle-cuda", not(feature = "ai-candle-metal")))]
+    #[cfg(all(candle_cuda_backend, not(candle_metal_backend)))]
     {
         return "CPU / CUDA";
     }
 
-    #[cfg(all(not(feature = "ai-candle-cuda"), feature = "ai-candle-metal"))]
+    #[cfg(all(not(candle_cuda_backend), candle_metal_backend))]
     {
         return "CPU / Metal";
     }
 
-    #[cfg(all(not(feature = "ai-candle-cuda"), not(feature = "ai-candle-metal")))]
+    #[cfg(all(not(candle_cuda_backend), not(candle_metal_backend)))]
     {
         "CPU"
     }
@@ -32,13 +32,13 @@ pub(crate) struct CandleDeviceDescriptor {
 pub(crate) fn available_candle_backend_preferences() -> Vec<AiDevicePreference> {
     [
         Some(AiDevicePreference::Cpu),
-        #[cfg(feature = "ai-candle-cuda")]
+        #[cfg(candle_cuda_backend)]
         Some(AiDevicePreference::Cuda),
-        #[cfg(not(feature = "ai-candle-cuda"))]
+        #[cfg(not(candle_cuda_backend))]
         None,
-        #[cfg(feature = "ai-candle-metal")]
+        #[cfg(candle_metal_backend)]
         Some(AiDevicePreference::Metal),
-        #[cfg(not(feature = "ai-candle-metal"))]
+        #[cfg(not(candle_metal_backend))]
         None,
     ]
     .into_iter()
@@ -60,7 +60,7 @@ pub(crate) fn available_candle_device_descriptors(
 }
 
 #[cfg(feature = "ai-candle")]
-#[cfg(any(feature = "ai-candle-cuda", feature = "ai-candle-metal"))]
+#[cfg(any(candle_cuda_backend, candle_metal_backend))]
 use anyhow::Context as _;
 #[cfg(feature = "ai-candle")]
 use anyhow::Result;
@@ -116,7 +116,7 @@ pub(crate) fn candle_device_label(device: &Device) -> String {
     }
 }
 
-#[cfg(feature = "ai-candle-cuda")]
+#[cfg(candle_cuda_backend)]
 fn available_cuda_device_descriptors() -> Vec<CandleDeviceDescriptor> {
     use candle_core::cuda::cudarc::driver::safe::CudaContext;
 
@@ -144,12 +144,12 @@ fn available_cuda_device_descriptors() -> Vec<CandleDeviceDescriptor> {
     descriptors
 }
 
-#[cfg(not(feature = "ai-candle-cuda"))]
+#[cfg(not(candle_cuda_backend))]
 fn available_cuda_device_descriptors() -> Vec<CandleDeviceDescriptor> {
     Vec::new()
 }
 
-#[cfg(feature = "ai-candle-metal")]
+#[cfg(candle_metal_backend)]
 fn available_metal_device_descriptors() -> Vec<CandleDeviceDescriptor> {
     const MAX_PROBED_DEVICES: usize = 8;
 
@@ -168,33 +168,33 @@ fn available_metal_device_descriptors() -> Vec<CandleDeviceDescriptor> {
     descriptors
 }
 
-#[cfg(not(feature = "ai-candle-metal"))]
+#[cfg(not(candle_metal_backend))]
 fn available_metal_device_descriptors() -> Vec<CandleDeviceDescriptor> {
     Vec::new()
 }
 
-#[cfg(all(feature = "ai-candle", feature = "ai-candle-cuda"))]
+#[cfg(all(feature = "ai-candle", candle_cuda_backend))]
 fn build_cuda_device(ordinal: usize) -> Result<Device> {
     Device::new_cuda(ordinal)
         .with_context(|| format!("无法初始化 CUDA 设备 {ordinal}，请检查驱动、运行库和显卡状态"))
 }
 
-#[cfg(all(feature = "ai-candle", not(feature = "ai-candle-cuda")))]
+#[cfg(all(feature = "ai-candle", not(candle_cuda_backend)))]
 fn build_cuda_device(_ordinal: usize) -> Result<Device> {
     anyhow::bail!(
-        "配置选择了 CUDA 设备，但当前二进制未启用 `ai-candle-cuda` 特性；请使用 `cargo run --features ai-candle-cuda` 重新构建"
+        "配置选择了 CUDA 设备，但当前二进制未包含 CUDA 后端；Windows 默认构建会包含 CUDA，其他平台请使用 `cargo run --features ai-candle-cuda` 重新构建"
     )
 }
 
-#[cfg(all(feature = "ai-candle", feature = "ai-candle-metal"))]
+#[cfg(all(feature = "ai-candle", candle_metal_backend))]
 fn build_metal_device(ordinal: usize) -> Result<Device> {
     Device::new_metal(ordinal)
         .with_context(|| format!("无法初始化 Metal 设备 {ordinal}，请检查系统和 GPU 支持状态"))
 }
 
-#[cfg(all(feature = "ai-candle", not(feature = "ai-candle-metal")))]
+#[cfg(all(feature = "ai-candle", not(candle_metal_backend)))]
 fn build_metal_device(_ordinal: usize) -> Result<Device> {
     anyhow::bail!(
-        "配置选择了 Metal 设备，但当前二进制未启用 `ai-candle-metal` 特性；请使用 `cargo run --features ai-candle-metal` 重新构建"
+        "配置选择了 Metal 设备，但当前二进制未包含 Metal 后端；macOS 默认构建会包含 Metal，其他平台请使用 `cargo run --features ai-candle-metal` 重新构建"
     )
 }

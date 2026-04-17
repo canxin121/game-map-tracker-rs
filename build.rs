@@ -8,9 +8,23 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));
     let generated_path = out_dir.join("embedded_assets.rs");
     let icon_assets_root = manifest_dir.join("assets").join("icons");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let ai_candle_enabled = env::var_os("CARGO_FEATURE_AI_CANDLE").is_some();
+    let explicit_cuda = env::var_os("CARGO_FEATURE_AI_CANDLE_CUDA").is_some();
+    let explicit_metal = env::var_os("CARGO_FEATURE_AI_CANDLE_METAL").is_some();
 
     for root in [&icon_assets_root] {
         println!("cargo:rerun-if-changed={}", root.display());
+    }
+
+    println!("cargo:rustc-check-cfg=cfg(candle_cuda_backend)");
+    println!("cargo:rustc-check-cfg=cfg(candle_metal_backend)");
+
+    if ai_candle_enabled && (target_os == "windows" || explicit_cuda) {
+        println!("cargo:rustc-cfg=candle_cuda_backend");
+    }
+    if ai_candle_enabled && (target_os == "macos" || explicit_metal) {
+        println!("cargo:rustc-cfg=candle_metal_backend");
     }
 
     let mut files = Vec::new();

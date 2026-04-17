@@ -65,6 +65,19 @@ pub struct TemplateTrackingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
+pub struct MinimapPresenceProbeConfig {
+    pub enabled: bool,
+    pub top: i32,
+    pub left: i32,
+    pub width: u32,
+    pub height: u32,
+    pub match_threshold: f32,
+    pub device: AiDevicePreference,
+    pub device_index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(default)]
 pub struct NetworkConfig {
     pub http_port: u16,
     pub websocket_port: u16,
@@ -74,6 +87,7 @@ pub struct NetworkConfig {
 #[serde(default)]
 pub struct AppConfig {
     pub minimap: CaptureRegion,
+    pub minimap_presence_probe: MinimapPresenceProbeConfig,
     pub window_geometry: String,
     pub view_size: u32,
     pub max_lost_frames: u32,
@@ -170,6 +184,21 @@ impl Default for TemplateTrackingConfig {
     }
 }
 
+impl Default for MinimapPresenceProbeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            top: 0,
+            left: 0,
+            width: 0,
+            height: 0,
+            match_threshold: 0.62,
+            device: AiDevicePreference::Cpu,
+            device_index: 0,
+        }
+    }
+}
+
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
@@ -183,6 +212,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             minimap: CaptureRegion::default(),
+            minimap_presence_probe: MinimapPresenceProbeConfig::default(),
             window_geometry: "400x400+1500+100".to_owned(),
             view_size: 400,
             max_lost_frames: 50,
@@ -192,6 +222,23 @@ impl Default for AppConfig {
             template: TemplateTrackingConfig::default(),
             network: NetworkConfig::default(),
         }
+    }
+}
+
+impl MinimapPresenceProbeConfig {
+    #[must_use]
+    pub fn is_configured(&self) -> bool {
+        self.width > 0 && self.height > 0
+    }
+
+    #[must_use]
+    pub fn capture_region(&self) -> Option<CaptureRegion> {
+        self.is_configured().then_some(CaptureRegion {
+            top: self.top,
+            left: self.left,
+            width: self.width,
+            height: self.height,
+        })
     }
 }
 

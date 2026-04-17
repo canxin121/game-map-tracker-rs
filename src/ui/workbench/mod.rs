@@ -2,6 +2,7 @@ mod forms;
 mod minimap_picker;
 mod page;
 mod panels;
+mod probe_region_picker;
 mod select;
 mod theme;
 mod tracker_pip;
@@ -19,7 +20,7 @@ use gpui::{
     Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
     WindowOptions,
 };
-use gpui_component::input::InputEvent;
+use gpui_component::{Root, input::InputEvent};
 
 use crate::{
     config::{AiDevicePreference, AppConfig, CONFIG_FILE_NAME, save_config},
@@ -42,6 +43,7 @@ use crate::{
             available_candle_backend_preferences, available_candle_device_descriptors,
         },
         debug::TrackingDebugSnapshot,
+        presence::calibrate_minimap_presence_probe,
         spawn_tracker_session,
         template::rebuild_template_engine_cache,
     },
@@ -59,6 +61,7 @@ use self::{
     minimap_picker::MinimapRegionPicker,
     page::{MapPage, SettingsPage, WorkbenchPage},
     panels::render_workbench,
+    probe_region_picker::MinimapPresenceProbePicker,
     select::{SelectEvent, SelectState},
     theme::apply_theme_preference,
     tracker_pip::{TrackerPipWindow, apply_window_topmost},
@@ -397,6 +400,10 @@ pub struct TrackerWorkbench {
     ai_device_index: usize,
     ai_device_picker: gpui::Entity<SelectState<DevicePreferencePickerItem>>,
     ai_device_index_picker: gpui::Entity<SelectState<DeviceIndexPickerItem>>,
+    minimap_presence_probe_device_preference: AiDevicePreference,
+    minimap_presence_probe_device_index: usize,
+    minimap_presence_probe_device_picker: gpui::Entity<SelectState<DevicePreferencePickerItem>>,
+    minimap_presence_probe_device_index_picker: gpui::Entity<SelectState<DeviceIndexPickerItem>>,
     template_device_preference: AiDevicePreference,
     template_device_index: usize,
     template_device_picker: gpui::Entity<SelectState<DevicePreferencePickerItem>>,
@@ -407,7 +414,8 @@ pub struct TrackerWorkbench {
     point_reorder_target_id: Option<RoutePointId>,
     point_reorder_picker: gpui::Entity<SelectState<PointReorderTargetItem>>,
     minimap_region_picker_window: Option<AnyWindowHandle>,
-    tracker_pip_window: Option<WindowHandle<TrackerPipWindow>>,
+    minimap_presence_probe_picker_window: Option<AnyWindowHandle>,
+    tracker_pip_window: Option<WindowHandle<Root>>,
     tracker_pip_window_bounds: Option<WindowBounds>,
     tracker_pip_always_on_top: bool,
     tracker_pip_pending_open: bool,
@@ -459,6 +467,24 @@ impl TrackerWorkbench {
             )
         });
         let ai_device_index_picker = cx.new(|cx| {
+            SelectState::new(
+                Self::device_index_picker_items(AiDevicePreference::Cpu),
+                Some(0),
+                6,
+                window,
+                cx,
+            )
+        });
+        let minimap_presence_probe_device_picker = cx.new(|cx| {
+            SelectState::new(
+                Self::device_preference_picker_items(),
+                Some(AiDevicePreference::Cpu),
+                6,
+                window,
+                cx,
+            )
+        });
+        let minimap_presence_probe_device_index_picker = cx.new(|cx| {
             SelectState::new(
                 Self::device_index_picker_items(AiDevicePreference::Cpu),
                 Some(0),
@@ -599,6 +625,12 @@ impl TrackerWorkbench {
                     ai_device_index: 0,
                     ai_device_picker: ai_device_picker.clone(),
                     ai_device_index_picker: ai_device_index_picker.clone(),
+                    minimap_presence_probe_device_preference: AiDevicePreference::Cpu,
+                    minimap_presence_probe_device_index: 0,
+                    minimap_presence_probe_device_picker: minimap_presence_probe_device_picker
+                        .clone(),
+                    minimap_presence_probe_device_index_picker:
+                        minimap_presence_probe_device_index_picker.clone(),
                     template_device_preference: AiDevicePreference::Cpu,
                     template_device_index: 0,
                     template_device_picker: template_device_picker.clone(),
@@ -609,6 +641,7 @@ impl TrackerWorkbench {
                     point_reorder_target_id: None,
                     point_reorder_picker: point_reorder_picker.clone(),
                     minimap_region_picker_window: None,
+                    minimap_presence_probe_picker_window: None,
                     tracker_pip_window: None,
                     tracker_pip_window_bounds: None,
                     tracker_pip_always_on_top: false,
@@ -711,6 +744,10 @@ impl TrackerWorkbench {
                     ai_device_index: 0,
                     ai_device_picker,
                     ai_device_index_picker,
+                    minimap_presence_probe_device_preference: AiDevicePreference::Cpu,
+                    minimap_presence_probe_device_index: 0,
+                    minimap_presence_probe_device_picker,
+                    minimap_presence_probe_device_index_picker,
                     template_device_preference: AiDevicePreference::Cpu,
                     template_device_index: 0,
                     template_device_picker,
@@ -721,6 +758,7 @@ impl TrackerWorkbench {
                     point_reorder_target_id: None,
                     point_reorder_picker,
                     minimap_region_picker_window: None,
+                    minimap_presence_probe_picker_window: None,
                     tracker_pip_window: None,
                     tracker_pip_window_bounds: None,
                     tracker_pip_always_on_top: false,
@@ -961,6 +999,34 @@ impl TrackerWorkbench {
                 };
                 this.ai_device_index = *device_index;
                 this.sync_ai_device_picker_state(window, cx);
+                cx.notify();
+            },
+        ));
+        let minimap_presence_probe_device_picker =
+            workbench.minimap_presence_probe_device_picker.clone();
+        workbench.subscriptions.push(cx.subscribe_in(
+            &minimap_presence_probe_device_picker,
+            window,
+            |this, _, event: &SelectEvent<DevicePreferencePickerItem>, window, cx| {
+                let SelectEvent::Confirm(Some(device)) = event else {
+                    return;
+                };
+                this.minimap_presence_probe_device_preference = *device;
+                this.sync_minimap_presence_probe_device_picker_state(window, cx);
+                cx.notify();
+            },
+        ));
+        let minimap_presence_probe_device_index_picker =
+            workbench.minimap_presence_probe_device_index_picker.clone();
+        workbench.subscriptions.push(cx.subscribe_in(
+            &minimap_presence_probe_device_index_picker,
+            window,
+            |this, _, event: &SelectEvent<DeviceIndexPickerItem>, window, cx| {
+                let SelectEvent::Confirm(Some(device_index)) = event else {
+                    return;
+                };
+                this.minimap_presence_probe_device_index = *device_index;
+                this.sync_minimap_presence_probe_device_picker_state(window, cx);
                 cx.notify();
             },
         ));
@@ -1274,6 +1340,33 @@ impl TrackerWorkbench {
         });
     }
 
+    fn sync_minimap_presence_probe_device_picker_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (preference, device_index) = Self::normalized_device_selection(
+            self.minimap_presence_probe_device_preference,
+            self.minimap_presence_probe_device_index,
+        );
+        self.minimap_presence_probe_device_preference = preference;
+        self.minimap_presence_probe_device_index = device_index;
+
+        let preference_items = Self::device_preference_picker_items();
+        self.minimap_presence_probe_device_picker
+            .update(cx, |picker, cx| {
+                picker.set_items(preference_items.clone(), window, cx);
+                picker.set_selected_value(&preference, window, cx);
+            });
+
+        let index_items = Self::device_index_picker_items(preference);
+        self.minimap_presence_probe_device_index_picker
+            .update(cx, |picker, cx| {
+                picker.set_items(index_items.clone(), window, cx);
+                picker.set_selected_value(&device_index, window, cx);
+            });
+    }
+
     fn sync_template_device_picker_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (preference, device_index) = Self::normalized_device_selection(
             self.template_device_preference,
@@ -1458,24 +1551,10 @@ impl TrackerWorkbench {
         self.tracker_point_popup_enabled
     }
 
-    pub(super) fn active_group_name(&self) -> SharedString {
-        self.active_group().map_or_else(
-            || "未选择路线".into(),
-            |group| group.display_name().to_owned().into(),
-        )
-    }
-
     pub(super) fn current_position_label(&self) -> String {
         self.preview_position.as_ref().map_or_else(
             || "--".to_owned(),
             |position| format!("{:.0}, {:.0}", position.world.x, position.world.y),
-        )
-    }
-
-    pub(super) fn current_point_label(&self) -> SharedString {
-        self.selected_point().map_or_else(
-            || "未选择节点".into(),
-            |point| point.display_label().to_owned().into(),
         )
     }
 
@@ -4407,6 +4486,45 @@ impl TrackerWorkbench {
             cx,
         );
         set_input_value(
+            &self.config_form.minimap_presence_probe_enabled,
+            config.minimap_presence_probe.enabled.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_presence_probe_top,
+            config.minimap_presence_probe.top.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_presence_probe_left,
+            config.minimap_presence_probe.left.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_presence_probe_width,
+            config.minimap_presence_probe.width.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_presence_probe_height,
+            config.minimap_presence_probe.height.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_presence_probe_match_threshold,
+            config.minimap_presence_probe.match_threshold.to_string(),
+            window,
+            cx,
+        );
+        self.minimap_presence_probe_device_preference = config.minimap_presence_probe.device;
+        self.minimap_presence_probe_device_index = config.minimap_presence_probe.device_index;
+        self.sync_minimap_presence_probe_device_picker_state(window, cx);
+        set_input_value(
             &self.config_form.window_geometry,
             config.window_geometry,
             window,
@@ -4852,7 +4970,7 @@ impl TrackerWorkbench {
                     true
                 });
 
-                cx.new(|cx| {
+                let view = cx.new(|cx| {
                     TrackerPipWindow::new(
                         workbench.clone(),
                         initial_camera,
@@ -4863,7 +4981,8 @@ impl TrackerWorkbench {
                         pip_window,
                         cx,
                     )
-                })
+                });
+                cx.new(|cx| Root::new(view, pip_window, cx))
             },
         );
 
@@ -4938,18 +5057,23 @@ impl TrackerWorkbench {
         };
         let snapshot = self.tracker_map_render_snapshot();
 
-        match handle.update(cx, |pip, pip_window, cx| {
-            pip.update_snapshot(snapshot.clone());
+        match handle.update(cx, |root, pip_window, cx| {
+            let Ok(pip) = root.view().clone().downcast::<TrackerPipWindow>() else {
+                return None;
+            };
+            pip.update(cx, |pip, _| {
+                pip.update_snapshot(snapshot.clone());
+            });
             let bounds = pip_window.window_bounds();
             pip_window.defer(cx, |pip_window, _| {
                 pip_window.refresh();
             });
-            bounds
+            Some(bounds)
         }) {
-            Ok(bounds) => {
+            Ok(Some(bounds)) => {
                 self.tracker_pip_window_bounds = Some(bounds);
             }
-            Err(_) => {
+            _ => {
                 self.tracker_pip_window = None;
                 self.tracker_pip_pending_open = false;
             }
@@ -5005,6 +5129,41 @@ impl TrackerWorkbench {
                     if let Some(workbench) = workbench_for_error.upgrade() {
                         let _ = workbench.update(cx, |this, _| {
                             this.status_text = "主工作区窗口已经关闭，无法打开小地图取区。".into();
+                        });
+                    }
+                }
+            }
+        });
+    }
+
+    pub(super) fn toggle_minimap_presence_probe_picker_from_pip(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.minimap_presence_probe_picker_window.take() {
+            self.status_text = "已取消 F1-P 标签探针取区。".into();
+            let _ = handle.update(cx, |_, picker_window, cx| {
+                picker_window.defer(cx, |picker_window, _| {
+                    picker_window.remove_window();
+                });
+            });
+            return;
+        }
+
+        let workbench = cx.entity().downgrade();
+        let workbench_for_error = workbench.clone();
+        let main_window_handle = self.main_window_handle;
+        cx.defer(move |cx| {
+            match main_window_handle.update(cx, move |_, main_window, cx| {
+                if let Some(workbench) = workbench.upgrade() {
+                    let _ = workbench.update(cx, |this, cx| {
+                        this.open_minimap_presence_probe_picker(main_window, cx);
+                    });
+                }
+            }) {
+                Ok(()) => {}
+                Err(_) => {
+                    if let Some(workbench) = workbench_for_error.upgrade() {
+                        let _ = workbench.update(cx, |this, _| {
+                            this.status_text =
+                                "主工作区窗口已经关闭，无法打开 F1-P 标签探针取区。".into();
                         });
                     }
                 }
@@ -5186,6 +5345,204 @@ impl TrackerWorkbench {
     pub(super) fn handle_minimap_region_picker_closed(&mut self) {
         if self.minimap_region_picker_window.take().is_some() {
             self.status_text = "已取消小地图取区。".into();
+        }
+    }
+
+    pub(super) fn is_minimap_presence_probe_picker_active(&self) -> bool {
+        self.minimap_presence_probe_picker_window.is_some()
+    }
+
+    pub(super) fn toggle_minimap_presence_probe_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.minimap_presence_probe_picker_window.take() {
+            self.status_text = "已取消 F1-P 标签探针取区。".into();
+            let _ = handle.update(cx, |_, picker_window, cx| {
+                picker_window.defer(cx, |picker_window, _| {
+                    picker_window.remove_window();
+                });
+            });
+            return;
+        }
+
+        self.open_minimap_presence_probe_picker(window, cx);
+    }
+
+    fn open_minimap_presence_probe_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((display_id, display_bounds)) = self.resolve_minimap_picker_display(window, cx)
+        else {
+            self.status_text = "无法定位可用显示器，不能进入 F1-P 标签探针取区模式。".into();
+            return;
+        };
+
+        let workbench = cx.entity().downgrade();
+        let workbench_for_close = workbench.clone();
+        let main_window_handle = window.window_handle();
+        let picker_result = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(display_bounds)),
+                focus: true,
+                show: true,
+                kind: WindowKind::PopUp,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                display_id: Some(display_id),
+                window_background: WindowBackgroundAppearance::Transparent,
+                titlebar: None,
+                ..Default::default()
+            },
+            move |picker_window, cx| {
+                picker_window.on_window_should_close(cx, move |_, cx| {
+                    if let Some(workbench) = workbench_for_close.upgrade() {
+                        let _ = workbench.update(cx, |this, _| {
+                            this.handle_minimap_presence_probe_picker_closed();
+                        });
+                    }
+                    true
+                });
+
+                cx.new(|_| {
+                    MinimapPresenceProbePicker::new(
+                        workbench.clone(),
+                        main_window_handle,
+                        display_bounds,
+                    )
+                })
+            },
+        );
+
+        match picker_result {
+            Ok(handle) => {
+                self.minimap_presence_probe_picker_window = Some(handle.into());
+                self.status_text =
+                    "F1-P 标签探针取区已开启：请只框住标签带，确认后会立刻抓当前区域作为模板。"
+                        .into();
+            }
+            Err(error) => {
+                self.status_text = format!("打开 F1-P 标签探针取区窗口失败：{error:#}").into();
+            }
+        }
+    }
+
+    fn sync_minimap_presence_probe_form_region(
+        &mut self,
+        region: &crate::config::CaptureRegion,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        set_input_value(
+            &self.config_form.minimap_presence_probe_enabled,
+            enabled.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_presence_probe_top,
+            region.top.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_presence_probe_left,
+            region.left.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_presence_probe_width,
+            region.width.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.minimap_presence_probe_height,
+            region.height.to_string(),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn finish_minimap_presence_probe_pick(
+        &mut self,
+        region: crate::config::CaptureRegion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.minimap_presence_probe_picker_window = None;
+
+        let template_path =
+            match calibrate_minimap_presence_probe(&self.workspace.project_root, &region) {
+                Ok(path) => path,
+                Err(error) => {
+                    self.status_text = format!(
+                        "F1-P 标签探针模板抓取失败：{error:#}。请确认当前界面有完整标签带。"
+                    )
+                    .into();
+                    return;
+                }
+            };
+
+        let mut config = self.workspace.config.clone();
+        config.minimap_presence_probe.enabled = true;
+        config.minimap_presence_probe.top = region.top;
+        config.minimap_presence_probe.left = region.left;
+        config.minimap_presence_probe.width = region.width;
+        config.minimap_presence_probe.height = region.height;
+        self.update_workspace_config(config.clone());
+        self.sync_minimap_presence_probe_form_region(&region, true, window, cx);
+
+        match save_config(&self.workspace.project_root, &config) {
+            Ok(path) => {
+                self.status_text = if self.is_tracking_active() {
+                    format!(
+                        "已更新 F1-P 标签探针区域为 top {} / left {} / {}x{}，并保存配置 {}、模板 {}。当前追踪需重启后才会应用新区域。",
+                        region.top,
+                        region.left,
+                        region.width,
+                        region.height,
+                        path.display(),
+                        template_path.display()
+                    )
+                    .into()
+                } else {
+                    format!(
+                        "已更新 F1-P 标签探针区域为 top {} / left {} / {}x{}，并保存配置 {}、模板 {}。",
+                        region.top,
+                        region.left,
+                        region.width,
+                        region.height,
+                        path.display(),
+                        template_path.display()
+                    )
+                    .into()
+                };
+            }
+            Err(error) => {
+                self.status_text = format!(
+                    "F1-P 标签探针区域已抓取为 top {} / left {} / {}x{}，模板已保存到 {}，但写入配置失败：{error:#}",
+                    region.top,
+                    region.left,
+                    region.width,
+                    region.height,
+                    template_path.display()
+                )
+                .into();
+            }
+        }
+    }
+
+    pub(super) fn handle_minimap_presence_probe_picker_cancelled(&mut self) {
+        self.minimap_presence_probe_picker_window = None;
+        self.status_text = "已取消 F1-P 标签探针取区。".into();
+    }
+
+    pub(super) fn handle_minimap_presence_probe_picker_closed(&mut self) {
+        if self.minimap_presence_probe_picker_window.take().is_some() {
+            self.status_text = "已取消 F1-P 标签探针取区。".into();
         }
     }
 
