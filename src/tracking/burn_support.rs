@@ -107,6 +107,8 @@ pub(crate) fn available_burn_device_descriptors(
 use anyhow::Result;
 #[cfg(feature = "ai-burn")]
 use burn::tensor::{Tensor, backend::Backend};
+#[cfg(feature = "ai-burn")]
+use cubecl_runtime::runtime::Runtime as CubeRuntime;
 
 #[cfg(feature = "ai-burn")]
 use crate::config::{AiTrackingConfig, MinimapPresenceProbeConfig, TemplateTrackingConfig};
@@ -115,6 +117,10 @@ use crate::config::{AiTrackingConfig, MinimapPresenceProbeConfig, TemplateTracki
 use burn::backend::cuda::CudaDevice;
 #[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
 use burn::backend::wgpu::WgpuDevice;
+#[cfg(all(feature = "ai-burn", burn_cuda_backend))]
+use cubecl_cuda::CudaRuntime;
+#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
+use cubecl_wgpu::WgpuRuntime;
 
 #[cfg(feature = "ai-burn")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +132,13 @@ pub(crate) enum BurnDeviceSelection {
     Vulkan(WgpuDevice),
     #[cfg(burn_metal_backend)]
     Metal(WgpuDevice),
+}
+
+#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BurnWgpuDeviceChoice {
+    descriptor: BurnDeviceDescriptor,
+    device: WgpuDevice,
 }
 
 #[cfg(feature = "ai-burn")]
@@ -192,6 +205,13 @@ pub(crate) fn burn_device_label(device: &BurnDeviceSelection) -> String {
 
 #[cfg(all(feature = "ai-burn", burn_cuda_backend))]
 fn build_cuda_device(ordinal: usize) -> Result<BurnDeviceSelection> {
+    if !available_cuda_device_descriptors()
+        .iter()
+        .any(|descriptor| descriptor.ordinal == ordinal)
+    {
+        anyhow::bail!("CUDA 设备序号 {ordinal} 不存在");
+    }
+
     let device = CudaDevice { index: ordinal };
     probe_device::<burn::backend::Cuda>(&device)?;
     Ok(BurnDeviceSelection::Cuda(device))
@@ -204,7 +224,10 @@ fn build_cuda_device(_ordinal: usize) -> Result<BurnDeviceSelection> {
 
 #[cfg(all(feature = "ai-burn", burn_vulkan_backend))]
 fn build_vulkan_device(ordinal: usize) -> Result<BurnDeviceSelection> {
-    let device = wgpu_device_from_ordinal(ordinal)
+    let device = available_vulkan_device_choices()
+        .iter()
+        .find(|choice| choice.descriptor.ordinal == ordinal)
+        .map(|choice| choice.device.clone())
         .ok_or_else(|| anyhow::anyhow!("Vulkan 设备序号 {ordinal} 不存在"))?;
     probe_device::<burn::backend::Vulkan>(&device)?;
     Ok(BurnDeviceSelection::Vulkan(device))
@@ -219,7 +242,10 @@ fn build_vulkan_device(_ordinal: usize) -> Result<BurnDeviceSelection> {
 
 #[cfg(all(feature = "ai-burn", burn_metal_backend))]
 fn build_metal_device(ordinal: usize) -> Result<BurnDeviceSelection> {
-    let device = wgpu_device_from_ordinal(ordinal)
+    let device = available_metal_device_choices()
+        .iter()
+        .find(|choice| choice.descriptor.ordinal == ordinal)
+        .map(|choice| choice.device.clone())
         .ok_or_else(|| anyhow::anyhow!("Metal 设备序号 {ordinal} 不存在"))?;
     probe_device::<burn::backend::Metal>(&device)?;
     Ok(BurnDeviceSelection::Metal(device))
@@ -234,21 +260,22 @@ fn build_metal_device(_ordinal: usize) -> Result<BurnDeviceSelection> {
 
 #[cfg(all(feature = "ai-burn", burn_cuda_backend))]
 fn available_cuda_device_descriptors() -> Vec<BurnDeviceDescriptor> {
-    const MAX_PROBED_CUDA_DEVICES: usize = 16;
+    static DESCRIPTORS: OnceLock<Vec<BurnDeviceDescriptor>> = OnceLock::new();
 
-    let mut descriptors = Vec::new();
-    for ordinal in 0..MAX_PROBED_CUDA_DEVICES {
-        let device = CudaDevice { index: ordinal };
-        if probe_device::<burn::backend::Cuda>(&device).is_ok() {
-            descriptors.push(BurnDeviceDescriptor {
-                ordinal,
-                name: format!("CUDA 设备 {ordinal}"),
-            });
-        } else if !descriptors.is_empty() {
-            break;
-        }
-    }
-    descriptors
+    DESCRIPTORS
+        .get_or_init(|| {
+            <CudaRuntime as CubeRuntime>::enumerate_devices(0, &())
+                .into_iter()
+                .map(|device_id| {
+                    let ordinal = device_id.index_id as usize;
+                    BurnDeviceDescriptor {
+                        ordinal,
+                        name: format!("CUDA 设备 {ordinal}"),
+                    }
+                })
+                .collect()
+        })
+        .clone()
 }
 
 #[cfg(not(all(feature = "ai-burn", burn_cuda_backend)))]
@@ -258,7 +285,10 @@ fn available_cuda_device_descriptors() -> Vec<BurnDeviceDescriptor> {
 
 #[cfg(all(feature = "ai-burn", burn_vulkan_backend))]
 fn available_vulkan_device_descriptors() -> Vec<BurnDeviceDescriptor> {
-    enumerate_wgpu_device_descriptors::<burn::backend::Vulkan>()
+    available_vulkan_device_choices()
+        .iter()
+        .map(|choice| choice.descriptor.clone())
+        .collect()
 }
 
 #[cfg(not(all(feature = "ai-burn", burn_vulkan_backend)))]
@@ -268,7 +298,10 @@ fn available_vulkan_device_descriptors() -> Vec<BurnDeviceDescriptor> {
 
 #[cfg(all(feature = "ai-burn", burn_metal_backend))]
 fn available_metal_device_descriptors() -> Vec<BurnDeviceDescriptor> {
-    enumerate_wgpu_device_descriptors::<burn::backend::Metal>()
+    available_metal_device_choices()
+        .iter()
+        .map(|choice| choice.descriptor.clone())
+        .collect()
 }
 
 #[cfg(not(all(feature = "ai-burn", burn_metal_backend)))]
@@ -277,68 +310,88 @@ fn available_metal_device_descriptors() -> Vec<BurnDeviceDescriptor> {
 }
 
 #[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
-fn enumerate_wgpu_device_descriptors<B>() -> Vec<BurnDeviceDescriptor>
+const WGPU_DEVICE_CLASS_ORDINAL_STRIDE: usize = 8;
+
+#[cfg(all(feature = "ai-burn", burn_vulkan_backend))]
+fn available_vulkan_device_choices() -> &'static [BurnWgpuDeviceChoice] {
+    static CHOICES: OnceLock<Vec<BurnWgpuDeviceChoice>> = OnceLock::new();
+    CHOICES.get_or_init(enumerate_vulkan_device_choices)
+}
+
+#[cfg(all(feature = "ai-burn", burn_metal_backend))]
+fn available_metal_device_choices() -> &'static [BurnWgpuDeviceChoice] {
+    static CHOICES: OnceLock<Vec<BurnWgpuDeviceChoice>> = OnceLock::new();
+    CHOICES.get_or_init(enumerate_metal_device_choices)
+}
+
+#[cfg(all(feature = "ai-burn", burn_vulkan_backend))]
+fn enumerate_vulkan_device_choices() -> Vec<BurnWgpuDeviceChoice> {
+    enumerate_wgpu_device_choices::<cubecl_wgpu::Vulkan>()
+}
+
+#[cfg(all(feature = "ai-burn", burn_metal_backend))]
+fn enumerate_metal_device_choices() -> Vec<BurnWgpuDeviceChoice> {
+    enumerate_wgpu_device_choices::<cubecl_wgpu::Metal>()
+}
+
+#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
+fn enumerate_wgpu_device_choices<G>() -> Vec<BurnWgpuDeviceChoice>
 where
-    B: Backend<Device = WgpuDevice>,
+    G: cubecl_wgpu::GraphicsApi,
 {
-    let mut descriptors = Vec::new();
+    let backend = G::backend();
+    let mut choices = Vec::new();
+    let discrete =
+        <WgpuRuntime as CubeRuntime>::enumerate_devices(0, &backend).into_iter();
+    let integrated =
+        <WgpuRuntime as CubeRuntime>::enumerate_devices(1, &backend).into_iter();
+    let virtual_gpus =
+        <WgpuRuntime as CubeRuntime>::enumerate_devices(2, &backend).into_iter();
 
-    for ordinal in 0..MAX_WGPU_DEVICE_ORDINALS {
-        let Some(device) = wgpu_device_from_ordinal(ordinal) else {
-            continue;
-        };
-        if probe_device::<B>(&device).is_ok() {
-            descriptors.push(BurnDeviceDescriptor {
-                ordinal,
-                name: wgpu_device_name(&device),
-            });
+    let devices = discrete
+        .chain(integrated)
+        .chain(virtual_gpus)
+        .collect::<Vec<_>>();
+
+    if !devices.is_empty() {
+        choices.push(BurnWgpuDeviceChoice {
+            descriptor: BurnDeviceDescriptor {
+                ordinal: 0,
+                name: "默认设备".to_owned(),
+            },
+            device: WgpuDevice::DefaultDevice,
+        });
+    }
+
+    choices.extend(devices.into_iter().filter_map(|device_id| {
+        let index = device_id.index_id as usize;
+        match device_id.type_id {
+            0 => Some(BurnWgpuDeviceChoice {
+                descriptor: BurnDeviceDescriptor {
+                    ordinal: 1 + index,
+                    name: format!("独显 GPU {index}"),
+                },
+                device: WgpuDevice::DiscreteGpu(index),
+            }),
+            1 => Some(BurnWgpuDeviceChoice {
+                descriptor: BurnDeviceDescriptor {
+                    ordinal: 1 + WGPU_DEVICE_CLASS_ORDINAL_STRIDE + index,
+                    name: format!("核显 GPU {index}"),
+                },
+                device: WgpuDevice::IntegratedGpu(index),
+            }),
+            2 => Some(BurnWgpuDeviceChoice {
+                descriptor: BurnDeviceDescriptor {
+                    ordinal: 1 + WGPU_DEVICE_CLASS_ORDINAL_STRIDE * 2 + index,
+                    name: format!("虚拟 GPU {index}"),
+                },
+                device: WgpuDevice::VirtualGpu(index),
+            }),
+            _ => None,
         }
-    }
+    }));
 
-    descriptors
-}
-
-#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
-const MAX_WGPU_PROBE_PER_CLASS: usize = 8;
-#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
-const MAX_WGPU_DEVICE_ORDINALS: usize = 1 + MAX_WGPU_PROBE_PER_CLASS * 3;
-
-#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
-fn wgpu_device_from_ordinal(ordinal: usize) -> Option<WgpuDevice> {
-    if ordinal == 0 {
-        return Some(WgpuDevice::DefaultDevice);
-    }
-
-    let discrete_end = 1 + MAX_WGPU_PROBE_PER_CLASS;
-    if ordinal < discrete_end {
-        return Some(WgpuDevice::DiscreteGpu(ordinal - 1));
-    }
-
-    let integrated_end = discrete_end + MAX_WGPU_PROBE_PER_CLASS;
-    if ordinal < integrated_end {
-        return Some(WgpuDevice::IntegratedGpu(ordinal - discrete_end));
-    }
-
-    let virtual_end = integrated_end + MAX_WGPU_PROBE_PER_CLASS;
-    if ordinal < virtual_end {
-        return Some(WgpuDevice::VirtualGpu(ordinal - integrated_end));
-    }
-
-    None
-}
-
-#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
-fn wgpu_device_name(device: &WgpuDevice) -> String {
-    match device {
-        WgpuDevice::DefaultDevice => "默认设备".to_owned(),
-        WgpuDevice::DiscreteGpu(index) => format!("独显 GPU {index}"),
-        WgpuDevice::IntegratedGpu(index) => format!("核显 GPU {index}"),
-        WgpuDevice::VirtualGpu(index) => format!("虚拟 GPU {index}"),
-        WgpuDevice::Cpu => "WGPU CPU".to_owned(),
-        #[allow(deprecated)]
-        WgpuDevice::BestAvailable => "默认设备".to_owned(),
-        WgpuDevice::Existing(id) => format!("现有设备 {id}"),
-    }
+    choices
 }
 
 #[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]

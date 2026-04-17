@@ -4057,30 +4057,84 @@ pub(super) fn paint_tracker_map_overlay_snapshot(
                 .filter(|position| position.source != TrackingSource::ManualPreview)
             {
                 let screen = camera.world_to_screen(position.world);
-                let marker_color = if position.inertial {
-                    tokens.preview_inertial
-                } else {
-                    tokens.preview_live
-                };
-                let outer = Bounds {
-                    origin: point(
-                        bounds.origin.x + px(screen.x - 9.0),
-                        bounds.origin.y + px(screen.y - 9.0),
-                    ),
-                    size: size(px(18.0), px(18.0)),
-                };
-                let inner = Bounds {
-                    origin: point(
-                        bounds.origin.x + px(screen.x - 6.0),
-                        bounds.origin.y + px(screen.y - 6.0),
-                    ),
-                    size: size(px(12.0), px(12.0)),
-                };
-                window.paint_quad(fill(outer, tokens.preview_ring).corner_radii(px(9.0)));
-                window.paint_quad(fill(inner, marker_color).corner_radii(px(6.0)));
+                paint_tracker_position_arrow(
+                    window,
+                    point(bounds.origin.x + px(screen.x), bounds.origin.y + px(screen.y)),
+                    position.heading_degrees.unwrap_or(0.0),
+                    position.inertial,
+                    tokens,
+                );
             }
         });
     });
+}
+
+fn paint_tracker_position_arrow(
+    window: &mut gpui::Window,
+    center: gpui::Point<gpui::Pixels>,
+    heading_degrees: f32,
+    inertial: bool,
+    tokens: WorkbenchThemeTokens,
+) {
+    let outline = if inertial {
+        tokens.preview_inertial.opacity(0.96)
+    } else {
+        tokens.preview_ring.opacity(0.96)
+    };
+    let fill = if inertial {
+        gpui::rgb(0xE4BE45).into()
+    } else {
+        gpui::rgb(0xFFD84A).into()
+    };
+
+    paint_tracker_arrow_shape(window, center, heading_degrees, 1.18, outline);
+    paint_tracker_arrow_shape(window, center, heading_degrees, 1.0, fill);
+}
+
+fn paint_tracker_arrow_shape(
+    window: &mut gpui::Window,
+    center: gpui::Point<gpui::Pixels>,
+    heading_degrees: f32,
+    scale: f32,
+    color: gpui::Hsla,
+) {
+    let points = tracker_arrow_polygon_points(center, heading_degrees, scale);
+    let mut builder = PathBuilder::fill();
+    builder.add_polygon(&points, false);
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+}
+
+fn tracker_arrow_polygon_points(
+    center: gpui::Point<gpui::Pixels>,
+    heading_degrees: f32,
+    scale: f32,
+) -> [gpui::Point<gpui::Pixels>; 7] {
+    const BASE_POINTS: [(f32, f32); 7] = [
+        (0.0, -12.0),
+        (8.0, 4.0),
+        (3.2, 4.0),
+        (3.2, 11.0),
+        (-3.2, 11.0),
+        (-3.2, 4.0),
+        (-8.0, 4.0),
+    ];
+
+    let radians = heading_degrees.to_radians();
+    let cos = radians.cos();
+    let sin = radians.sin();
+    let center_x = f32::from(center.x);
+    let center_y = f32::from(center.y);
+
+    BASE_POINTS.map(|(x, y)| {
+        let scaled_x = x * scale;
+        let scaled_y = y * scale;
+        point(
+            px(center_x + scaled_x * cos - scaled_y * sin),
+            px(center_y + scaled_x * sin + scaled_y * cos),
+        )
+    })
 }
 
 fn paint_bwiki_map_overlay(

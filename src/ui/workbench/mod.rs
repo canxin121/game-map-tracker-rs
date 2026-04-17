@@ -3868,20 +3868,9 @@ impl TrackerWorkbench {
     }
 
     fn apply_tracking_position(&mut self, position: PositionEstimate) {
+        let position = resolve_tracking_position_heading(self.preview_position.as_ref(), position);
         self.last_source = Some(position.source);
         self.last_match_score = position.match_score;
-        if self
-            .trail
-            .last()
-            .copied()
-            .is_none_or(|last| last != position.world)
-        {
-            self.trail.push(position.world);
-        }
-        if self.trail.len() > 2_048 {
-            self.trail.drain(0..self.trail.len().saturating_sub(2_048));
-        }
-
         self.preview_position = Some(position);
     }
 
@@ -7421,6 +7410,37 @@ impl Render for TrackerWorkbench {
     }
 }
 
+fn resolve_tracking_position_heading(
+    previous: Option<&PositionEstimate>,
+    mut position: PositionEstimate,
+) -> PositionEstimate {
+    if let Some(heading) = position.heading_degrees {
+        position.heading_degrees = Some(normalize_tracking_heading_degrees(heading));
+        return position;
+    }
+
+    position.heading_degrees = previous.and_then(|previous| {
+        tracking_motion_heading_degrees(previous.world, position.world).or(previous.heading_degrees)
+    });
+    position
+}
+
+fn tracking_motion_heading_degrees(previous: WorldPoint, current: WorldPoint) -> Option<f32> {
+    let dx = current.x - previous.x;
+    let dy = current.y - previous.y;
+    if dx.hypot(dy) < 0.01 {
+        return None;
+    }
+
+    Some(normalize_tracking_heading_degrees(
+        dy.atan2(dx).to_degrees() + 90.0,
+    ))
+}
+
+fn normalize_tracking_heading_degrees(degrees: f32) -> f32 {
+    degrees.rem_euclid(360.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7669,5 +7689,84 @@ mod tests {
         improve_bwiki_planner_order_full_2opt(&mut order, &costs, 1);
 
         assert_eq!(order, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn tracking_motion_heading_uses_screen_up_as_zero_degrees() {
+        assert_eq!(
+            tracking_motion_heading_degrees(
+                WorldPoint::new(100.0, 100.0),
+                WorldPoint::new(100.0, 80.0),
+            ),
+            Some(0.0)
+        );
+        assert_eq!(
+            tracking_motion_heading_degrees(
+                WorldPoint::new(100.0, 100.0),
+                WorldPoint::new(120.0, 100.0),
+            ),
+            Some(90.0)
+        );
+        assert_eq!(
+            tracking_motion_heading_degrees(
+                WorldPoint::new(100.0, 100.0),
+                WorldPoint::new(100.0, 120.0),
+            ),
+            Some(180.0)
+        );
+        assert_eq!(
+            tracking_motion_heading_degrees(
+                WorldPoint::new(100.0, 100.0),
+                WorldPoint::new(80.0, 100.0),
+            ),
+            Some(270.0)
+        );
+    }
+
+    #[test]
+    fn stationary_tracking_position_keeps_previous_heading() {
+        let previous = PositionEstimate {
+            world: WorldPoint::new(512.0, 256.0),
+            found: true,
+            inertial: false,
+            heading_degrees: Some(135.0),
+            source: TrackingSource::LocalTrack,
+            match_score: Some(0.91),
+        };
+
+        let resolved = resolve_tracking_position_heading(
+            Some(&previous),
+            PositionEstimate::tracked(
+                WorldPoint::new(512.0, 256.0),
+                TrackingSource::InertialHold,
+                None,
+                true,
+            ),
+        );
+
+        assert_eq!(resolved.heading_degrees, Some(135.0));
+    }
+
+    #[test]
+    fn explicit_tracking_heading_is_normalized_and_preserved() {
+        let previous = PositionEstimate {
+            world: WorldPoint::new(10.0, 10.0),
+            found: true,
+            inertial: false,
+            heading_degrees: Some(45.0),
+            source: TrackingSource::LocalTrack,
+            match_score: Some(0.8),
+        };
+        let mut next = PositionEstimate::tracked(
+            WorldPoint::new(20.0, 20.0),
+            TrackingSource::LocalTrack,
+            Some(0.85),
+            false,
+        );
+        next.heading_degrees = Some(-90.0);
+
+        let resolved = resolve_tracking_position_heading(Some(&previous), next);
+
+        assert_eq!(resolved.heading_degrees, Some(270.0));
     }
 }
