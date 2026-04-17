@@ -92,12 +92,14 @@ pub struct ScaledMap {
 pub struct MapPyramid {
     pub local: ScaledMap,
     pub global: ScaledMap,
+    pub coarse: ScaledMap,
 }
 
 #[derive(Debug, Clone)]
 pub struct MaskSet {
     pub local: GrayImage,
     pub global: GrayImage,
+    pub coarse: GrayImage,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +133,7 @@ pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyram
     let config = &workspace.config;
     let local_scale = config.template.local_downscale.max(1);
     let global_scale = config.template.global_downscale.max(local_scale);
+    let coarse_scale = coarse_global_downscale(config);
     let base_map =
         load_logic_map_scaled_image(&workspace.assets.bwiki_cache_dir, 1).with_context(|| {
             format!(
@@ -145,6 +148,11 @@ pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyram
     } else {
         downscale_gray(&base_map, global_scale)
     };
+    let coarse_map = if coarse_scale == global_scale {
+        global_map.clone()
+    } else {
+        downscale_gray(&base_map, coarse_scale)
+    };
 
     let pyramid = MapPyramid {
         local: ScaledMap {
@@ -154,6 +162,10 @@ pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyram
         global: ScaledMap {
             scale: global_scale,
             image: global_map,
+        },
+        coarse: ScaledMap {
+            scale: coarse_scale,
+            image: coarse_map,
         },
     };
 
@@ -170,9 +182,21 @@ pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyram
             config.template.mask_inner_radius,
             config.template.mask_outer_radius,
         ),
+        coarse: build_mask(
+            scaled_dimension(config.minimap.width, coarse_scale),
+            scaled_dimension(config.minimap.height, coarse_scale),
+            config.template.mask_inner_radius,
+            config.template.mask_outer_radius,
+        ),
     };
 
     Ok((pyramid, masks))
+}
+
+pub fn coarse_global_downscale(config: &crate::config::AppConfig) -> u32 {
+    let local_scale = config.template.local_downscale.max(1);
+    let global_scale = config.template.global_downscale.max(local_scale);
+    global_scale.saturating_mul(2).max(global_scale)
 }
 
 pub fn downscale_gray(image: &GrayImage, scale: u32) -> GrayImage {

@@ -14,10 +14,12 @@ use crate::{
         BWIKI_WORLD_ZOOM, BwikiCachePaths, WorkspaceSnapshot, load_logic_map_scaled_image,
         zoom_world_bounds,
     },
-    tracking::vision::{MapPyramid, ScaledMap, build_match_representation, downscale_gray},
+    tracking::vision::{
+        MapPyramid, ScaledMap, build_match_representation, coarse_global_downscale, downscale_gray,
+    },
 };
 
-const MATCH_PYRAMID_CACHE_VERSION: u32 = 1;
+const MATCH_PYRAMID_CACHE_VERSION: u32 = 2;
 const TENSOR_CACHE_FORMAT_VERSION: u32 = 1;
 const TENSOR_CACHE_MAGIC: [u8; 8] = *b"GMTRTC01";
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -75,11 +77,21 @@ impl PersistedTensorCache {
 pub fn load_or_build_match_pyramid(workspace: &WorkspaceSnapshot) -> Result<PreparedMatchPyramid> {
     let local_scale = workspace.config.template.local_downscale.max(1);
     let global_scale = workspace.config.template.global_downscale.max(local_scale);
-    let initial_key =
-        match_pyramid_cache_key(&workspace.assets.bwiki_cache_dir, local_scale, global_scale)?;
+    let coarse_scale = coarse_global_downscale(&workspace.config);
+    let initial_key = match_pyramid_cache_key(
+        &workspace.assets.bwiki_cache_dir,
+        local_scale,
+        global_scale,
+        coarse_scale,
+    )?;
 
-    if let Ok(Some(pyramid)) =
-        load_cached_match_pyramid(workspace, &initial_key, local_scale, global_scale)
+    if let Ok(Some(pyramid)) = load_cached_match_pyramid(
+        workspace,
+        &initial_key,
+        local_scale,
+        global_scale,
+        coarse_scale,
+    )
     {
         return Ok(PreparedMatchPyramid {
             cache_key: initial_key,
@@ -101,9 +113,18 @@ pub fn load_or_build_match_pyramid(workspace: &WorkspaceSnapshot) -> Result<Prep
     } else {
         build_match_representation(&downscale_gray(&base_map, global_scale))
     };
+    let coarse_map = if coarse_scale == global_scale {
+        global_map.clone()
+    } else {
+        build_match_representation(&downscale_gray(&base_map, coarse_scale))
+    };
 
-    let final_key =
-        match_pyramid_cache_key(&workspace.assets.bwiki_cache_dir, local_scale, global_scale)?;
+    let final_key = match_pyramid_cache_key(
+        &workspace.assets.bwiki_cache_dir,
+        local_scale,
+        global_scale,
+        coarse_scale,
+    )?;
     let pyramid = MapPyramid {
         local: ScaledMap {
             scale: local_scale,
@@ -112,6 +133,10 @@ pub fn load_or_build_match_pyramid(workspace: &WorkspaceSnapshot) -> Result<Prep
         global: ScaledMap {
             scale: global_scale,
             image: global_map,
+        },
+        coarse: ScaledMap {
+            scale: coarse_scale,
+            image: coarse_map,
         },
     };
 
@@ -282,11 +307,13 @@ fn load_cached_match_pyramid(
     cache_key: &str,
     local_scale: u32,
     global_scale: u32,
+    coarse_scale: u32,
 ) -> Result<Option<MapPyramid>> {
     let cache_dir = match_pyramid_cache_dir(workspace, cache_key);
     let local_path = cache_dir.join("local.png");
     let global_path = cache_dir.join("global.png");
-    if !local_path.is_file() || !global_path.is_file() {
+    let coarse_path = cache_dir.join("coarse.png");
+    if !local_path.is_file() || !global_path.is_file() || !coarse_path.is_file() {
         return Ok(None);
     }
 
@@ -306,6 +333,14 @@ fn load_cached_match_pyramid(
             )
         })?
         .into_luma8();
+    let coarse_image = image::open(&coarse_path)
+        .with_context(|| {
+            format!(
+                "failed to open tracker coarse pyramid {}",
+                coarse_path.display()
+            )
+        })?
+        .into_luma8();
 
     Ok(Some(MapPyramid {
         local: ScaledMap {
@@ -315,6 +350,10 @@ fn load_cached_match_pyramid(
         global: ScaledMap {
             scale: global_scale,
             image: global_image,
+        },
+        coarse: ScaledMap {
+            scale: coarse_scale,
+            image: coarse_image,
         },
     }))
 }
@@ -333,6 +372,7 @@ fn persist_match_pyramid(
     })?;
     save_gray_image(&cache_dir.join("local.png"), &pyramid.local.image)?;
     save_gray_image(&cache_dir.join("global.png"), &pyramid.global.image)?;
+    save_gray_image(&cache_dir.join("coarse.png"), &pyramid.coarse.image)?;
     Ok(())
 }
 
@@ -415,6 +455,7 @@ fn match_pyramid_cache_key(
     bwiki_cache_dir: &Path,
     local_scale: u32,
     global_scale: u32,
+    coarse_scale: u32,
 ) -> Result<String> {
     let range = zoom_world_bounds(BWIKI_WORLD_ZOOM)
         .ok_or_else(|| anyhow!("missing BWiki zoom metadata for tracker precompute"))?;
@@ -427,8 +468,8 @@ fn match_pyramid_cache_key(
         range.max_y,
     )?;
     Ok(format!(
-        "mv{MATCH_PYRAMID_CACHE_VERSION}-z{}-{tile_hash}-l{}-g{}",
-        range.zoom, local_scale, global_scale
+        "mv{MATCH_PYRAMID_CACHE_VERSION}-z{}-{tile_hash}-l{}-g{}-c{}",
+        range.zoom, local_scale, global_scale, coarse_scale
     ))
 }
 
