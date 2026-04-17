@@ -65,6 +65,7 @@ pub enum TrackingEvent {
 pub trait TrackingWorker: Send {
     fn refresh_interval(&self) -> Duration;
     fn tick(&mut self) -> Result<TrackingTick>;
+    fn set_debug_enabled(&mut self, _enabled: bool) {}
     fn initial_status(&self) -> TrackingStatus;
     fn engine_kind(&self) -> TrackerEngineKind;
 }
@@ -72,6 +73,7 @@ pub trait TrackingWorker: Send {
 #[derive(Debug)]
 enum TrackerCommand {
     Stop,
+    SetDebugEnabled(bool),
 }
 
 #[derive(Debug)]
@@ -93,6 +95,12 @@ impl TrackerSession {
             let _ = thread.join();
         }
     }
+
+    pub fn set_debug_enabled(&self, enabled: bool) {
+        let _ = self
+            .command_tx
+            .send(TrackerCommand::SetDebugEnabled(enabled));
+    }
 }
 
 impl Drop for TrackerSession {
@@ -104,13 +112,16 @@ impl Drop for TrackerSession {
 pub fn spawn_tracker_session(
     workspace: Arc<WorkspaceSnapshot>,
     engine: TrackerEngineKind,
+    debug_enabled: bool,
 ) -> Result<TrackerSession> {
     let (command_tx, command_rx) = unbounded();
     let (event_tx, event_rx) = unbounded();
 
     let thread = thread::Builder::new()
         .name(format!("tracker-{}", engine))
-        .spawn(move || run_tracker_session(workspace, engine, command_rx, event_tx))?;
+        .spawn(move || {
+            run_tracker_session(workspace, engine, debug_enabled, command_rx, event_tx)
+        })?;
 
     Ok(TrackerSession {
         command_tx,
@@ -122,6 +133,7 @@ pub fn spawn_tracker_session(
 fn run_tracker_session(
     workspace: Arc<WorkspaceSnapshot>,
     engine: TrackerEngineKind,
+    mut debug_enabled: bool,
     command_rx: Receiver<TrackerCommand>,
     event_tx: Sender<TrackingEvent>,
 ) {
@@ -134,7 +146,7 @@ fn run_tracker_session(
         match_score: None,
     }));
 
-    if matches!(command_rx.try_recv(), Ok(TrackerCommand::Stop)) {
+    if handle_tracker_commands_without_worker(&command_rx, &mut debug_enabled) {
         let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
         return;
     }
@@ -148,10 +160,13 @@ fn run_tracker_session(
         }
     };
 
-    if matches!(command_rx.try_recv(), Ok(TrackerCommand::Stop)) {
+    if handle_tracker_commands_without_worker(&command_rx, &mut debug_enabled) {
         let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
         return;
     }
+
+    let mut worker = worker;
+    worker.set_debug_enabled(debug_enabled);
 
     run_worker_loop(worker, command_rx, event_tx);
 }
@@ -179,7 +194,7 @@ fn run_worker_loop(
     let _ = event_tx.send(TrackingEvent::Status(initial_status));
 
     loop {
-        if matches!(command_rx.try_recv(), Ok(TrackerCommand::Stop)) {
+        if handle_tracker_commands(worker.as_mut(), &command_rx) {
             let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
             return;
         }
@@ -209,9 +224,41 @@ fn run_worker_loop(
             continue;
         }
 
-        if let Ok(TrackerCommand::Stop) = command_rx.recv_timeout(wait_for) {
-            let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
-            return;
+        match command_rx.recv_timeout(wait_for) {
+            Ok(TrackerCommand::Stop) => {
+                let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
+                return;
+            }
+            Ok(TrackerCommand::SetDebugEnabled(enabled)) => {
+                worker.set_debug_enabled(enabled);
+            }
+            Err(_) => {}
         }
     }
+}
+
+fn handle_tracker_commands(
+    worker: &mut dyn TrackingWorker,
+    command_rx: &Receiver<TrackerCommand>,
+) -> bool {
+    for command in command_rx.try_iter() {
+        match command {
+            TrackerCommand::Stop => return true,
+            TrackerCommand::SetDebugEnabled(enabled) => worker.set_debug_enabled(enabled),
+        }
+    }
+    false
+}
+
+fn handle_tracker_commands_without_worker(
+    command_rx: &Receiver<TrackerCommand>,
+    debug_enabled: &mut bool,
+) -> bool {
+    for command in command_rx.try_iter() {
+        match command {
+            TrackerCommand::Stop => return true,
+            TrackerCommand::SetDebugEnabled(enabled) => *debug_enabled = enabled,
+        }
+    }
+    false
 }

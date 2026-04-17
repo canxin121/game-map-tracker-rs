@@ -1400,6 +1400,16 @@ impl TrackerWorkbench {
         self.tracker_session.is_some()
     }
 
+    fn tracking_debug_enabled(&self) -> bool {
+        self.active_page == WorkbenchPage::Settings && self.settings_page == SettingsPage::Debug
+    }
+
+    fn sync_tracker_debug_enabled(&self) {
+        if let Some(session) = self.tracker_session.as_ref() {
+            session.set_debug_enabled(self.tracking_debug_enabled());
+        }
+    }
+
     pub(super) fn is_tracker_transition_pending(&self) -> bool {
         self.tracker_pending_action.is_some()
     }
@@ -2230,12 +2240,14 @@ impl TrackerWorkbench {
         if matches!(page, MapPage::Tracker) {
             self.request_center_on_current_point();
         }
+        self.sync_tracker_debug_enabled();
         self.status_text = format!("已切换到{}。", page).into();
     }
 
     pub(super) fn select_routes_page(&mut self) {
         self.active_page = WorkbenchPage::Markers;
         self.route_editor_map_view.request_fit();
+        self.sync_tracker_debug_enabled();
         self.status_text = "已切换到路线管理。".into();
     }
 
@@ -2245,6 +2257,7 @@ impl TrackerWorkbench {
         self.settings_nav_expanded = true;
         self.map_point_insert_armed = false;
         self.clear_selected_point_move_state();
+        self.sync_tracker_debug_enabled();
         self.status_text = format!("设置页面已切换到{}。", page).into();
     }
 
@@ -2271,11 +2284,13 @@ impl TrackerWorkbench {
         if self.active_page != WorkbenchPage::Settings {
             self.active_page = WorkbenchPage::Settings;
             self.settings_nav_expanded = true;
+            self.sync_tracker_debug_enabled();
             self.status_text = "已切换到设置页面。".into();
             return;
         }
 
         self.settings_nav_expanded = !self.settings_nav_expanded;
+        self.sync_tracker_debug_enabled();
         self.status_text = if self.settings_nav_expanded {
             "已展开设置导航。".into()
         } else {
@@ -3741,9 +3756,14 @@ impl TrackerWorkbench {
             return;
         }
 
-        match spawn_tracker_session(self.workspace.clone(), self.selected_engine) {
+        match spawn_tracker_session(
+            self.workspace.clone(),
+            self.selected_engine,
+            self.tracking_debug_enabled(),
+        ) {
             Ok(session) => {
                 self.tracker_session = Some(session);
+                self.sync_tracker_debug_enabled();
                 self.tracker_pending_action = Some(TrackerPendingAction::Starting);
                 self.tracker_lifecycle = TrackerLifecycle::Running;
                 self.preview_position = None;

@@ -115,6 +115,14 @@ pub struct SearchCrop {
     pub origin_y: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SearchRegion {
+    pub origin_x: u32,
+    pub origin_y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Debug, Clone)]
 pub enum DebugOverlay {
     Crosshair {
@@ -257,14 +265,15 @@ fn edge_enhance_gray(image: &GrayImage) -> GrayImage {
     equalize_histogram(&edge)
 }
 
-pub fn crop_around_center(
-    image: &GrayImage,
+pub fn search_region_around_center(
+    image_width: u32,
+    image_height: u32,
     center: (u32, u32),
     radius: u32,
     template_width: u32,
     template_height: u32,
-) -> Result<SearchCrop> {
-    if image.width() <= template_width || image.height() <= template_height {
+) -> Result<SearchRegion> {
+    if image_width <= template_width || image_height <= template_height {
         bail!("search image is smaller than template");
     }
 
@@ -272,25 +281,65 @@ pub fn crop_around_center(
     let half_h = template_height / 2;
     let desired_x = center.0.saturating_sub(radius + half_w);
     let desired_y = center.1.saturating_sub(radius + half_h);
-    let max_x = image.width().saturating_sub(template_width + 1);
-    let max_y = image.height().saturating_sub(template_height + 1);
+    let max_x = image_width.saturating_sub(template_width + 1);
+    let max_y = image_height.saturating_sub(template_height + 1);
     let origin_x = desired_x.min(max_x);
     let origin_y = desired_y.min(max_y);
     let width = cmp::min(
-        image.width().saturating_sub(origin_x),
+        image_width.saturating_sub(origin_x),
         radius.saturating_mul(2) + template_width + 1,
     );
     let height = cmp::min(
-        image.height().saturating_sub(origin_y),
+        image_height.saturating_sub(origin_y),
         radius.saturating_mul(2) + template_height + 1,
     );
 
-    let image = crop_imm(image, origin_x, origin_y, width, height).to_image();
-    Ok(SearchCrop {
-        image,
+    Ok(SearchRegion {
         origin_x,
         origin_y,
+        width,
+        height,
     })
+}
+
+pub fn crop_search_region(image: &GrayImage, region: SearchRegion) -> Result<SearchCrop> {
+    if image.width() < region.origin_x.saturating_add(region.width)
+        || image.height() < region.origin_y.saturating_add(region.height)
+    {
+        bail!("search region is outside image bounds");
+    }
+
+    let image = crop_imm(
+        image,
+        region.origin_x,
+        region.origin_y,
+        region.width,
+        region.height,
+    )
+    .to_image();
+    Ok(SearchCrop {
+        image,
+        origin_x: region.origin_x,
+        origin_y: region.origin_y,
+    })
+}
+
+pub fn crop_around_center(
+    image: &GrayImage,
+    center: (u32, u32),
+    radius: u32,
+    template_width: u32,
+    template_height: u32,
+) -> Result<SearchCrop> {
+    let region = search_region_around_center(
+        image.width(),
+        image.height(),
+        center,
+        radius,
+        template_width,
+        template_height,
+    )?;
+    crop_search_region(image, region)
 }
 
 #[must_use]
