@@ -29,7 +29,7 @@ use crate::{
 };
 
 use super::{
-    MapCanvasKind, TrackerCacheKind, TrackerMapRenderSnapshot, TrackerWorkbench,
+    MapCanvasKind, TestCaseLabel, TrackerCacheKind, TrackerMapRenderSnapshot, TrackerWorkbench,
     forms::read_input_value,
     page::{MapPage, SettingsPage, WorkbenchPage},
     select::Select,
@@ -2127,77 +2127,22 @@ fn settings_capture_page(
             )
             .into_any_element(),
             editable_config_section(
-                "F1-P 标签探针",
+                "小地图圆环探针",
                 vec![
-                    toolbar_cluster(vec![
-                        toolbar_button_with_tooltip(
-                            "settings-minimap-presence-probe-picker",
-                            tokens,
-                            if this.is_minimap_presence_probe_picker_active() {
-                                this.busy_spinner_icon()
-                            } else {
-                                "F"
-                            },
-                            if this.is_minimap_presence_probe_picker_active() {
-                                "取区中"
-                            } else {
-                                "标签取区"
-                            },
-                            Some(if this.is_minimap_presence_probe_picker_active() {
-                                "F1-P 标签探针取区窗口已打开：请只框住标签带，不要包含上方图标；确认后会把当前区域抓成模板。".into()
-                            } else {
-                                "打开屏幕取区窗口，手动框选 F1 到 P 这排标签，并在确认时抓取模板。".into()
-                            }),
-                            if this.is_minimap_presence_probe_picker_active() {
-                                ToolbarButtonTone::Primary
-                            } else {
-                                ToolbarButtonTone::Neutral
-                            },
-                            false,
-                            cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.toggle_minimap_presence_probe_picker(window, cx);
-                                cx.notify();
-                            }),
-                        )
+                    div()
+                        .text_xs()
+                        .text_color(tokens.text_muted)
+                        .child("圆环探针直接复用上方“小地图环形取区”和模板内外圈半径，不再单独使用任何额外矩形探针区域。")
                         .into_any_element(),
-                    ])
-                    .into_any_element(),
+                    div()
+                        .text_xs()
+                        .text_color(tokens.text_muted)
+                        .child("实时判断依据是双层地图边框：内层等宽灰色圆框，外层半透明黑色外框；命中后会提取去掉中心箭头区域的小地图圆环。")
+                        .into_any_element(),
                     config_row(vec![
                         labeled_input(
                             tokens,
-                            "启用 true/false",
-                            &this.config_form.minimap_presence_probe_enabled,
-                        )
-                        .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "Top",
-                            &this.config_form.minimap_presence_probe_top,
-                        )
-                        .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "Left",
-                            &this.config_form.minimap_presence_probe_left,
-                        )
-                        .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "Width",
-                            &this.config_form.minimap_presence_probe_width,
-                        )
-                        .into_any_element(),
-                        labeled_input(
-                            tokens,
-                            "Height",
-                            &this.config_form.minimap_presence_probe_height,
-                        )
-                        .into_any_element(),
-                    ]),
-                    config_row(vec![
-                        labeled_input(
-                            tokens,
-                            "匹配阈值",
+                            "命中阈值",
                             &this.config_form.minimap_presence_probe_match_threshold,
                         )
                         .into_any_element(),
@@ -2500,7 +2445,10 @@ fn settings_debug_page(
                 cx.notify();
             }
         }));
-    let snapshot = this.is_debug_mode_enabled().then(|| this.debug_snapshot.clone()).flatten();
+    let snapshot = this
+        .is_debug_mode_enabled()
+        .then(|| this.debug_snapshot.clone())
+        .flatten();
     let images = snapshot
         .as_ref()
         .map(|snapshot| snapshot.images.clone())
@@ -2510,8 +2458,9 @@ fn settings_debug_page(
         .map(|snapshot| snapshot.fields.clone())
         .unwrap_or_default();
     let log_entries = this.debug_log_entries(240);
-    let header_actions = this.is_debug_mode_enabled().then(|| {
-        toolbar_cluster(vec![
+    let mut header_buttons = Vec::new();
+    if this.is_debug_mode_enabled() {
+        header_buttons.push(
             toolbar_button_with_tooltip(
                 "debug-log-clear",
                 tokens,
@@ -2526,9 +2475,10 @@ fn settings_debug_page(
                 }),
             )
             .into_any_element(),
-        ])
-        .into_any_element()
-    });
+        );
+    }
+    let header_actions = (!header_buttons.is_empty())
+        .then(|| toolbar_cluster(header_buttons).into_any_element());
 
     settings_page_shell(
         "追踪调试",
@@ -2570,6 +2520,91 @@ fn settings_debug_page(
                         },
                     )
                     .into_any_element(),
+                ],
+                tokens,
+            )
+            .into_any_element(),
+            editable_config_section(
+                "测试样本捕获",
+                vec![
+                    config_row(vec![
+                        div()
+                            .min_w(px(220.0))
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(field_label(tokens, "捕获功能开关"))
+                            .child(
+                                ButtonGroup::new("test-case-capture-picker")
+                                    .children(
+                                        ["关闭", "开启"]
+                                            .into_iter()
+                                            .enumerate()
+                                            .map(|(index, label)| {
+                                                Button::new(("test-case-capture", index))
+                                                    .label(label)
+                                                    .selected(
+                                                        (index == 1)
+                                                            == this.is_test_case_capture_enabled(),
+                                                    )
+                                            })
+                                            .collect::<Vec<_>>(),
+                                    )
+                                    .compact()
+                                    .on_click(cx.listener(|this, indices: &Vec<usize>, _, cx| {
+                                        if let Some(index) = indices.first().copied() {
+                                            this.set_test_case_capture_enabled(index == 1, cx);
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                            .into_any_element(),
+                    ]),
+                    body_text(
+                        tokens,
+                        if this.is_test_case_capture_enabled() {
+                            "开启后，调试页和追踪画中画都会显示 minimap 测试样本捕获入口；捕获结果会直接保存到项目的 assets/test。"
+                        } else {
+                            "关闭后，所有 minimap 测试样本捕获入口都会隐藏，也不会再弹出画中画外置捕获面板。"
+                        },
+                    )
+                    .into_any_element(),
+                    if this.is_test_case_capture_enabled() {
+                        toolbar_cluster(vec![
+                            toolbar_button_with_tooltip(
+                                "debug-capture-has-map",
+                                tokens,
+                                "+",
+                                "捕获有图",
+                                Some("立刻抓取当前 minimap，并保存为 has_map_*.png。".into()),
+                                ToolbarButtonTone::Neutral,
+                                false,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.capture_test_case(TestCaseLabel::HasMap);
+                                    cx.notify();
+                                }),
+                            )
+                            .into_any_element(),
+                            toolbar_button_with_tooltip(
+                                "debug-capture-no-map",
+                                tokens,
+                                "-",
+                                "捕获无图",
+                                Some("立刻抓取当前 minimap，并保存为 no_map_*.png。".into()),
+                                ToolbarButtonTone::Neutral,
+                                false,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.capture_test_case(TestCaseLabel::NoMap);
+                                    cx.notify();
+                                }),
+                            )
+                            .into_any_element(),
+                        ])
+                        .into_any_element()
+                    } else {
+                        empty_list_state(tokens, "测试样本捕获功能已隐藏。").into_any_element()
+                    },
                 ],
                 tokens,
             )

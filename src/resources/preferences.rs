@@ -22,6 +22,8 @@ pub struct UiPreferences {
     pub tracker_point_popup_enabled: bool,
     #[serde(default = "default_debug_mode_enabled")]
     pub debug_mode_enabled: bool,
+    #[serde(default = "default_test_case_capture_enabled")]
+    pub test_case_capture_enabled: bool,
 }
 
 impl Default for UiPreferences {
@@ -31,6 +33,7 @@ impl Default for UiPreferences {
             auto_focus_enabled: default_auto_focus_enabled(),
             tracker_point_popup_enabled: default_tracker_point_popup_enabled(),
             debug_mode_enabled: default_debug_mode_enabled(),
+            test_case_capture_enabled: default_test_case_capture_enabled(),
         }
     }
 }
@@ -60,6 +63,7 @@ impl UiPreferencesRepository {
             debug_mode_enabled = preferences.debug_mode_enabled,
             auto_focus_enabled = preferences.auto_focus_enabled,
             tracker_point_popup_enabled = preferences.tracker_point_popup_enabled,
+            test_case_capture_enabled = preferences.test_case_capture_enabled,
             "loaded ui preferences"
         );
         Ok(preferences)
@@ -89,6 +93,7 @@ impl UiPreferencesRepository {
             debug_mode_enabled = preferences.debug_mode_enabled,
             auto_focus_enabled = preferences.auto_focus_enabled,
             tracker_point_popup_enabled = preferences.tracker_point_popup_enabled,
+            test_case_capture_enabled = preferences.test_case_capture_enabled,
             "saved ui preferences"
         );
         Ok(())
@@ -104,5 +109,9 @@ const fn default_tracker_point_popup_enabled() -> bool {
 }
 
 const fn default_debug_mode_enabled() -> bool {
+    false
+}
+
+const fn default_test_case_capture_enabled() -> bool {
     false
 }

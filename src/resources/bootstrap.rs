@@ -29,7 +29,8 @@ impl WorkspaceBootstrap {
         ensure_default_config(&workspace_root)?;
         ensure_workspace_layout(&workspace_root)?;
         remove_obsolete_workspace_paths(&workspace_root)?;
-        let normalized_count = RouteRepository::normalize_directory(&workspace_root.join("routes"))?;
+        let normalized_count =
+            RouteRepository::normalize_directory(&workspace_root.join("routes"))?;
         debug!(
             workspace_root = %workspace_root.display(),
             normalized_route_count = normalized_count,

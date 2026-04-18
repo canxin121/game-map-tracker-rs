@@ -61,10 +61,8 @@ impl DesktopCapture {
             region: capture_region,
         })
     }
-}
 
-impl CaptureSource for DesktopCapture {
-    fn capture_gray(&self) -> Result<GrayImage> {
+    pub fn capture_rgba(&self) -> Result<RgbaImage> {
         let rgba = self
             .screen
             .capture_area(
@@ -73,13 +71,16 @@ impl CaptureSource for DesktopCapture {
                 self.region.width,
                 self.region.height,
             )
-            .context("failed to capture minimap region")?;
+            .context("failed to capture raw minimap region")?;
 
         let (width, height) = rgba.dimensions();
-        let rgba = RgbaImage::from_raw(width, height, rgba.into_raw())
-            .context("failed to normalize screenshot image buffer into the primary image crate")?;
+        screenshot_buffer_to_rgba(rgba.into_raw(), width, height)
+    }
+}
 
-        Ok(preprocess_capture(rgba))
+impl CaptureSource for DesktopCapture {
+    fn capture_gray(&self) -> Result<GrayImage> {
+        Ok(preprocess_capture(self.capture_rgba()?))
     }
 }
 
@@ -113,6 +114,11 @@ fn validate_region(region: ScreenCaptureRegion, display: DisplayInfo) -> Result<
     }
 
     Ok(())
+}
+
+fn screenshot_buffer_to_rgba(buffer: Vec<u8>, width: u32, height: u32) -> Result<RgbaImage> {
+    RgbaImage::from_raw(width, height, buffer)
+        .context("failed to normalize screenshot image buffer into the primary image crate")
 }
 
 #[must_use]

@@ -26,6 +26,8 @@ pub struct TrackingStatus {
     pub lifecycle: TrackerLifecycle,
     pub source: Option<TrackingSource>,
     pub match_score: Option<f32>,
+    pub probe_summary: String,
+    pub locate_summary: String,
 }
 
 impl TrackingStatus {
@@ -38,6 +40,8 @@ impl TrackingStatus {
             lifecycle: TrackerLifecycle::Idle,
             source: None,
             match_score: None,
+            probe_summary: "等待判断".to_owned(),
+            locate_summary: "等待首帧".to_owned(),
         }
     }
 }
@@ -147,6 +151,8 @@ fn run_tracker_session(
         lifecycle: TrackerLifecycle::Idle,
         source: None,
         match_score: None,
+        probe_summary: "初始化中".to_owned(),
+        locate_summary: "等待初始化".to_owned(),
     }));
 
     if handle_tracker_commands_without_worker(&command_rx, &mut debug_enabled) {

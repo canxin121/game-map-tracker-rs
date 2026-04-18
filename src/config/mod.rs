@@ -192,7 +192,7 @@ impl Default for TemplateTrackingConfig {
 impl Default for MinimapPresenceProbeConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             top: 0,
             left: 0,
             width: 0,
@@ -230,6 +230,18 @@ impl Default for AppConfig {
     }
 }
 
+impl AppConfig {
+    pub fn normalize_in_place(&mut self) {
+        self.minimap_presence_probe.enabled = true;
+    }
+
+    #[must_use]
+    pub fn normalized(mut self) -> Self {
+        self.normalize_in_place();
+        self
+    }
+}
+
 impl MinimapPresenceProbeConfig {
     #[must_use]
     pub fn is_configured(&self) -> bool {
@@ -255,8 +267,10 @@ pub fn load_existing_config(project_root: &Path) -> Result<AppConfig> {
 
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("failed to read config file at {}", path.display()))?;
-    toml::from_str::<AppConfig>(&raw)
-        .with_context(|| format!("failed to parse config file at {}", path.display()))
+    let mut config = toml::from_str::<AppConfig>(&raw)
+        .with_context(|| format!("failed to parse config file at {}", path.display()))?;
+    config.normalize_in_place();
+    Ok(config)
 }
 
 pub fn save_config(project_root: &Path, config: &AppConfig) -> Result<std::path::PathBuf> {
@@ -266,8 +280,69 @@ pub fn save_config(project_root: &Path, config: &AppConfig) -> Result<std::path:
             .with_context(|| format!("failed to create config parent {}", parent.display()))?;
     }
 
-    let raw = toml::to_string_pretty(config).context("failed to serialize config file as TOML")?;
+    let mut normalized = config.clone();
+    normalized.normalize_in_place();
+    let raw =
+        toml::to_string_pretty(&normalized).context("failed to serialize config file as TOML")?;
     fs::write(&path, raw)
         .with_context(|| format!("failed to write config file at {}", path.display()))?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+
+    fn temp_config_root(test_name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("game-map-tracker-rs-{test_name}-{unique}"));
+        fs::create_dir_all(&path).expect("failed to create temp config root");
+        path
+    }
+
+    #[test]
+    fn normalized_forces_minimap_presence_probe_enabled() {
+        let mut config = AppConfig::default();
+        config.minimap_presence_probe.enabled = false;
+
+        let normalized = config.normalized();
+
+        assert!(normalized.minimap_presence_probe.enabled);
+    }
+
+    #[test]
+    fn load_existing_config_forces_minimap_presence_probe_enabled() {
+        let root = temp_config_root("load-config");
+        let mut config = AppConfig::default();
+        config.minimap_presence_probe.enabled = false;
+        let raw = toml::to_string_pretty(&config).expect("failed to serialize test config");
+        fs::write(root.join(CONFIG_FILE_NAME), raw).expect("failed to write test config");
+
+        let loaded = load_existing_config(&root).expect("failed to load config");
+
+        assert!(loaded.minimap_presence_probe.enabled);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_config_persists_minimap_presence_probe_as_enabled() {
+        let root = temp_config_root("save-config");
+        let mut config = AppConfig::default();
+        config.minimap_presence_probe.enabled = false;
+
+        let path = save_config(&root, &config).expect("failed to save config");
+        let raw = fs::read_to_string(path).expect("failed to read saved config");
+
+        assert!(raw.contains("enabled = true"));
+        assert!(!raw.contains("enabled = false"));
+        let _ = fs::remove_dir_all(root);
+    }
 }

@@ -2,7 +2,6 @@ mod forms;
 mod minimap_picker;
 mod page;
 mod panels;
-mod probe_region_picker;
 mod select;
 mod theme;
 mod tracker_pip;
@@ -10,15 +9,16 @@ mod tracker_pip;
 use std::{
     collections::{HashMap, HashSet},
     env,
+    fs,
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use gpui::{
     AnyWindowHandle, AppContext, Bounds, Context, PathPromptOptions, Pixels, Render, SharedString,
     Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions,
+    WindowOptions, px,
 };
 use gpui_component::{Root, input::InputEvent};
 use tracing::{debug, error, info, warn};
@@ -43,7 +43,6 @@ use crate::{
         ai::rebuild_convolution_engine_cache,
         burn_support::{available_burn_backend_preferences, available_burn_device_descriptors},
         debug::TrackingDebugSnapshot,
-        presence::calibrate_minimap_presence_probe,
         spawn_tracker_session,
         template::rebuild_template_engine_cache,
     },
@@ -61,10 +60,11 @@ use self::{
     minimap_picker::{MinimapRegionPickResult, MinimapRegionPicker},
     page::{MapPage, SettingsPage, WorkbenchPage},
     panels::render_workbench,
-    probe_region_picker::MinimapPresenceProbePicker,
     select::{SelectEvent, SelectState},
     theme::apply_theme_preference,
-    tracker_pip::{TrackerPipWindow, apply_window_topmost},
+    tracker_pip::{
+        TrackerPipCapturePanelWindow, TrackerPipWindow, apply_window_bounds, apply_window_topmost,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -88,7 +88,14 @@ pub(super) struct TrackerMapRenderSnapshot {
     pub(super) selected_point_id: Option<RoutePointId>,
     pub(super) follow_point: Option<WorldPoint>,
     pub(super) pip_always_on_top: bool,
+    pub(super) pip_probe_summary: SharedString,
+    pub(super) pip_locate_summary: SharedString,
+    pub(super) pip_test_case_capture_enabled: bool,
+    pub(super) pip_capture_panel_expanded: bool,
 }
+
+const TRACKER_PIP_PROBE_IDLE_SUMMARY: &str = "未启动";
+const TRACKER_PIP_LOCATE_IDLE_SUMMARY: &str = "等待首帧";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct BwikiPointKey {
@@ -259,6 +266,28 @@ enum AsyncTaskPhase {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TestCaseLabel {
+    HasMap,
+    NoMap,
+}
+
+impl TestCaseLabel {
+    pub(super) const fn display_name(self) -> &'static str {
+        match self {
+            Self::HasMap => "有图",
+            Self::NoMap => "无图",
+        }
+    }
+
+    const fn file_prefix(self) -> &'static str {
+        match self {
+            Self::HasMap => "has_map",
+            Self::NoMap => "no_map",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct AsyncTaskStatus {
     phase: AsyncTaskPhase,
@@ -354,6 +383,8 @@ pub struct TrackerWorkbench {
     pub(super) last_source: Option<TrackingSource>,
     pub(super) last_match_score: Option<f32>,
     pub(super) debug_snapshot: Option<TrackingDebugSnapshot>,
+    pub(super) tracker_pip_probe_summary: SharedString,
+    pub(super) tracker_pip_locate_summary: SharedString,
     pub(super) route_groups: Vec<RouteDocument>,
     pub(super) selected_group_id: Option<RouteId>,
     pub(super) selected_point_id: Option<RoutePointId>,
@@ -363,6 +394,7 @@ pub struct TrackerWorkbench {
     pub(super) auto_focus_enabled: bool,
     pub(super) tracker_point_popup_enabled: bool,
     pub(super) debug_mode_enabled: bool,
+    pub(super) test_case_capture_enabled: bool,
     tracker_pending_action: Option<TrackerPendingAction>,
     tracker_status_text: SharedString,
     route_import_status: AsyncTaskStatus,
@@ -415,8 +447,8 @@ pub struct TrackerWorkbench {
     point_reorder_target_id: Option<RoutePointId>,
     point_reorder_picker: gpui::Entity<SelectState<PointReorderTargetItem>>,
     minimap_region_picker_window: Option<AnyWindowHandle>,
-    minimap_presence_probe_picker_window: Option<AnyWindowHandle>,
     tracker_pip_window: Option<WindowHandle<Root>>,
+    tracker_pip_capture_panel_window: Option<WindowHandle<Root>>,
     tracker_pip_window_bounds: Option<WindowBounds>,
     tracker_pip_always_on_top: bool,
     tracker_pip_pending_open: bool,
@@ -522,29 +554,33 @@ impl TrackerWorkbench {
             auto_focus_enabled,
             tracker_point_popup_enabled,
             debug_mode_enabled,
+            test_case_capture_enabled,
             preferences_error,
         ) = match UiPreferencesRepository::load(&project_root) {
-                Ok(preferences) => (
-                    preferences.theme_mode,
-                    preferences.auto_focus_enabled,
-                    preferences.tracker_point_popup_enabled,
-                    preferences.debug_mode_enabled,
-                    None,
-                ),
-                Err(error) => (
-                    ThemePreference::default(),
-                    true,
-                    true,
-                    false,
-                    Some(format!("载入界面偏好失败：{error:#}")),
-                ),
-            };
+            Ok(preferences) => (
+                preferences.theme_mode,
+                preferences.auto_focus_enabled,
+                preferences.tracker_point_popup_enabled,
+                preferences.debug_mode_enabled,
+                preferences.test_case_capture_enabled,
+                None,
+            ),
+            Err(error) => (
+                ThemePreference::default(),
+                true,
+                true,
+                false,
+                false,
+                Some(format!("载入界面偏好失败：{error:#}")),
+            ),
+        };
         info!(
             project_root = %project_root.display(),
             theme = %theme_preference,
             auto_focus_enabled,
             tracker_point_popup_enabled,
             debug_mode_enabled,
+            test_case_capture_enabled,
             "initialized UI preferences for workbench"
         );
 
@@ -598,6 +634,8 @@ impl TrackerWorkbench {
                     last_source: None,
                     last_match_score: None,
                     debug_snapshot: None,
+                    tracker_pip_probe_summary: TRACKER_PIP_PROBE_IDLE_SUMMARY.into(),
+                    tracker_pip_locate_summary: TRACKER_PIP_LOCATE_IDLE_SUMMARY.into(),
                     route_groups,
                     selected_group_id,
                     selected_point_id: None,
@@ -607,6 +645,7 @@ impl TrackerWorkbench {
                     auto_focus_enabled,
                     tracker_point_popup_enabled,
                     debug_mode_enabled,
+                    test_case_capture_enabled,
                     tracker_pending_action: None,
                     tracker_status_text: "追踪未启动。".into(),
                     route_import_status: AsyncTaskStatus::idle("尚未导入路线文件。"),
@@ -665,8 +704,8 @@ impl TrackerWorkbench {
                     point_reorder_target_id: None,
                     point_reorder_picker: point_reorder_picker.clone(),
                     minimap_region_picker_window: None,
-                    minimap_presence_probe_picker_window: None,
                     tracker_pip_window: None,
+                    tracker_pip_capture_panel_window: None,
                     tracker_pip_window_bounds: None,
                     tracker_pip_always_on_top: false,
                     tracker_pip_pending_open: false,
@@ -724,6 +763,8 @@ impl TrackerWorkbench {
                     last_source: None,
                     last_match_score: None,
                     debug_snapshot: None,
+                    tracker_pip_probe_summary: TRACKER_PIP_PROBE_IDLE_SUMMARY.into(),
+                    tracker_pip_locate_summary: TRACKER_PIP_LOCATE_IDLE_SUMMARY.into(),
                     route_groups: Vec::new(),
                     selected_group_id: None,
                     selected_point_id: None,
@@ -733,6 +774,7 @@ impl TrackerWorkbench {
                     auto_focus_enabled,
                     tracker_point_popup_enabled,
                     debug_mode_enabled,
+                    test_case_capture_enabled,
                     tracker_pending_action: None,
                     tracker_status_text: "追踪未启动。".into(),
                     route_import_status: AsyncTaskStatus::idle("尚未导入路线文件。"),
@@ -789,8 +831,8 @@ impl TrackerWorkbench {
                     point_reorder_target_id: None,
                     point_reorder_picker,
                     minimap_region_picker_window: None,
-                    minimap_presence_probe_picker_window: None,
                     tracker_pip_window: None,
+                    tracker_pip_capture_panel_window: None,
                     tracker_pip_window_bounds: None,
                     tracker_pip_always_on_top: false,
                     tracker_pip_pending_open: false,
@@ -1182,7 +1224,10 @@ impl TrackerWorkbench {
         workbench.request_center_on_current_point();
         workbench.sync_bwiki_visibility_defaults();
         if let Some(message) = preferences_error {
-            warn!(message, "continuing with default UI preferences after load failure");
+            warn!(
+                message,
+                "continuing with default UI preferences after load failure"
+            );
             workbench.status_text = format!("{} {message}", workbench.status_text).into();
         }
 
@@ -1466,6 +1511,20 @@ impl TrackerWorkbench {
         }
     }
 
+    fn reset_tracker_pip_debug_summaries(&mut self) {
+        self.tracker_pip_probe_summary = TRACKER_PIP_PROBE_IDLE_SUMMARY.into();
+        self.tracker_pip_locate_summary = TRACKER_PIP_LOCATE_IDLE_SUMMARY.into();
+    }
+
+    fn set_tracker_pip_debug_summaries(
+        &mut self,
+        probe_summary: impl Into<SharedString>,
+        locate_summary: impl Into<SharedString>,
+    ) {
+        self.tracker_pip_probe_summary = probe_summary.into();
+        self.tracker_pip_locate_summary = locate_summary.into();
+    }
+
     pub(super) fn is_tracker_transition_pending(&self) -> bool {
         self.tracker_pending_action.is_some()
     }
@@ -1629,6 +1688,10 @@ impl TrackerWorkbench {
         self.debug_mode_enabled
     }
 
+    pub(super) const fn is_test_case_capture_enabled(&self) -> bool {
+        self.test_case_capture_enabled
+    }
+
     pub(super) fn debug_log_entries(&self, limit: usize) -> Vec<logging::DebugLogEntry> {
         logging::debug_log_snapshot(limit)
     }
@@ -1775,6 +1838,10 @@ impl TrackerWorkbench {
                 })
                 .flatten(),
             pip_always_on_top: self.tracker_pip_always_on_top,
+            pip_probe_summary: self.tracker_pip_probe_summary.clone(),
+            pip_locate_summary: self.tracker_pip_locate_summary.clone(),
+            pip_test_case_capture_enabled: self.test_case_capture_enabled,
+            pip_capture_panel_expanded: self.tracker_pip_capture_panel_window.is_some(),
         }
     }
 
@@ -2357,7 +2424,10 @@ impl TrackerWorkbench {
 
         self.settings_nav_expanded = !self.settings_nav_expanded;
         self.sync_tracker_debug_enabled();
-        debug!(expanded = self.settings_nav_expanded, "toggled settings navigation");
+        debug!(
+            expanded = self.settings_nav_expanded,
+            "toggled settings navigation"
+        );
         self.status_text = if self.settings_nav_expanded {
             "已展开设置导航。".into()
         } else {
@@ -3426,6 +3496,20 @@ impl TrackerWorkbench {
         });
     }
 
+    pub(super) fn set_test_case_capture_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.test_case_capture_enabled = enabled;
+        if !enabled {
+            self.close_tracker_pip_capture_panel_window(cx);
+        }
+        self.refresh_tracker_pip_window(cx);
+        info!(enabled, "updated test case capture preference");
+        self.persist_ui_preferences(if enabled {
+            "测试样本捕获已开启"
+        } else {
+            "测试样本捕获已关闭"
+        });
+    }
+
     pub(super) fn clear_runtime_logs(&mut self) {
         logging::clear_debug_logs();
         self.debug_log_revision = logging::debug_log_revision();
@@ -3879,6 +3963,7 @@ impl TrackerWorkbench {
                 self.last_source = None;
                 self.last_match_score = None;
                 self.debug_snapshot = None;
+                self.reset_tracker_pip_debug_summaries();
                 self.tracker_status_text =
                     format!("正在启动 {} 追踪线程。", self.selected_engine).into();
                 self.status_text = self.tracker_status_text.clone();
@@ -3891,6 +3976,7 @@ impl TrackerWorkbench {
                 );
                 self.tracker_pending_action = None;
                 self.tracker_lifecycle = TrackerLifecycle::Failed;
+                self.reset_tracker_pip_debug_summaries();
                 self.tracker_status_text = format!("启动追踪失败：{error:#}").into();
                 self.status_text = self.tracker_status_text.clone();
             }
@@ -3904,6 +3990,7 @@ impl TrackerWorkbench {
         self.release_tracker_session();
         self.tracker_pending_action = None;
         self.tracker_lifecycle = TrackerLifecycle::Idle;
+        self.reset_tracker_pip_debug_summaries();
         self.tracker_status_text = "追踪线程已停止。".into();
         self.status_text = self.tracker_status_text.clone();
         if !preserve_preview {
@@ -3937,6 +4024,7 @@ impl TrackerWorkbench {
                     match lifecycle {
                         TrackerLifecycle::Idle => {
                             self.tracker_pending_action = None;
+                            self.reset_tracker_pip_debug_summaries();
                             self.tracker_status_text = "追踪线程已停止。".into();
                             self.status_text = self.tracker_status_text.clone();
                             should_release_session = true;
@@ -3965,6 +4053,7 @@ impl TrackerWorkbench {
                     error!(message, "received tracker error event");
                     self.tracker_pending_action = None;
                     self.tracker_lifecycle = TrackerLifecycle::Failed;
+                    self.reset_tracker_pip_debug_summaries();
                     self.tracker_status_text = format!("追踪线程异常：{message}").into();
                     self.status_text = self.tracker_status_text.clone();
                     should_release_session = true;
@@ -3993,6 +4082,10 @@ impl TrackerWorkbench {
         self.frame_index = status.frame_index;
         self.last_source = status.source;
         self.last_match_score = status.match_score;
+        self.set_tracker_pip_debug_summaries(
+            status.probe_summary.clone(),
+            status.locate_summary.clone(),
+        );
         self.tracker_status_text = status.message.clone().into();
         self.status_text = status.message.into();
         self.tracker_lifecycle = status.lifecycle;
@@ -5029,6 +5122,8 @@ impl TrackerWorkbench {
                 self.update_workspace_config(draft.config);
                 self.invalidate_bwiki_route_plan_preview();
                 self.sync_config_form_from_workspace(window, cx);
+                self.refresh_tracker_pip_window(cx);
+                self.refresh_tracker_pip_capture_panel_window(cx);
                 self.status_text = if self.is_tracking_active() {
                     format!(
                         "配置已保存到 {}。当前追踪需重启后才会完全应用新参数。",
@@ -5071,7 +5166,10 @@ impl TrackerWorkbench {
 
     pub(super) fn toggle_tracker_pip_always_on_top(&mut self, cx: &mut Context<Self>) {
         let always_on_top = !self.tracker_pip_always_on_top;
-        info!(always_on_top, "toggling tracker picture-in-picture always-on-top");
+        info!(
+            always_on_top,
+            "toggling tracker picture-in-picture always-on-top"
+        );
 
         if let Some(handle) = self.tracker_pip_window {
             match handle.update(cx, |_, pip_window, _| {
@@ -5126,6 +5224,7 @@ impl TrackerWorkbench {
             .as_ref()
             .map(|position| position.world);
         let initial_snapshot = self.tracker_map_render_snapshot();
+        let minimap_region = self.workspace.config.minimap.clone();
         let bwiki_resources = self.bwiki_resources.clone();
         let bwiki_tile_cache = self.bwiki_tile_cache.clone();
         let initial_bounds = self
@@ -5146,8 +5245,8 @@ impl TrackerWorkbench {
             move |pip_window, cx| {
                 pip_window.on_window_should_close(cx, move |_, cx| {
                     if let Some(workbench) = workbench_for_close.upgrade() {
-                        let _ = workbench.update(cx, |this, _| {
-                            this.handle_tracker_pip_window_closed();
+                        let _ = workbench.update(cx, |this, cx| {
+                            this.handle_tracker_pip_window_closed(cx);
                         });
                     }
                     true
@@ -5159,6 +5258,7 @@ impl TrackerWorkbench {
                         initial_camera,
                         initial_focus,
                         initial_snapshot.clone(),
+                        minimap_region.clone(),
                         bwiki_resources.clone(),
                         bwiki_tile_cache.clone(),
                         pip_window,
@@ -5171,7 +5271,10 @@ impl TrackerWorkbench {
 
         match open_result {
             Ok(handle) => {
-                info!(always_on_top = self.tracker_pip_always_on_top, "tracker picture-in-picture window opened");
+                info!(
+                    always_on_top = self.tracker_pip_always_on_top,
+                    "tracker picture-in-picture window opened"
+                );
                 self.tracker_pip_window = Some(handle);
                 self.tracker_pip_window_bounds = Some(initial_bounds);
                 self.status_text = "追踪画中画已打开。".into();
@@ -5203,6 +5306,7 @@ impl TrackerWorkbench {
     }
 
     fn close_tracker_pip_window(&mut self, cx: &mut Context<Self>) {
+        self.close_tracker_pip_capture_panel_window(cx);
         if let Some(handle) = self.tracker_pip_window.take() {
             info!("closing tracker picture-in-picture window");
             let _ = handle.update(cx, |_, pip_window, cx| {
@@ -5230,7 +5334,8 @@ impl TrackerWorkbench {
         })
     }
 
-    pub(super) fn handle_tracker_pip_window_closed(&mut self) {
+    pub(super) fn handle_tracker_pip_window_closed(&mut self, cx: &mut Context<Self>) {
+        self.close_tracker_pip_capture_panel_window(cx);
         if self.tracker_pip_window.take().is_some() {
             self.status_text = "追踪画中画已关闭。".into();
         }
@@ -5242,13 +5347,14 @@ impl TrackerWorkbench {
             return;
         };
         let snapshot = self.tracker_map_render_snapshot();
+        let minimap_region = self.workspace.config.minimap.clone();
 
         match handle.update(cx, |root, pip_window, cx| {
             let Ok(pip) = root.view().clone().downcast::<TrackerPipWindow>() else {
                 return None;
             };
-            pip.update(cx, |pip, _| {
-                pip.update_snapshot(snapshot.clone());
+            pip.update(cx, |pip, cx| {
+                pip.update_snapshot(snapshot.clone(), minimap_region.clone(), cx);
             });
             let bounds = pip_window.window_bounds();
             pip_window.defer(cx, |pip_window, _| {
@@ -5258,9 +5364,11 @@ impl TrackerWorkbench {
         }) {
             Ok(Some(bounds)) => {
                 self.tracker_pip_window_bounds = Some(bounds);
+                self.refresh_tracker_pip_capture_panel_window(cx);
             }
             _ => {
                 self.tracker_pip_window = None;
+                self.tracker_pip_capture_panel_window = None;
                 self.tracker_pip_pending_open = false;
             }
         }
@@ -5326,41 +5434,266 @@ impl TrackerWorkbench {
         });
     }
 
-    pub(super) fn toggle_minimap_presence_probe_picker_from_pip(&mut self, cx: &mut Context<Self>) {
-        if let Some(handle) = self.minimap_presence_probe_picker_window.take() {
-            info!("canceling minimap presence probe picker from picture-in-picture");
-            self.status_text = "已取消 F1-P 标签探针取区。".into();
-            let _ = handle.update(cx, |_, picker_window, cx| {
-                picker_window.defer(cx, |picker_window, _| {
-                    picker_window.remove_window();
-                });
-            });
+    pub(super) fn toggle_tracker_pip_capture_panel_from_pip(
+        &mut self,
+        pip_bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.test_case_capture_enabled {
             return;
         }
 
-        info!("opening minimap presence probe picker from picture-in-picture");
+        self.tracker_pip_window_bounds = Some(WindowBounds::Windowed(pip_bounds));
+        if self.tracker_pip_capture_panel_window.is_some() {
+            self.close_tracker_pip_capture_panel_window(cx);
+        } else {
+            self.open_tracker_pip_capture_panel_window(pip_bounds, cx);
+        }
+        self.refresh_tracker_pip_window(cx);
+    }
+
+    pub(super) fn sync_tracker_pip_capture_panel_with_bounds(
+        &mut self,
+        pip_bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.tracker_pip_window_bounds = Some(WindowBounds::Windowed(pip_bounds));
+        if !self.test_case_capture_enabled || self.tracker_pip_capture_panel_window.is_none() {
+            return;
+        }
+        self.apply_tracker_pip_capture_panel_bounds(pip_bounds, cx);
+    }
+
+    pub(super) fn capture_test_case(&mut self, label: TestCaseLabel) {
+        match self.capture_test_case_inner(label) {
+            Ok(path) => {
+                self.status_text = format!(
+                    "已按“{}”保存当前 minimap 测试样本到 {}。",
+                    label.display_name(),
+                    path.display()
+                )
+                .into();
+            }
+            Err(error) => {
+                self.status_text = format!(
+                    "保存“{}” minimap 测试样本失败：{error:#}",
+                    label.display_name()
+                )
+                .into();
+            }
+        }
+    }
+
+    fn capture_test_case_inner(&self, label: TestCaseLabel) -> anyhow::Result<PathBuf> {
+        use anyhow::Context as _;
+
+        let output_dir = self.resolve_test_case_output_dir()?;
+        let base_name = self.next_test_case_base_name(label);
+        let output_path = output_dir.join(format!("{base_name}.png"));
+        let capture = crate::tracking::capture::DesktopCapture::from_absolute_region(
+            &self.workspace.config.minimap,
+        )?;
+        let image = capture.capture_rgba()?;
+        image
+            .save(&output_path)
+            .with_context(|| format!("failed to save test case image {}", output_path.display()))?;
+        Ok(output_path)
+    }
+
+    fn resolve_test_case_output_dir(&self) -> anyhow::Result<PathBuf> {
+        use anyhow::Context as _;
+
+        let output_dir = self.find_assets_test_dir();
+        fs::create_dir_all(&output_dir).with_context(|| {
+            format!(
+                "failed to create test case output directory {}",
+                output_dir.display()
+            )
+        })?;
+        Ok(output_dir)
+    }
+
+    fn find_assets_test_dir(&self) -> PathBuf {
+        self.workspace.project_root.join("assets").join("test")
+    }
+
+    fn next_test_case_base_name(&self, label: TestCaseLabel) -> String {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        format!("{}_{}", label.file_prefix(), millis)
+    }
+
+    fn open_tracker_pip_capture_panel_window(
+        &mut self,
+        pip_bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(display_id) = self.resolve_display_id_for_bounds(pip_bounds, cx) else {
+            self.status_text = "无法定位画中画所在显示器，不能打开捕获调试面板。".into();
+            return;
+        };
+
         let workbench = cx.entity().downgrade();
-        let workbench_for_error = workbench.clone();
-        let main_window_handle = self.main_window_handle;
-        cx.defer(move |cx| {
-            match main_window_handle.update(cx, move |_, main_window, cx| {
-                if let Some(workbench) = workbench.upgrade() {
-                    let _ = workbench.update(cx, |this, cx| {
-                        this.open_minimap_presence_probe_picker(main_window, cx);
-                    });
-                }
-            }) {
-                Ok(()) => {}
-                Err(_) => {
-                    if let Some(workbench) = workbench_for_error.upgrade() {
-                        let _ = workbench.update(cx, |this, _| {
-                            this.status_text =
-                                "主工作区窗口已经关闭，无法打开 F1-P 标签探针取区。".into();
+        let workbench_for_close = workbench.clone();
+        let minimap_region = self.workspace.config.minimap.clone();
+        let panel_bounds = self.tracker_pip_capture_panel_bounds(pip_bounds);
+        let open_result = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(panel_bounds)),
+                focus: true,
+                show: true,
+                kind: WindowKind::PopUp,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                display_id: Some(display_id),
+                titlebar: None,
+                window_decorations: Some(gpui::WindowDecorations::Client),
+                window_min_size: Some(gpui::size(gpui::px(240.0), gpui::px(220.0))),
+                ..Default::default()
+            },
+            move |panel_window, cx| {
+                panel_window.on_window_should_close(cx, move |_, cx| {
+                    if let Some(workbench) = workbench_for_close.upgrade() {
+                        let _ = workbench.update(cx, |this, cx| {
+                            this.handle_tracker_pip_capture_panel_window_closed(cx);
                         });
                     }
-                }
+                    true
+                });
+
+                let view = cx.new(|cx| {
+                    TrackerPipCapturePanelWindow::new(
+                        workbench.clone(),
+                        minimap_region.clone(),
+                        panel_window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| Root::new(view, panel_window, cx))
+            },
+        );
+
+        match open_result {
+            Ok(handle) => {
+                self.tracker_pip_capture_panel_window = Some(handle);
+                self.status_text = "画中画捕获调试面板已打开。".into();
             }
+            Err(error) => {
+                error!(error = %error, "failed to open tracker picture-in-picture capture panel");
+                self.status_text = format!("打开画中画捕获调试面板失败：{error:#}").into();
+            }
+        }
+    }
+
+    fn close_tracker_pip_capture_panel_window(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.tracker_pip_capture_panel_window.take() {
+            let _ = handle.update(cx, |_, panel_window, cx| {
+                panel_window.defer(cx, |panel_window, _| {
+                    panel_window.remove_window();
+                });
+            });
+        }
+    }
+
+    fn handle_tracker_pip_capture_panel_window_closed(&mut self, cx: &mut Context<Self>) {
+        self.tracker_pip_capture_panel_window = None;
+        self.refresh_tracker_pip_window(cx);
+    }
+
+    fn refresh_tracker_pip_capture_panel_window(&mut self, cx: &mut Context<Self>) {
+        if !self.test_case_capture_enabled {
+            self.close_tracker_pip_capture_panel_window(cx);
+            return;
+        }
+
+        let Some(handle) = self.tracker_pip_capture_panel_window else {
+            return;
+        };
+
+        let minimap_region = self.workspace.config.minimap.clone();
+        let pip_bounds = self
+            .tracker_pip_window_bounds
+            .map(|bounds| bounds.get_bounds())
+            .unwrap_or_default();
+
+        match handle.update(cx, |root, panel_window, cx| {
+            let Ok(panel) = root.view().clone().downcast::<TrackerPipCapturePanelWindow>() else {
+                return None;
+            };
+            panel.update(cx, |panel, cx| {
+                panel.update_minimap_region(minimap_region.clone(), cx);
+            });
+            if pip_bounds.size.width > px(0.0) && pip_bounds.size.height > px(0.0) {
+                let next_bounds = self::TrackerWorkbench::tracker_pip_capture_panel_bounds_for(
+                    pip_bounds,
+                );
+                let _ = apply_window_bounds(panel_window, next_bounds);
+            }
+            panel_window.defer(cx, |panel_window, _| {
+                panel_window.refresh();
+            });
+            Some(panel_window.window_bounds())
+        }) {
+            Ok(Some(_)) => {}
+            _ => {
+                self.tracker_pip_capture_panel_window = None;
+            }
+        }
+    }
+
+    fn apply_tracker_pip_capture_panel_bounds(
+        &mut self,
+        pip_bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(handle) = self.tracker_pip_capture_panel_window else {
+            return;
+        };
+        let panel_bounds = self.tracker_pip_capture_panel_bounds(pip_bounds);
+        let _ = handle.update(cx, |_, panel_window, _| {
+            let _ = apply_window_bounds(panel_window, panel_bounds);
         });
+    }
+
+    fn tracker_pip_capture_panel_bounds(&self, pip_bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+        Self::tracker_pip_capture_panel_bounds_for(pip_bounds)
+    }
+
+    fn tracker_pip_capture_panel_bounds_for(pip_bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+        let width = px(292.0);
+        let height = px(252.0);
+        let margin = 12.0;
+        let mut left = f32::from(pip_bounds.origin.x) - 292.0 - margin;
+        if left < 8.0 {
+            left = f32::from(pip_bounds.origin.x) + f32::from(pip_bounds.size.width) + margin;
+        }
+        let top = f32::from(pip_bounds.origin.y) + 44.0;
+        Bounds {
+            origin: gpui::point(px(left), px(top)),
+            size: gpui::size(width, height),
+        }
+    }
+
+    fn resolve_display_id_for_bounds(
+        &self,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::DisplayId> {
+        let center = bounds.center();
+        cx.displays()
+            .into_iter()
+            .find(|display| {
+                screen_bounds_contains(
+                    display.bounds(),
+                    f32::from(center.x),
+                    f32::from(center.y),
+                )
+            })
+            .map(|display| display.id())
+            .or_else(|| cx.primary_display().map(|display| display.id()))
     }
 
     fn open_minimap_region_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5544,6 +5877,8 @@ impl TrackerWorkbench {
             window,
             cx,
         );
+        self.refresh_tracker_pip_window(cx);
+        self.refresh_tracker_pip_capture_panel_window(cx);
 
         match save_config(&self.workspace.project_root, &config) {
             Ok(path) => {
@@ -5593,215 +5928,6 @@ impl TrackerWorkbench {
     pub(super) fn handle_minimap_region_picker_closed(&mut self) {
         if self.minimap_region_picker_window.take().is_some() {
             self.status_text = "已取消小地图取区。".into();
-        }
-    }
-
-    pub(super) fn is_minimap_presence_probe_picker_active(&self) -> bool {
-        self.minimap_presence_probe_picker_window.is_some()
-    }
-
-    pub(super) fn toggle_minimap_presence_probe_picker(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(handle) = self.minimap_presence_probe_picker_window.take() {
-            info!("canceling minimap presence probe picker");
-            self.status_text = "已取消 F1-P 标签探针取区。".into();
-            let _ = handle.update(cx, |_, picker_window, cx| {
-                picker_window.defer(cx, |picker_window, _| {
-                    picker_window.remove_window();
-                });
-            });
-            return;
-        }
-
-        info!("opening minimap presence probe picker");
-        self.open_minimap_presence_probe_picker(window, cx);
-    }
-
-    fn open_minimap_presence_probe_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((display_id, display_bounds)) = self.resolve_minimap_picker_display(window, cx)
-        else {
-            self.status_text = "无法定位可用显示器，不能进入 F1-P 标签探针取区模式。".into();
-            return;
-        };
-
-        let workbench = cx.entity().downgrade();
-        let workbench_for_close = workbench.clone();
-        let main_window_handle = window.window_handle();
-        let picker_result = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(display_bounds)),
-                focus: true,
-                show: true,
-                kind: WindowKind::PopUp,
-                is_movable: false,
-                is_resizable: false,
-                is_minimizable: false,
-                display_id: Some(display_id),
-                window_background: WindowBackgroundAppearance::Transparent,
-                titlebar: None,
-                ..Default::default()
-            },
-            move |picker_window, cx| {
-                picker_window.on_window_should_close(cx, move |_, cx| {
-                    if let Some(workbench) = workbench_for_close.upgrade() {
-                        let _ = workbench.update(cx, |this, _| {
-                            this.handle_minimap_presence_probe_picker_closed();
-                        });
-                    }
-                    true
-                });
-
-                cx.new(|_| {
-                    MinimapPresenceProbePicker::new(
-                        workbench.clone(),
-                        main_window_handle,
-                        display_bounds,
-                    )
-                })
-            },
-        );
-
-        match picker_result {
-            Ok(handle) => {
-                info!("minimap presence probe picker opened");
-                self.minimap_presence_probe_picker_window = Some(handle.into());
-                self.status_text =
-                    "F1-P 标签探针取区已开启：请只框住标签带，确认后会立刻抓当前区域作为模板。"
-                        .into();
-            }
-            Err(error) => {
-                error!(error = %error, "failed to open minimap presence probe picker");
-                self.status_text = format!("打开 F1-P 标签探针取区窗口失败：{error:#}").into();
-            }
-        }
-    }
-
-    fn sync_minimap_presence_probe_form_region(
-        &mut self,
-        region: &crate::config::CaptureRegion,
-        enabled: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        set_input_value(
-            &self.config_form.minimap_presence_probe_enabled,
-            enabled.to_string(),
-            window,
-            cx,
-        );
-        set_input_value(
-            &self.config_form.minimap_presence_probe_top,
-            region.top.to_string(),
-            window,
-            cx,
-        );
-        set_input_value(
-            &self.config_form.minimap_presence_probe_left,
-            region.left.to_string(),
-            window,
-            cx,
-        );
-        set_input_value(
-            &self.config_form.minimap_presence_probe_width,
-            region.width.to_string(),
-            window,
-            cx,
-        );
-        set_input_value(
-            &self.config_form.minimap_presence_probe_height,
-            region.height.to_string(),
-            window,
-            cx,
-        );
-    }
-
-    pub(super) fn finish_minimap_presence_probe_pick(
-        &mut self,
-        region: crate::config::CaptureRegion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        info!(
-            top = region.top,
-            left = region.left,
-            width = region.width,
-            height = region.height,
-            "finished minimap presence probe pick"
-        );
-        self.minimap_presence_probe_picker_window = None;
-
-        let template_path =
-            match calibrate_minimap_presence_probe(&self.workspace.project_root, &region) {
-                Ok(path) => path,
-                Err(error) => {
-                    self.status_text = format!(
-                        "F1-P 标签探针模板抓取失败：{error:#}。请确认当前界面有完整标签带。"
-                    )
-                    .into();
-                    return;
-                }
-            };
-
-        let mut config = self.workspace.config.clone();
-        config.minimap_presence_probe.enabled = true;
-        config.minimap_presence_probe.top = region.top;
-        config.minimap_presence_probe.left = region.left;
-        config.minimap_presence_probe.width = region.width;
-        config.minimap_presence_probe.height = region.height;
-        self.update_workspace_config(config.clone());
-        self.sync_minimap_presence_probe_form_region(&region, true, window, cx);
-
-        match save_config(&self.workspace.project_root, &config) {
-            Ok(path) => {
-                self.status_text = if self.is_tracking_active() {
-                    format!(
-                        "已更新 F1-P 标签探针区域为 top {} / left {} / {}x{}，并保存配置 {}、模板 {}。当前追踪需重启后才会应用新区域。",
-                        region.top,
-                        region.left,
-                        region.width,
-                        region.height,
-                        path.display(),
-                        template_path.display()
-                    )
-                    .into()
-                } else {
-                    format!(
-                        "已更新 F1-P 标签探针区域为 top {} / left {} / {}x{}，并保存配置 {}、模板 {}。",
-                        region.top,
-                        region.left,
-                        region.width,
-                        region.height,
-                        path.display(),
-                        template_path.display()
-                    )
-                    .into()
-                };
-            }
-            Err(error) => {
-                self.status_text = format!(
-                    "F1-P 标签探针区域已抓取为 top {} / left {} / {}x{}，模板已保存到 {}，但写入配置失败：{error:#}",
-                    region.top,
-                    region.left,
-                    region.width,
-                    region.height,
-                    template_path.display()
-                )
-                .into();
-            }
-        }
-    }
-
-    pub(super) fn handle_minimap_presence_probe_picker_cancelled(&mut self) {
-        self.minimap_presence_probe_picker_window = None;
-        self.status_text = "已取消 F1-P 标签探针取区。".into();
-    }
-
-    pub(super) fn handle_minimap_presence_probe_picker_closed(&mut self) {
-        if self.minimap_presence_probe_picker_window.take().is_some() {
-            self.status_text = "已取消 F1-P 标签探针取区。".into();
         }
     }
 
@@ -5933,6 +6059,7 @@ impl TrackerWorkbench {
             auto_focus_enabled: self.auto_focus_enabled,
             tracker_point_popup_enabled: self.tracker_point_popup_enabled,
             debug_mode_enabled: self.debug_mode_enabled,
+            test_case_capture_enabled: self.test_case_capture_enabled,
         };
 
         match UiPreferencesRepository::save(&self.workspace.project_root, &preferences) {

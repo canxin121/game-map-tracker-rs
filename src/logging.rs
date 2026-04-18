@@ -58,7 +58,10 @@ impl DebugLogStore {
         entry.sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         entry.elapsed_millis = self.started_at.elapsed().as_millis();
 
-        let mut entries = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         while entries.len() >= self.max_entries {
             entries.pop_front();
         }
@@ -68,14 +71,20 @@ impl DebugLogStore {
 
     #[must_use]
     pub fn snapshot(&self, limit: usize) -> Vec<DebugLogEntry> {
-        let entries = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let limit = limit.max(1);
         let skip = entries.len().saturating_sub(limit);
         entries.iter().skip(skip).cloned().collect()
     }
 
     pub fn clear(&self) {
-        let mut entries = self.entries.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         entries.clear();
         self.revision.fetch_add(1, Ordering::Release);
     }

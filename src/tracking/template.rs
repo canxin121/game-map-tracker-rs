@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::TemplateTrackingConfig;
 #[cfg(not(feature = "ai-burn"))]
@@ -21,11 +21,11 @@ use crate::{
         presence::{MinimapPresenceDetector, MinimapPresenceSample},
         runtime::{TrackingStatus, TrackingTick, TrackingWorker},
         vision::{
-            DebugOverlay, LocalCandidateDecision, MapPyramid, MaskSet, MatchCandidate, SearchCrop,
-            SearchStage, TrackerState, build_debug_snapshot, build_mask,
-            build_match_representation, capture_template_annulus, center_to_scaled,
-            coarse_global_downscale, crop_search_region, local_candidate_decision, preview_heatmap,
-            preview_image, preview_mask_image, scaled_dimension, search_region_around_center,
+            LocalCandidateDecision, MapPyramid, MaskSet, MatchCandidate, SearchCrop, SearchStage,
+            TrackerState, build_debug_snapshot, build_mask, build_match_representation,
+            capture_template_annulus, center_to_scaled, coarse_global_downscale,
+            crop_search_region, local_candidate_decision, preview_image, scaled_dimension,
+            search_region_around_center,
         },
     },
 };
@@ -51,6 +51,7 @@ use crate::tracking::burn_support::{
     burn_score_map_capture_enabled, select_burn_device,
 };
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 struct LocateResult {
     best_left: u32,
@@ -67,7 +68,6 @@ pub struct TemplateTrackerWorker {
     capture: DesktopCapture,
     presence_detector: Option<MinimapPresenceDetector>,
     pyramid: MapPyramid,
-    masks: MaskSet,
     state: TrackerState,
     debug_enabled: bool,
     #[cfg(feature = "ai-burn")]
@@ -193,7 +193,6 @@ impl TemplateTrackerWorker {
             capture,
             presence_detector,
             pyramid,
-            masks,
             state: TrackerState::default(),
             debug_enabled: false,
             #[cfg(feature = "ai-burn")]
@@ -204,6 +203,19 @@ impl TemplateTrackerWorker {
     #[cfg(feature = "ai-burn")]
     fn run_frame(&mut self) -> Result<TrackingTick> {
         self.state.begin_frame();
+        if self.presence_detector.is_none() {
+            let mut status = self.base_status();
+            status.probe_summary = self.probe_summary(None);
+            let estimate = self.apply_probe_unavailable_fallback(&mut status);
+            status.locate_summary =
+                Self::blocked_locate_summary("小地图圆环未启用", estimate.as_ref());
+            return Ok(TrackingTick {
+                status,
+                estimate,
+                debug: None,
+            });
+        }
+
         let probe_sample = self
             .presence_detector
             .as_ref()
@@ -211,10 +223,31 @@ impl TemplateTrackerWorker {
             .transpose()?;
         if let Some(sample) = probe_sample.as_ref().filter(|sample| !sample.present) {
             let mut status = self.base_status();
+            status.probe_summary = self.probe_summary(probe_sample.as_ref());
             let estimate = self.apply_probe_absent_fallback(&mut status);
-            let debug = self
-                .debug_enabled
-                .then(|| self.build_probe_miss_debug_snapshot(sample, estimate.as_ref()));
+            status.locate_summary =
+                Self::blocked_locate_summary("小地图圆环未命中", estimate.as_ref());
+            let debug_captured = if self.debug_enabled {
+                match self.capture.capture_gray() {
+                    Ok(captured) => Some(captured),
+                    Err(error) => {
+                        warn!(
+                            error = %format!("{error:#}"),
+                            "failed to capture minimap input for probe-miss debug snapshot"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let debug = self.debug_enabled.then(|| {
+                self.build_probe_miss_debug_snapshot(
+                    debug_captured.as_ref(),
+                    sample,
+                    estimate.as_ref(),
+                )
+            });
             return Ok(TrackingTick {
                 status,
                 estimate,
@@ -228,12 +261,14 @@ impl TemplateTrackerWorker {
                 .prepare_capture_templates(&captured, &self.config, &self.pyramid)?;
 
         let mut status = self.base_status();
+        status.probe_summary = self.probe_summary(probe_sample.as_ref());
         let mut estimate = None;
         let mut global_result = None;
         let mut refine_crop = None;
         let mut refine_result = None;
         let mut local_result = None;
         let mut forced_global_jump: Option<f32> = None;
+        let mut locate_summary = "等待定位".to_owned();
 
         if self.config.local_search.enabled && matches!(self.state.stage, SearchStage::LocalTrack) {
             if let Some(last_world) = self.state.last_world {
@@ -273,6 +308,7 @@ impl TemplateTrackerWorker {
                                 "局部模板锁定成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
                                 candidate.score, candidate.world.x, candidate.world.y
                             );
+                            locate_summary = Self::locate_success_summary("局部", &candidate);
                             estimate =
                                 Some(self.commit_success(candidate, TrackingSource::LocalTrack));
                         }
@@ -337,13 +373,21 @@ impl TemplateTrackerWorker {
                         "全局重定位成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
                         candidate.score, candidate.world.x, candidate.world.y
                     );
+                    locate_summary = Self::locate_success_summary("全局", &candidate);
                     estimate = Some(self.commit_success(candidate, TrackingSource::GlobalRelocate));
                 }
             }
         }
 
         if estimate.is_none() {
+            locate_summary = Self::locate_failure_summary(
+                "全局",
+                refine_result.as_ref().or(global_result.as_ref()),
+            );
             estimate = self.apply_inertial_fallback(&mut status);
+            if let Some(position) = estimate.as_ref() {
+                locate_summary = Self::with_inertial_suffix(&locate_summary, position);
+            }
         }
 
         if estimate.is_none() {
@@ -351,6 +395,7 @@ impl TemplateTrackerWorker {
             status.match_score = None;
             status.message = "当前帧未找到可靠匹配，等待下一帧。".to_owned();
         }
+        status.locate_summary = locate_summary;
 
         let debug = self.debug_enabled.then(|| {
             self.build_debug_snapshot(
@@ -374,6 +419,19 @@ impl TemplateTrackerWorker {
     #[cfg(not(feature = "ai-burn"))]
     fn run_frame(&mut self) -> Result<TrackingTick> {
         self.state.begin_frame();
+        if self.presence_detector.is_none() {
+            let mut status = self.base_status();
+            status.probe_summary = self.probe_summary(None);
+            let estimate = self.apply_probe_unavailable_fallback(&mut status);
+            status.locate_summary =
+                Self::blocked_locate_summary("小地图圆环未启用", estimate.as_ref());
+            return Ok(TrackingTick {
+                status,
+                estimate,
+                debug: None,
+            });
+        }
+
         let probe_sample = self
             .presence_detector
             .as_ref()
@@ -381,10 +439,31 @@ impl TemplateTrackerWorker {
             .transpose()?;
         if let Some(sample) = probe_sample.as_ref().filter(|sample| !sample.present) {
             let mut status = self.base_status();
+            status.probe_summary = self.probe_summary(probe_sample.as_ref());
             let estimate = self.apply_probe_absent_fallback(&mut status);
-            let debug = self
-                .debug_enabled
-                .then(|| self.build_probe_miss_debug_snapshot(sample, estimate.as_ref()));
+            status.locate_summary =
+                Self::blocked_locate_summary("小地图圆环未命中", estimate.as_ref());
+            let debug_captured = if self.debug_enabled {
+                match self.capture.capture_gray() {
+                    Ok(captured) => Some(captured),
+                    Err(error) => {
+                        warn!(
+                            error = %format!("{error:#}"),
+                            "failed to capture minimap input for probe-miss debug snapshot"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let debug = self.debug_enabled.then(|| {
+                self.build_probe_miss_debug_snapshot(
+                    debug_captured.as_ref(),
+                    sample,
+                    estimate.as_ref(),
+                )
+            });
             return Ok(TrackingTick {
                 status,
                 estimate,
@@ -397,11 +476,13 @@ impl TemplateTrackerWorker {
             prepare_capture_templates(&captured, &self.config, &self.pyramid);
 
         let mut status = self.base_status();
+        status.probe_summary = self.probe_summary(probe_sample.as_ref());
         let mut estimate = None;
         let mut global_result = None;
         let mut refine_crop = None;
         let mut refine_result = None;
         let mut local_result = None;
+        let mut locate_summary = "等待定位".to_owned();
 
         if self.config.local_search.enabled && matches!(self.state.stage, SearchStage::LocalTrack) {
             if let Some(last_world) = self.state.last_world {
@@ -440,6 +521,7 @@ impl TemplateTrackerWorker {
                                 "局部模板锁定成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
                                 candidate.score, candidate.world.x, candidate.world.y
                             );
+                            locate_summary = Self::locate_success_summary("局部", &candidate);
                             estimate =
                                 Some(self.commit_success(candidate, TrackingSource::LocalTrack));
                         }
@@ -503,13 +585,21 @@ impl TemplateTrackerWorker {
                         "全局重定位成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
                         candidate.score, candidate.world.x, candidate.world.y
                     );
+                    locate_summary = Self::locate_success_summary("全局", &candidate);
                     estimate = Some(self.commit_success(candidate, TrackingSource::GlobalRelocate));
                 }
             }
         }
 
         if estimate.is_none() {
+            locate_summary = Self::locate_failure_summary(
+                "全局",
+                refine_result.as_ref().or(global_result.as_ref()),
+            );
             estimate = self.apply_inertial_fallback(&mut status);
+            if let Some(position) = estimate.as_ref() {
+                locate_summary = Self::with_inertial_suffix(&locate_summary, position);
+            }
         }
 
         if estimate.is_none() {
@@ -517,6 +607,7 @@ impl TemplateTrackerWorker {
             status.match_score = None;
             status.message = "当前帧未找到可靠匹配，等待下一帧。".to_owned();
         }
+        status.locate_summary = locate_summary;
 
         let debug = self.debug_enabled.then(|| {
             self.build_debug_snapshot(
@@ -606,7 +697,59 @@ impl TemplateTrackerWorker {
             message: String::new(),
             source: None,
             match_score: None,
+            probe_summary: String::new(),
+            locate_summary: String::new(),
         }
+    }
+
+    fn probe_summary(&self, sample: Option<&MinimapPresenceSample>) -> String {
+        match sample {
+            Some(sample) => format!(
+                "{} {:.3}/{:.3}",
+                if sample.present {
+                    "存在"
+                } else {
+                    "不存在"
+                },
+                sample.score,
+                sample.threshold
+            ),
+            None if self.presence_detector.is_some() => "等待判断".to_owned(),
+            None => "未启用".to_owned(),
+        }
+    }
+
+    fn locate_success_summary(scope: &str, candidate: &MatchCandidate) -> String {
+        format!(
+            "{scope}成功 {:.3} @ {:.0}, {:.0}",
+            candidate.score, candidate.world.x, candidate.world.y
+        )
+    }
+
+    fn locate_failure_summary(scope: &str, result: Option<&LocateResult>) -> String {
+        result.map_or_else(
+            || format!("{scope}未命中"),
+            |result| format!("{scope}未命中 {:.3}", result.best_score),
+        )
+    }
+
+    fn blocked_locate_summary(reason: &str, estimate: Option<&PositionEstimate>) -> String {
+        estimate.map_or_else(
+            || format!("已阻止定位，{reason}"),
+            |estimate| {
+                format!(
+                    "已阻止定位，{reason}，惯性保位 @ {:.0}, {:.0}",
+                    estimate.world.x, estimate.world.y
+                )
+            },
+        )
+    }
+
+    fn with_inertial_suffix(summary: &str, estimate: &PositionEstimate) -> String {
+        format!(
+            "{summary}，惯性保位 @ {:.0}, {:.0}",
+            estimate.world.x, estimate.world.y
+        )
     }
 
     fn commit_success(
@@ -643,102 +786,57 @@ impl TemplateTrackerWorker {
     ) -> Option<PositionEstimate> {
         let estimate = self.apply_inertial_fallback(status);
         if estimate.is_some() {
-            status.message = format!("F1-P 标签探针未命中，小地图疑似被遮挡，{}", status.message);
+            status.message = format!(
+                "小地图圆环探针未命中，小地图疑似被遮挡，已阻止定位，{}",
+                status.message
+            );
             return estimate;
         }
 
         status.source = None;
         status.match_score = None;
-        status.message = "F1-P 标签探针未命中，小地图疑似被遮挡，等待界面恢复。".to_owned();
+        status.message =
+            "小地图圆环探针未命中，小地图疑似被遮挡，已阻止定位，等待界面恢复。".to_owned();
+        None
+    }
+
+    fn apply_probe_unavailable_fallback(
+        &mut self,
+        status: &mut TrackingStatus,
+    ) -> Option<PositionEstimate> {
+        let estimate = self.apply_inertial_fallback(status);
+        if estimate.is_some() {
+            status.message = format!("小地图圆环探针未启用，已阻止定位，{}", status.message);
+            return estimate;
+        }
+
+        status.source = None;
+        status.match_score = None;
+        status.message =
+            "小地图圆环探针未启用，已阻止定位；请先完成小地图圆形取区并启用探针。".to_owned();
         None
     }
 
     fn build_debug_snapshot(
         &self,
         captured: &GrayImage,
-        global_template: &GrayImage,
+        _global_template: &GrayImage,
         global_result: Option<&LocateResult>,
-        refine_crop: Option<&SearchCrop>,
+        _refine_crop: Option<&SearchCrop>,
         refine_result: Option<&LocateResult>,
         estimate: Option<&PositionEstimate>,
         probe_sample: Option<&MinimapPresenceSample>,
     ) -> TrackingDebugSnapshot {
-        let minimap = preview_image(
-            "Minimap",
-            captured,
-            &[DebugOverlay::Crosshair {
-                x: captured.width() / 2,
-                y: captured.height() / 2,
-            }],
+        let minimap_input = preview_image(
+            "Minimap Input",
+            &capture_template_annulus(
+                captured,
+                self.config.template.mask_inner_radius,
+                self.config.template.mask_outer_radius,
+            ),
+            &[],
             196,
         );
-
-        let mut global_overlays = Vec::new();
-        if let Some(global) = global_result {
-            global_overlays.push(DebugOverlay::Rect {
-                left: global.best_left,
-                top: global.best_top,
-                width: global_template.width(),
-                height: global_template.height(),
-            });
-        }
-        if let Some(position) = estimate {
-            let (x, y) = center_to_scaled(position.world, self.pyramid.global.scale);
-            global_overlays.push(DebugOverlay::Crosshair { x, y });
-        }
-        let global = preview_image(
-            "Coarse Match",
-            &self.pyramid.global.image,
-            &global_overlays,
-            196,
-        );
-        let global_mask = preview_mask_image("Global Mask", &self.masks.global, 196);
-        let global_heatmap = global_result.and_then(|result| {
-            let score_map = result.score_map.as_ref()?;
-            Some(preview_heatmap(
-                "Coarse Heatmap",
-                result.score_width,
-                result.score_height,
-                score_map,
-                Some((result.best_left, result.best_top)),
-                196,
-            ))
-        });
-
-        let refine = if let Some(crop) = refine_crop {
-            let mut overlays = Vec::new();
-            if let Some(result) = refine_result {
-                overlays.push(DebugOverlay::Rect {
-                    left: result.best_left.saturating_sub(crop.origin_x),
-                    top: result.best_top.saturating_sub(crop.origin_y),
-                    width: self.masks.local.width(),
-                    height: self.masks.local.height(),
-                });
-            }
-            if let Some(position) = estimate {
-                let x = (position.world.x as u32 / self.pyramid.local.scale.max(1))
-                    .saturating_sub(crop.origin_x);
-                let y = (position.world.y as u32 / self.pyramid.local.scale.max(1))
-                    .saturating_sub(crop.origin_y);
-                overlays.push(DebugOverlay::Crosshair { x, y });
-            }
-
-            preview_image("Refine / Local", &crop.image, &overlays, 196)
-        } else {
-            preview_image("Refine / Local", &self.pyramid.local.image, &[], 196)
-        };
-        let local_mask = preview_mask_image("Local Mask", &self.masks.local, 196);
-        let refine_heatmap = refine_result.and_then(|result| {
-            let score_map = result.score_map.as_ref()?;
-            Some(preview_heatmap(
-                "Refine Heatmap",
-                result.score_width,
-                result.score_height,
-                score_map,
-                Some((result.best_left, result.best_top)),
-                196,
-            ))
-        });
 
         let mut fields = vec![
             DebugField::new("阶段", self.state.stage.to_string()),
@@ -785,17 +883,7 @@ impl TemplateTrackerWorker {
             fields.extend(detector.debug_fields(sample));
         }
 
-        let mut images = vec![
-            minimap,
-            global_mask,
-            global_heatmap
-                .unwrap_or_else(|| preview_mask_image("Coarse Heatmap", &self.masks.global, 196)),
-            global,
-            local_mask,
-            refine_heatmap
-                .unwrap_or_else(|| preview_mask_image("Refine Heatmap", &self.masks.local, 196)),
-            refine,
-        ];
+        let mut images = vec![minimap_input];
         if let (Some(detector), Some(sample)) = (self.presence_detector.as_ref(), probe_sample) {
             images.extend(detector.debug_images(sample));
         }
@@ -811,6 +899,7 @@ impl TemplateTrackerWorker {
 
     fn build_probe_miss_debug_snapshot(
         &self,
+        captured: Option<&GrayImage>,
         sample: &MinimapPresenceSample,
         estimate: Option<&PositionEstimate>,
     ) -> TrackingDebugSnapshot {
@@ -834,6 +923,18 @@ impl TemplateTrackerWorker {
             ),
         ];
         let mut images = Vec::new();
+        if let Some(captured) = captured {
+            images.push(preview_image(
+                "Minimap Input",
+                &capture_template_annulus(
+                    captured,
+                    self.config.template.mask_inner_radius,
+                    self.config.template.mask_outer_radius,
+                ),
+                &[],
+                196,
+            ));
+        }
 
         if let Some(detector) = self.presence_detector.as_ref() {
             fields.extend(detector.debug_fields(sample));

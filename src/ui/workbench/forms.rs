@@ -504,7 +504,6 @@ impl SelectItem for DeviceIndexPickerItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PipCapturePickerTarget {
     Minimap,
-    MinimapPresenceProbe,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -737,11 +736,7 @@ impl ConfigDraft {
                     height: parse_input_value(&form.minimap_height, "minimap.height", cx)?,
                 },
                 minimap_presence_probe: crate::config::MinimapPresenceProbeConfig {
-                    enabled: parse_bool_input_value(
-                        &form.minimap_presence_probe_enabled,
-                        "minimap_presence_probe.enabled",
-                        cx,
-                    )?,
+                    enabled: true,
                     top: parse_input_value(
                         &form.minimap_presence_probe_top,
                         "minimap_presence_probe.top",
