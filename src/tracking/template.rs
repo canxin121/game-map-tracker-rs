@@ -22,10 +22,10 @@ use crate::{
         runtime::{TrackingStatus, TrackingTick, TrackingWorker},
         vision::{
             LocalCandidateDecision, MapPyramid, MaskSet, MatchCandidate, SearchCrop, SearchStage,
-            TrackerState, build_debug_snapshot, build_mask, build_match_representation,
-            capture_template_annulus, center_to_scaled, coarse_global_downscale,
-            crop_search_region, local_candidate_decision, preview_image, scaled_dimension,
-            search_region_around_center,
+            TrackerState, build_debug_snapshot, build_inner_square_mask,
+            build_match_representation, capture_template_inner_square, center_to_scaled,
+            coarse_global_downscale, crop_search_region, local_candidate_decision, preview_image,
+            scaled_template_dimension, search_region_around_center,
         },
     },
 };
@@ -829,7 +829,7 @@ impl TemplateTrackerWorker {
     ) -> TrackingDebugSnapshot {
         let minimap_input = preview_image(
             "Minimap Input",
-            &capture_template_annulus(
+            &capture_template_inner_square(
                 captured,
                 self.config.template.mask_inner_radius,
                 self.config.template.mask_outer_radius,
@@ -926,7 +926,7 @@ impl TemplateTrackerWorker {
         if let Some(captured) = captured {
             images.push(preview_image(
                 "Minimap Input",
-                &capture_template_annulus(
+                &capture_template_inner_square(
                     captured,
                     self.config.template.mask_inner_radius,
                     self.config.template.mask_outer_radius,
@@ -1004,7 +1004,7 @@ fn prepare_capture_templates(
     config: &AppConfig,
     pyramid: &MapPyramid,
 ) -> (GrayImage, GrayImage, GrayImage) {
-    let square = capture_template_annulus(
+    let square = capture_template_inner_square(
         captured,
         config.template.mask_inner_radius,
         config.template.mask_outer_radius,
@@ -1024,12 +1024,12 @@ fn prepare_capture_template(
     mask_inner_radius: f32,
     mask_outer_radius: f32,
 ) -> GrayImage {
-    let square = capture_template_annulus(captured, mask_inner_radius, mask_outer_radius);
+    let square = capture_template_inner_square(captured, mask_inner_radius, mask_outer_radius);
     prepare_square_template(&square, view_size, scale)
 }
 
 fn prepare_square_template(square: &GrayImage, view_size: u32, scale: u32) -> GrayImage {
-    let template_size = scaled_dimension(view_size.max(1), scale.max(1));
+    let template_size = scaled_template_dimension(view_size.max(1), scale.max(1));
     let resized = if square.width() == template_size && square.height() == template_size {
         square.clone()
     } else {
@@ -1047,24 +1047,24 @@ fn build_template_masks(config: &AppConfig) -> MaskSet {
     let local_scale = config.template.local_downscale.max(1);
     let global_scale = config.template.global_downscale.max(local_scale);
     let coarse_scale = coarse_global_downscale(config);
-    let local_size = scaled_dimension(config.view_size.max(1), local_scale);
-    let global_size = scaled_dimension(config.view_size.max(1), global_scale);
-    let coarse_size = scaled_dimension(config.view_size.max(1), coarse_scale);
+    let local_size = scaled_template_dimension(config.view_size.max(1), local_scale);
+    let global_size = scaled_template_dimension(config.view_size.max(1), global_scale);
+    let coarse_size = scaled_template_dimension(config.view_size.max(1), coarse_scale);
 
     MaskSet {
-        local: build_mask(
+        local: build_inner_square_mask(
             local_size,
             local_size,
             config.template.mask_inner_radius,
             config.template.mask_outer_radius,
         ),
-        global: build_mask(
+        global: build_inner_square_mask(
             global_size,
             global_size,
             config.template.mask_inner_radius,
             config.template.mask_outer_radius,
         ),
-        coarse: build_mask(
+        coarse: build_inner_square_mask(
             coarse_size,
             coarse_size,
             config.template.mask_inner_radius,
@@ -2469,15 +2469,15 @@ mod tests {
 
         assert_eq!(
             local.width(),
-            scaled_dimension(fixture.config.view_size, fixture.pyramid.local.scale)
+            scaled_template_dimension(fixture.config.view_size, fixture.pyramid.local.scale)
         );
         assert_eq!(
             global.width(),
-            scaled_dimension(fixture.config.view_size, fixture.pyramid.global.scale)
+            scaled_template_dimension(fixture.config.view_size, fixture.pyramid.global.scale)
         );
         assert_eq!(
             coarse.width(),
-            scaled_dimension(fixture.config.view_size, fixture.pyramid.coarse.scale)
+            scaled_template_dimension(fixture.config.view_size, fixture.pyramid.coarse.scale)
         );
         assert_eq!(local.width(), fixture.masks.local.width());
         assert_eq!(global.width(), fixture.masks.global.width());

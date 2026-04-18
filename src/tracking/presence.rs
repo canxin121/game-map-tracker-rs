@@ -32,13 +32,13 @@ use crate::{
     },
 };
 
-#[cfg(all(test, feature = "ai-burn"))]
-use crate::tracking::burn_support::{
-    available_burn_backend_preferences, available_burn_device_descriptors,
-};
 #[cfg(feature = "ai-burn")]
 use crate::tracking::burn_support::{
     BurnDeviceConfig, BurnDeviceSelection, burn_device_label, select_burn_device,
+};
+#[cfg(all(test, feature = "ai-burn"))]
+use crate::tracking::burn_support::{
+    available_burn_backend_preferences, available_burn_device_descriptors,
 };
 
 const MAX_CAPTURE_SIDE: u32 = 384;
@@ -188,8 +188,11 @@ impl MinimapPresenceDetector {
 
     pub fn sample(&self) -> Result<MinimapPresenceSample> {
         let current_preview = prepare_probe_capture(self.capture.capture_rgba()?);
-        let (current_signature, scores) =
-            analyze_probe_input_with_backend(&self.backend, &current_preview, self.arrow_hole_ratio)?;
+        let (current_signature, scores) = analyze_probe_input_with_backend(
+            &self.backend,
+            &current_preview,
+            self.arrow_hole_ratio,
+        )?;
 
         Ok(MinimapPresenceSample {
             present: scores.final_score >= self.threshold,
@@ -418,8 +421,11 @@ fn score_circle_candidate(
     let border_score =
         (mean_strength * 0.60 + lower_bound_score(darkness, 4.0, 18.0) * 0.40).clamp(0.0, 1.0);
     let circularity_score = (arc_coverage * 0.70 + quadrant_coverage * 0.30).clamp(0.0, 1.0);
-    let circularity_support =
-        lower_bound_score(circularity_score, CIRCULARITY_SUPPORT_MIN, CIRCULARITY_SUPPORT_IDEAL);
+    let circularity_support = lower_bound_score(
+        circularity_score,
+        CIRCULARITY_SUPPORT_MIN,
+        CIRCULARITY_SUPPORT_IDEAL,
+    );
     let contrast_score = lower_bound_score(border_contrast, 10.0, 28.0);
     let radius_score = preferred_range_score(radius_ratio, 0.78, 0.90, 0.95);
     let raw_score = (circularity_score * 0.38
@@ -529,8 +535,11 @@ fn score_probe_signature(signature: &ProbeSignature) -> ProbeScoreBreakdown {
         .clamp(0.0, 1.0);
     let circularity_score =
         (signature.arc_coverage * 0.70 + signature.quadrant_coverage * 0.30).clamp(0.0, 1.0);
-    let circularity_support =
-        lower_bound_score(circularity_score, CIRCULARITY_SUPPORT_MIN, CIRCULARITY_SUPPORT_IDEAL);
+    let circularity_support = lower_bound_score(
+        circularity_score,
+        CIRCULARITY_SUPPORT_MIN,
+        CIRCULARITY_SUPPORT_IDEAL,
+    );
     let contrast_score = lower_bound_score(signature.border_contrast, 10.0, 28.0);
     let radius_score = preferred_range_score(signature.radius_ratio, 0.78, 0.90, 0.95);
     let raw_score = (circularity_score * 0.38
@@ -1017,7 +1026,9 @@ fn load_test_probe_capture(name: &str, region: &CaptureRegion) -> RgbaImage {
 #[cfg(test)]
 fn list_test_image_names(prefix: &str) -> Vec<String> {
     let mut names = std::fs::read_dir(asset_test_root())
-        .unwrap_or_else(|error| panic!("failed to list test assets with prefix {prefix}: {error:#}"))
+        .unwrap_or_else(|error| {
+            panic!("failed to list test assets with prefix {prefix}: {error:#}")
+        })
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| entry.file_name().into_string().ok())
         .filter(|name| name.starts_with(prefix) && name.ends_with(".png"))
@@ -1066,8 +1077,9 @@ mod tests {
         );
         for name in names {
             let probe = load_test_probe_capture(&name, &region);
-            let ((_, signature, score), elapsed) =
-                benchmark_repeated(1, 5, || analyze_probe_capture_cpu(&probe, hole_ratio).unwrap());
+            let ((_, signature, score), elapsed) = benchmark_repeated(1, 5, || {
+                analyze_probe_capture_cpu(&probe, hole_ratio).unwrap()
+            });
             print_perf_per_op("presence/cpu", &format!("{name}_score"), 5, elapsed);
             println!(
                 "{name}: final={:.3} arc={:.3} border={:.3} circularity={:.3} contrast={:.3} radius={:.3}",
@@ -1121,8 +1133,9 @@ mod tests {
         );
         for name in names {
             let probe = load_test_probe_capture(&name, &region);
-            let ((_, signature, score), elapsed) =
-                benchmark_repeated(1, 5, || analyze_probe_capture_cpu(&probe, hole_ratio).unwrap());
+            let ((_, signature, score), elapsed) = benchmark_repeated(1, 5, || {
+                analyze_probe_capture_cpu(&probe, hole_ratio).unwrap()
+            });
             print_perf_per_op("presence/cpu", &format!("{name}_score"), 5, elapsed);
             println!(
                 "{name}: final={:.3} arc={:.3} border={:.3} circularity={:.3} contrast={:.3} radius={:.3}",

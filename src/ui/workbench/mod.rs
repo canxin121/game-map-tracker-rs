@@ -8,8 +8,7 @@ mod tracker_pip;
 
 use std::{
     collections::{HashMap, HashSet},
-    env,
-    fs,
+    env, fs,
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -1690,10 +1689,6 @@ impl TrackerWorkbench {
 
     pub(super) const fn is_test_case_capture_enabled(&self) -> bool {
         self.test_case_capture_enabled
-    }
-
-    pub(super) fn debug_log_entries(&self, limit: usize) -> Vec<logging::DebugLogEntry> {
-        logging::debug_log_snapshot(limit)
     }
 
     pub(super) fn current_position_label(&self) -> String {
@@ -3508,13 +3503,6 @@ impl TrackerWorkbench {
         } else {
             "测试样本捕获已关闭"
         });
-    }
-
-    pub(super) fn clear_runtime_logs(&mut self) {
-        logging::clear_debug_logs();
-        self.debug_log_revision = logging::debug_log_revision();
-        info!("cleared in-memory runtime logs");
-        self.status_text = "已清空运行日志。".into();
     }
 
     pub(super) fn select_group(
@@ -5620,16 +5608,19 @@ impl TrackerWorkbench {
             .unwrap_or_default();
 
         match handle.update(cx, |root, panel_window, cx| {
-            let Ok(panel) = root.view().clone().downcast::<TrackerPipCapturePanelWindow>() else {
+            let Ok(panel) = root
+                .view()
+                .clone()
+                .downcast::<TrackerPipCapturePanelWindow>()
+            else {
                 return None;
             };
             panel.update(cx, |panel, cx| {
                 panel.update_minimap_region(minimap_region.clone(), cx);
             });
             if pip_bounds.size.width > px(0.0) && pip_bounds.size.height > px(0.0) {
-                let next_bounds = self::TrackerWorkbench::tracker_pip_capture_panel_bounds_for(
-                    pip_bounds,
-                );
+                let next_bounds =
+                    self::TrackerWorkbench::tracker_pip_capture_panel_bounds_for(pip_bounds);
                 let _ = apply_window_bounds(panel_window, next_bounds);
             }
             panel_window.defer(cx, |panel_window, _| {
@@ -5686,11 +5677,7 @@ impl TrackerWorkbench {
         cx.displays()
             .into_iter()
             .find(|display| {
-                screen_bounds_contains(
-                    display.bounds(),
-                    f32::from(center.x),
-                    f32::from(center.y),
-                )
+                screen_bounds_contains(display.bounds(), f32::from(center.x), f32::from(center.y))
             })
             .map(|display| display.id())
             .or_else(|| cx.primary_display().map(|display| display.id()))

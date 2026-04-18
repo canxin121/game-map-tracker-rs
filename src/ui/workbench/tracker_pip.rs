@@ -5,7 +5,7 @@ use gpui::{
     Window, WindowControlArea, canvas, div, fill, point, prelude::FluentBuilder as _, px, size,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, Size, Sizable as _, select::SelectItem, tooltip::Tooltip,
+    ActiveTheme as _, Icon, Sizable as _, Size, select::SelectItem, tooltip::Tooltip,
 };
 
 use crate::{

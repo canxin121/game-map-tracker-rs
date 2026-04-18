@@ -2457,34 +2457,12 @@ fn settings_debug_page(
         .as_ref()
         .map(|snapshot| snapshot.fields.clone())
         .unwrap_or_default();
-    let log_entries = this.debug_log_entries(240);
-    let mut header_buttons = Vec::new();
-    if this.is_debug_mode_enabled() {
-        header_buttons.push(
-            toolbar_button_with_tooltip(
-                "debug-log-clear",
-                tokens,
-                "C",
-                "清空日志",
-                Some("清空当前内存中的运行日志缓冲。".into()),
-                ToolbarButtonTone::Neutral,
-                false,
-                cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.clear_runtime_logs();
-                    cx.notify();
-                }),
-            )
-            .into_any_element(),
-        );
-    }
-    let header_actions = (!header_buttons.is_empty())
-        .then(|| toolbar_cluster(header_buttons).into_any_element());
 
     settings_page_shell(
         "追踪调试",
         if this.is_debug_mode_enabled() {
             snapshot.as_ref().map_or_else(
-                || "调试模式已开启。这里会显示最近运行日志，以及当前 tracker 的 minimap、heatmap、refine 预览和状态字段。".to_owned(),
+                || "调试模式已开启。这里会显示当前 tracker 的 minimap、heatmap、refine 预览和状态字段。".to_owned(),
                 |snapshot| {
                     format!(
                         "调试模式已开启。引擎 {}，阶段 {}，帧序号 {}。",
@@ -2493,9 +2471,9 @@ fn settings_debug_page(
                 },
             )
         } else {
-            "调试模式关闭时，不会展示运行日志，也不会向 tracker 请求调试快照。".to_owned()
+            "调试模式关闭时，不会展示调试图或状态字段，也不会向 tracker 请求调试快照。".to_owned()
         },
-        header_actions,
+        None,
         vec![
             editable_config_section(
                 "调试模式",
@@ -2514,9 +2492,9 @@ fn settings_debug_page(
                     body_text(
                         tokens,
                         if this.is_debug_mode_enabled() {
-                            "开启后会显示最近运行日志；当当前页面停留在“调试”页时，tracker 还会额外产出调试快照。"
+                            "开启后，当当前页面停留在“调试”页时，tracker 会额外产出调试快照，并在这里显示调试图和状态字段。"
                         } else {
-                            "关闭后调试页只保留开关，不展示日志或调试快照。"
+                            "关闭后调试页只保留开关，不展示调试快照。"
                         },
                     )
                     .into_any_element(),
@@ -2609,50 +2587,6 @@ fn settings_debug_page(
                 tokens,
             )
             .into_any_element(),
-            editable_config_section(
-                "运行日志",
-                vec![
-                    body_text(
-                        tokens,
-                        if this.is_debug_mode_enabled() {
-                            format!("当前缓冲中展示最近 {} 条日志，按时间倒序排列。", log_entries.len())
-                        } else {
-                            "开启调试模式后，这里会显示基于 tracing 收集的运行日志。".to_owned()
-                        },
-                    )
-                    .into_any_element(),
-                    if this.is_debug_mode_enabled() {
-                        div()
-                            .max_h(px(420.0))
-                            .overflow_y_scrollbar()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .children(
-                                if log_entries.is_empty() {
-                                    vec![empty_list_state(
-                                        tokens,
-                                        "当前还没有可显示的运行日志。",
-                                    )
-                                    .into_any_element()]
-                                } else {
-                                    log_entries
-                                        .into_iter()
-                                        .rev()
-                                        .map(|entry| {
-                                            debug_log_entry_card(entry, tokens).into_any_element()
-                                        })
-                                        .collect::<Vec<_>>()
-                                },
-                            )
-                            .into_any_element()
-                    } else {
-                        empty_list_state(tokens, "调试模式关闭。").into_any_element()
-                    },
-                ],
-                tokens,
-            )
-            .into_any_element(),
             if this.is_debug_mode_enabled() {
                 div()
                     .flex()
@@ -2696,105 +2630,6 @@ fn settings_debug_page(
         ],
         tokens,
     )
-}
-
-fn debug_log_entry_card(
-    entry: crate::logging::DebugLogEntry,
-    tokens: WorkbenchThemeTokens,
-) -> impl IntoElement {
-    let level_background = match entry.level.as_str() {
-        "ERROR" => tokens.toolbar_button_danger_bg,
-        "WARN" => tokens.toolbar_button_primary_bg,
-        "INFO" => tokens.toolbar_button_bg,
-        _ => tokens.panel_alt_bg,
-    };
-    let location = match (entry.file.as_deref(), entry.line) {
-        (Some(file), Some(line)) => format!("{file}:{line}"),
-        (Some(file), None) => file.to_owned(),
-        _ => "-".to_owned(),
-    };
-    let meta_line = format!(
-        "{}  {}  {}  {}",
-        format_elapsed_label(entry.elapsed_millis),
-        entry.target,
-        entry.thread_name,
-        location
-    );
-    let detail_line = if entry.fields.is_empty() {
-        entry
-            .span_path
-            .map(|span| format!("span={span}"))
-            .unwrap_or_else(|| "无附加字段".to_owned())
-    } else if let Some(span_path) = entry.span_path {
-        format!("{} · span={span_path}", entry.fields.join(" · "))
-    } else {
-        entry.fields.join(" · ")
-    };
-
-    div()
-        .rounded_lg()
-        .bg(tokens.panel_sunken_bg)
-        .border_1()
-        .border_color(tokens.border)
-        .p_3()
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .child(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_full()
-                                .bg(level_background)
-                                .border_1()
-                                .border_color(tokens.border_strong)
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(tokens.app_fg)
-                                        .child(entry.level),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_sm()
-                                .line_height(px(20.0))
-                                .text_color(tokens.app_fg)
-                                .child(entry.message),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .line_height(px(18.0))
-                        .text_color(tokens.text_muted)
-                        .child(meta_line),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .line_height(px(18.0))
-                        .text_color(tokens.text_soft)
-                        .child(detail_line),
-                ),
-        )
-}
-
-fn format_elapsed_label(elapsed_millis: u128) -> String {
-    let minutes = elapsed_millis / 60_000;
-    let seconds = (elapsed_millis % 60_000) / 1_000;
-    let millis = elapsed_millis % 1_000;
-    format!("+{minutes:02}:{seconds:02}.{millis:03}")
 }
 
 fn settings_resources_page(

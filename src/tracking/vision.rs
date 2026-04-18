@@ -19,6 +19,8 @@ use crate::{
     tracking::debug::{DebugField, DebugImage, DebugImageKind, TrackingDebugSnapshot},
 };
 
+const INSCRIBED_SQUARE_SCALE: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
 pub enum SearchStage {
     #[strum(to_string = "GlobalRelocate")]
@@ -259,6 +261,31 @@ pub fn build_mask(width: u32, height: u32, inner_radius: f32, outer_radius: f32)
     })
 }
 
+#[must_use]
+pub fn inscribed_square_dimension(dimension: u32) -> u32 {
+    ((dimension.max(1) as f32) * INSCRIBED_SQUARE_SCALE)
+        .round()
+        .max(1.0) as u32
+}
+
+#[must_use]
+pub fn scaled_template_dimension(view_size: u32, scale: u32) -> u32 {
+    inscribed_square_dimension(scaled_dimension(view_size.max(1), scale.max(1)))
+}
+
+pub fn build_inner_square_mask(
+    width: u32,
+    height: u32,
+    inner_radius: f32,
+    outer_radius: f32,
+) -> GrayImage {
+    let normalized_inner = normalized_inner_radius(inner_radius, outer_radius);
+    ImageBuffer::from_fn(width, height, |x, y| {
+        let enabled = inscribed_square_circle_ratio(width, height, x, y) >= normalized_inner;
+        Luma([if enabled { 255 } else { 0 }])
+    })
+}
+
 pub fn capture_template_annulus(
     captured: &GrayImage,
     inner_radius: f32,
@@ -271,6 +298,22 @@ pub fn capture_template_annulus(
     let offset_y = captured.height().saturating_sub(diameter_px) / 2;
     let square = crop_imm(captured, offset_x, offset_y, diameter_px, diameter_px).to_image();
     soften_capture_to_annulus(&square, inner_radius, outer_radius)
+}
+
+pub fn capture_template_inner_square(
+    captured: &GrayImage,
+    inner_radius: f32,
+    outer_radius: f32,
+) -> GrayImage {
+    let diameter_px = ((captured.width().min(captured.height()) as f32) * outer_radius)
+        .round()
+        .max(1.0) as u32;
+    let square_side =
+        inscribed_square_dimension(diameter_px).min(captured.width().min(captured.height()).max(1));
+    let offset_x = captured.width().saturating_sub(square_side) / 2;
+    let offset_y = captured.height().saturating_sub(square_side) / 2;
+    let square = crop_imm(captured, offset_x, offset_y, square_side, square_side).to_image();
+    soften_capture_center_hole(&square, normalized_inner_radius(inner_radius, outer_radius))
 }
 
 fn soften_capture_to_annulus(image: &GrayImage, inner_radius: f32, outer_radius: f32) -> GrayImage {
@@ -319,6 +362,50 @@ fn soften_capture_to_annulus(image: &GrayImage, inner_radius: f32, outer_radius:
     })
 }
 
+fn soften_capture_center_hole(image: &GrayImage, inner_radius: f32) -> GrayImage {
+    let feather = annulus_feather(image.width(), image.height());
+    let valid_inner = (inner_radius + feather).clamp(0.0, 1.0);
+    let mut ring_sum = 0u64;
+    let mut ring_count = 0u64;
+    let mut weighted_sum = 0.0f32;
+    let mut weighted_count = 0.0f32;
+    let mut fallback_sum = 0u64;
+
+    for (x, y, pixel) in image.enumerate_pixels() {
+        let distance = inscribed_square_circle_ratio(image.width(), image.height(), x, y);
+        let alpha = inner_hole_alpha(distance, inner_radius, feather);
+        if distance >= valid_inner {
+            ring_sum += u64::from(pixel.0[0]);
+            ring_count += 1;
+        }
+        weighted_sum += f32::from(pixel.0[0]) * alpha;
+        weighted_count += alpha;
+        fallback_sum += u64::from(pixel.0[0]);
+    }
+
+    let neutral = if ring_count > 0 {
+        (ring_sum / ring_count) as u8
+    } else if weighted_count > 1e-3 {
+        (weighted_sum / weighted_count).round().clamp(0.0, 255.0) as u8
+    } else {
+        let pixel_count = u64::from(image.width().max(1)) * u64::from(image.height().max(1));
+        (fallback_sum / pixel_count.max(1)) as u8
+    };
+
+    ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
+        let source = f32::from(image.get_pixel(x, y).0[0]);
+        let alpha = inner_hole_alpha(
+            inscribed_square_circle_ratio(image.width(), image.height(), x, y),
+            inner_radius,
+            feather,
+        );
+        let value = (f32::from(neutral) * (1.0 - alpha) + source * alpha)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        Luma([value])
+    })
+}
+
 fn annulus_alpha(distance: f32, inner_radius: f32, outer_radius: f32, feather: f32) -> f32 {
     let inner = inner_radius.clamp(0.0, 1.0);
     let outer = outer_radius.clamp(inner + f32::EPSILON, 1.5);
@@ -337,6 +424,18 @@ fn annulus_alpha(distance: f32, inner_radius: f32, outer_radius: f32, feather: f
     (inner_alpha * outer_alpha).clamp(0.0, 1.0)
 }
 
+fn inner_hole_alpha(distance: f32, inner_radius: f32, feather: f32) -> f32 {
+    let inner = inner_radius.clamp(0.0, 1.0);
+    if inner <= 0.0 {
+        return 1.0;
+    }
+    if inner >= 1.0 {
+        return 0.0;
+    }
+
+    smoothstep(inner, (inner + feather).min(1.0), distance)
+}
+
 fn annulus_feather(width: u32, height: u32) -> f32 {
     let diameter = width.min(height).max(1) as f32;
     (8.0 / diameter).clamp(0.02, 0.06)
@@ -350,6 +449,18 @@ fn annulus_distance(width: u32, height: u32, x: u32, y: u32) -> f32 {
     let dx = (x as f32 - center_x) / radius_x.max(1.0);
     let dy = (y as f32 - center_y) / radius_y.max(1.0);
     (dx * dx + dy * dy).sqrt()
+}
+
+fn inscribed_square_circle_ratio(width: u32, height: u32, x: u32, y: u32) -> f32 {
+    annulus_distance(width, height, x, y) * INSCRIBED_SQUARE_SCALE
+}
+
+fn normalized_inner_radius(inner_radius: f32, outer_radius: f32) -> f32 {
+    if outer_radius <= f32::EPSILON {
+        0.0
+    } else {
+        (inner_radius / outer_radius).clamp(0.0, 1.0)
+    }
 }
 
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
@@ -749,6 +860,58 @@ mod tests {
             (i32::from(ring) - 122).abs() <= 10,
             "ring texture should stay intact, got {ring}"
         );
+    }
+
+    #[test]
+    fn capture_template_inner_square_preserves_real_corners_and_neutralizes_center() {
+        let image = GrayImage::from_fn(121, 121, |x, y| {
+            let distance = annulus_distance(121, 121, x, y);
+            let value = if distance <= 0.16 {
+                245
+            } else if distance <= 1.0 {
+                ((x * 3 + y * 5) % 251) as u8
+            } else {
+                7
+            };
+            Luma([value])
+        });
+
+        let square = capture_template_inner_square(&image, 0.16, 1.0);
+        let side = inscribed_square_dimension(121);
+        let offset = (121 - side) / 2;
+        let raw_square = crop_imm(&image, offset, offset, side, side).to_image();
+        let expected_corner = raw_square.get_pixel(0, 0).0[0];
+        let outer_sample = raw_square.get_pixel(side / 2, 6).0[0];
+        let center = square.get_pixel(square.width() / 2, square.height() / 2).0[0];
+        let (retained_sum, retained_count) = raw_square
+            .enumerate_pixels()
+            .filter(|(x, y, _)| inscribed_square_circle_ratio(side, side, *x, *y) >= 0.24)
+            .fold((0u64, 0u64), |(sum, count), (_, _, pixel)| {
+                (sum + u64::from(pixel.0[0]), count + 1)
+            });
+        let retained_mean = retained_sum as f32 / retained_count.max(1) as f32;
+
+        assert_eq!(square.width(), side);
+        assert_eq!(square.height(), side);
+        assert_eq!(square.get_pixel(0, 0).0[0], expected_corner);
+        assert_eq!(square.get_pixel(side / 2, 6).0[0], outer_sample);
+        assert!(
+            (f32::from(center) - retained_mean).abs() <= 18.0,
+            "center should be neutralized toward the retained map texture, got center {center} vs mean {retained_mean:.1}"
+        );
+        assert!(
+            (i32::from(center) - 245).abs() >= 40,
+            "center should not keep the original hole highlight, got {center}"
+        );
+    }
+
+    #[test]
+    fn inner_square_mask_keeps_corners_and_cuts_center_hole() {
+        let mask = build_inner_square_mask(71, 71, 0.22, 1.0);
+
+        assert_eq!(mask.get_pixel(0, 0).0[0], 255);
+        assert_eq!(mask.get_pixel(mask.width() / 2, mask.height() / 2).0[0], 0);
+        assert_eq!(mask.get_pixel(mask.width() / 2, 0).0[0], 255);
     }
 
     #[test]

@@ -43,9 +43,9 @@ use crate::{
         vision::{
             LocalCandidateDecision, MapPyramid, MaskSet, MatchCandidate, SearchCrop, SearchStage,
             TrackerState, build_debug_snapshot, build_mask, build_match_representation,
-            capture_template_annulus, center_to_scaled, coarse_global_downscale,
-            crop_search_region, local_candidate_decision, mask_as_unit_vec, preview_image,
-            scaled_dimension, search_region_around_center,
+            capture_template_annulus, capture_template_inner_square, center_to_scaled,
+            coarse_global_downscale, crop_search_region, local_candidate_decision,
+            mask_as_unit_vec, preview_image, scaled_dimension, search_region_around_center,
         },
     },
 };
@@ -1967,7 +1967,7 @@ impl BurnTrackerInner {
     ) -> TrackingDebugSnapshot {
         let minimap_input = preview_image(
             "Minimap Input",
-            &capture_template_annulus(
+            &capture_template_inner_square(
                 captured,
                 self.config.template.mask_inner_radius,
                 self.config.template.mask_outer_radius,
@@ -2050,7 +2050,7 @@ impl BurnTrackerInner {
         if let Some(captured) = captured {
             images.push(preview_image(
                 "Minimap Input",
-                &capture_template_annulus(
+                &capture_template_inner_square(
                     captured,
                     self.config.template.mask_inner_radius,
                     self.config.template.mask_outer_radius,
