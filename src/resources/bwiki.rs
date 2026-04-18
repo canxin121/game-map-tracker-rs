@@ -20,6 +20,7 @@ use image::{
 use parking_lot::Mutex;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error, info, warn};
 use ureq::Agent;
 
 use crate::domain::geometry::{MapDimensions, WorldPoint};
@@ -334,6 +335,7 @@ impl BwikiResourceManager {
     pub fn new(cache_root: impl Into<PathBuf>) -> Result<Self> {
         let cache = BwikiCachePaths::new(cache_root);
         cache.ensure_directories()?;
+        info!(cache_root = %cache.root.display(), "initializing BWiki resource manager");
 
         let (job_tx, job_rx) = unbounded();
         let inner = Arc::new(BwikiManagerInner {
@@ -352,6 +354,7 @@ impl BwikiResourceManager {
                 .map_err(|error| anyhow!("failed to spawn BWiki cache worker: {error}"))?;
         }
 
+        info!(cache_root = %inner.cache.root.display(), worker_count = 4, "BWiki resource manager ready");
         Ok(Self { inner })
     }
 
@@ -390,11 +393,17 @@ impl BwikiResourceManager {
         let cache_path = dataset_cache_path(&self.inner.cache);
         let stale = cache_is_stale(&cache_path, DATASET_CACHE_TTL);
         if self.dataset_snapshot().is_none() || stale {
+            debug!(
+                cache_path = %cache_path.display(),
+                stale,
+                "queueing BWiki dataset refresh"
+            );
             self.enqueue(BwikiJob::RefreshDataset);
         }
     }
 
     pub fn refresh_dataset(&self) {
+        info!("explicitly refreshing BWiki dataset");
         self.enqueue(BwikiJob::RefreshDataset);
     }
 
@@ -471,9 +480,11 @@ impl BwikiResourceManager {
         if state.queued_jobs.contains(&key) {
             return;
         }
-        state.queued_jobs.insert(key);
+        state.queued_jobs.insert(key.clone());
+        debug!(job = ?key, "queued BWiki background job");
         if let Err(error) = self.inner.job_tx.send(job) {
             state.last_error = Some(format!("failed to queue BWiki job: {error}"));
+            error!(job = ?key, error = %error, "failed to queue BWiki background job");
         }
     }
 }
@@ -753,6 +764,7 @@ fn tracking_icon_luma(r: u8, g: u8, b: u8) -> u8 {
 fn run_bwiki_worker(inner: Arc<BwikiManagerInner>, job_rx: Receiver<BwikiJob>) {
     while let Ok(job) = job_rx.recv() {
         let key = job.key();
+        debug!(job = ?key, "running BWiki background job");
         let result = match job {
             BwikiJob::RefreshDataset => refresh_dataset_job(&inner),
             BwikiJob::DownloadIcon {
@@ -767,12 +779,18 @@ fn run_bwiki_worker(inner: Arc<BwikiManagerInner>, job_rx: Receiver<BwikiJob>) {
         match result {
             Ok(dataset) => {
                 if let Some(dataset) = dataset {
+                    info!(
+                        type_count = dataset.types.len(),
+                        point_count = dataset.total_point_count(),
+                        "BWiki dataset refresh completed"
+                    );
                     state.dataset = Some(Arc::new(dataset));
                 }
                 state.last_error = None;
                 inner.version.fetch_add(1, Ordering::SeqCst);
             }
             Err(error) => {
+                warn!(job = ?key, error = %error, "BWiki background job failed");
                 state.last_error = Some(format!("{error:#}"));
                 inner.version.fetch_add(1, Ordering::SeqCst);
             }
@@ -781,6 +799,7 @@ fn run_bwiki_worker(inner: Arc<BwikiManagerInner>, job_rx: Receiver<BwikiJob>) {
 }
 
 fn refresh_dataset_job(inner: &BwikiManagerInner) -> Result<Option<BwikiDataset>> {
+    info!("refreshing remote BWiki dataset");
     let dataset = fetch_remote_dataset()?;
     let cache_path = dataset_cache_path(&inner.cache);
     if let Some(parent) = cache_path.parent() {
@@ -799,6 +818,12 @@ fn refresh_dataset_job(inner: &BwikiManagerInner) -> Result<Option<BwikiDataset>
             cache_path.display()
         )
     })?;
+    info!(
+        cache_path = %cache_path.display(),
+        type_count = dataset.types.len(),
+        point_count = dataset.total_point_count(),
+        "persisted refreshed BWiki dataset"
+    );
     Ok(Some(dataset))
 }
 
@@ -984,6 +1009,7 @@ fn download_tile(cache: &BwikiCachePaths, zoom: u8, x: i32, y: i32) -> Result<Pa
     if target.is_file() {
         return Ok(target);
     }
+    debug!(zoom, x, y, target = %target.display(), "downloading BWiki tile");
 
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).with_context(|| {
@@ -1015,6 +1041,7 @@ fn download_tile(cache: &BwikiCachePaths, zoom: u8, x: i32, y: i32) -> Result<Pa
             });
         }
     }
+    debug!(zoom, x, y, target = %target.display(), "downloaded BWiki tile");
     Ok(target)
 }
 
@@ -1027,6 +1054,12 @@ fn download_icon(cache: &BwikiCachePaths, mark_type: u32, icon_url: &str) -> Res
     if target.is_file() {
         return Ok(target);
     }
+    debug!(
+        mark_type,
+        icon_url,
+        target = %target.display(),
+        "downloading BWiki icon"
+    );
 
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).with_context(|| {
@@ -1037,6 +1070,7 @@ fn download_icon(cache: &BwikiCachePaths, mark_type: u32, icon_url: &str) -> Res
     let bytes = download_binary(icon_url)?;
     fs::write(&target, bytes)
         .with_context(|| format!("failed to write icon cache {}", target.display()))?;
+    debug!(mark_type, target = %target.display(), "downloaded BWiki icon");
     Ok(target)
 }
 

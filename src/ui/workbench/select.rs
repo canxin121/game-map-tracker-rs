@@ -81,6 +81,7 @@ struct ActionMenuOptions {
     size: Size,
     icon: Option<Icon>,
     label: Option<SharedString>,
+    center_label: bool,
     search_placeholder: Option<SharedString>,
     empty_message: Option<SharedString>,
     menu_width: Length,
@@ -94,6 +95,7 @@ impl Default for ActionMenuOptions {
             size: Size::default(),
             icon: None,
             label: None,
+            center_label: false,
             search_placeholder: None,
             empty_message: None,
             menu_width: Length::Auto,
@@ -1358,6 +1360,16 @@ where
         let is_focused = self.focus_handle.is_focused(window);
         let outline_visible = self.open || (is_focused && !self.options.disabled);
         let popup_radius = cx.theme().radius.min(px(8.0));
+        let label_color = if self.options.disabled {
+            cx.theme().muted_foreground
+        } else {
+            cx.theme().foreground
+        };
+        let icon_color = if self.options.disabled {
+            cx.theme().muted_foreground.opacity(0.5)
+        } else {
+            cx.theme().muted_foreground
+        };
         let query = self.normalized_query(cx);
         let filtered_items = self.filtered_items(&query);
         let filtered_count = filtered_items.len();
@@ -1445,32 +1457,69 @@ where
                             .hover(|this| this.bg(cx.theme().secondary.opacity(0.82)))
                             .on_click(cx.listener(Self::toggle_menu))
                     })
-                    .child(
+                    .child(if self.options.center_label {
                         div()
                             .w_full()
                             .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .truncate()
-                            .text_color(if self.options.disabled {
-                                cx.theme().muted_foreground
-                            } else {
-                                cx.theme().foreground
-                            })
-                            .child(self.effective_label()),
-                    )
-                    .child(
-                        self.options
-                            .icon
-                            .clone()
-                            .unwrap_or_else(|| Icon::new(IconName::ChevronDown))
-                            .xsmall()
-                            .text_color(if self.options.disabled {
-                                cx.theme().muted_foreground.opacity(0.5)
-                            } else {
-                                cx.theme().muted_foreground
-                            }),
-                    )
+                            .flex()
+                            .items_center()
+                            .child(div().w(px(12.0)).flex_shrink_0())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .justify_center()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .truncate()
+                                    .text_color(label_color)
+                                    .child(self.effective_label()),
+                            )
+                            .child(
+                                div()
+                                    .w(px(12.0))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .justify_center()
+                                    .child(
+                                        self.options
+                                            .icon
+                                            .clone()
+                                            .unwrap_or_else(|| Icon::new(IconName::ChevronDown))
+                                            .xsmall()
+                                            .text_color(icon_color),
+                                    ),
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .truncate()
+                                    .text_color(label_color)
+                                    .child(self.effective_label()),
+                            )
+                            .child(
+                                self.options
+                                    .icon
+                                    .clone()
+                                    .unwrap_or_else(|| Icon::new(IconName::ChevronDown))
+                                    .xsmall()
+                                    .text_color(icon_color),
+                            )
+                            .into_any_element()
+                    })
                     .child(
                         canvas(
                             {
@@ -1712,6 +1761,11 @@ where
 
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.options.label = Some(label.into());
+        self
+    }
+
+    pub fn center_label(mut self) -> Self {
+        self.options.center_label = true;
         self
     }
 

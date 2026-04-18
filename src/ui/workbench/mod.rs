@@ -21,6 +21,7 @@ use gpui::{
     WindowOptions,
 };
 use gpui_component::{Root, input::InputEvent};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     config::{AiDevicePreference, AppConfig, CONFIG_FILE_NAME, save_config},
@@ -31,6 +32,7 @@ use crate::{
         theme::ThemePreference,
         tracker::{PositionEstimate, TrackerEngineKind, TrackerLifecycle, TrackingSource},
     },
+    logging,
     resources::{
         AssetManifest, BwikiPointRecord, BwikiResourceManager, BwikiTypeDefinition,
         RouteImportReport, RouteRepository, UiPreferences, UiPreferencesRepository,
@@ -360,6 +362,7 @@ pub struct TrackerWorkbench {
     pub(super) theme_preference: ThemePreference,
     pub(super) auto_focus_enabled: bool,
     pub(super) tracker_point_popup_enabled: bool,
+    pub(super) debug_mode_enabled: bool,
     tracker_pending_action: Option<TrackerPendingAction>,
     tracker_status_text: SharedString,
     route_import_status: AsyncTaskStatus,
@@ -417,6 +420,7 @@ pub struct TrackerWorkbench {
     tracker_pip_window_bounds: Option<WindowBounds>,
     tracker_pip_always_on_top: bool,
     tracker_pip_pending_open: bool,
+    debug_log_revision: u64,
     pub(super) ui_preferences_path: PathBuf,
     pub(super) bwiki_resources: BwikiResourceManager,
     pub(super) bwiki_tile_cache: gpui::Entity<TileImageCache>,
@@ -513,24 +517,45 @@ impl TrackerWorkbench {
         let bwiki_tile_cache =
             TileImageCache::new(BWIKI_TILE_CACHE_MAX_ITEMS, BWIKI_TILE_CACHE_MAX_BYTES, cx);
         let ui_preferences_path = UiPreferencesRepository::path_for(&project_root);
-        let (theme_preference, auto_focus_enabled, tracker_point_popup_enabled, preferences_error) =
-            match UiPreferencesRepository::load(&project_root) {
+        let (
+            theme_preference,
+            auto_focus_enabled,
+            tracker_point_popup_enabled,
+            debug_mode_enabled,
+            preferences_error,
+        ) = match UiPreferencesRepository::load(&project_root) {
                 Ok(preferences) => (
                     preferences.theme_mode,
                     preferences.auto_focus_enabled,
                     preferences.tracker_point_popup_enabled,
+                    preferences.debug_mode_enabled,
                     None,
                 ),
                 Err(error) => (
                     ThemePreference::default(),
                     true,
                     true,
+                    false,
                     Some(format!("载入界面偏好失败：{error:#}")),
                 ),
             };
+        info!(
+            project_root = %project_root.display(),
+            theme = %theme_preference,
+            auto_focus_enabled,
+            tracker_point_popup_enabled,
+            debug_mode_enabled,
+            "initialized UI preferences for workbench"
+        );
 
         let mut workbench = match WorkspaceSnapshot::load(project_root.clone()) {
             Ok(workspace) => {
+                info!(
+                    project_root = %project_root.display(),
+                    group_count = workspace.report.group_count,
+                    point_count = workspace.report.point_count,
+                    "workbench loaded workspace snapshot"
+                );
                 let workspace = Arc::new(workspace);
                 let (bwiki_resources, bwiki_manager_error) =
                     Self::new_bwiki_resource_manager(workspace.assets.bwiki_cache_dir.clone());
@@ -581,6 +606,7 @@ impl TrackerWorkbench {
                     theme_preference,
                     auto_focus_enabled,
                     tracker_point_popup_enabled,
+                    debug_mode_enabled,
                     tracker_pending_action: None,
                     tracker_status_text: "追踪未启动。".into(),
                     route_import_status: AsyncTaskStatus::idle("尚未导入路线文件。"),
@@ -644,6 +670,7 @@ impl TrackerWorkbench {
                     tracker_pip_window_bounds: None,
                     tracker_pip_always_on_top: false,
                     tracker_pip_pending_open: false,
+                    debug_log_revision: logging::debug_log_revision(),
                     ui_preferences_path: ui_preferences_path.clone(),
                     bwiki_resources,
                     bwiki_tile_cache: bwiki_tile_cache.clone(),
@@ -661,6 +688,11 @@ impl TrackerWorkbench {
                 .with_optional_status_suffix(bwiki_manager_error)
             }
             Err(error) => {
+                error!(
+                    project_root = %project_root.display(),
+                    error = %error,
+                    "workbench failed to load workspace snapshot"
+                );
                 let workspace = Arc::new(Self::empty_workspace(project_root.clone()));
                 let (bwiki_resources, bwiki_manager_error) =
                     Self::new_bwiki_resource_manager(workspace.assets.bwiki_cache_dir.clone());
@@ -700,6 +732,7 @@ impl TrackerWorkbench {
                     theme_preference,
                     auto_focus_enabled,
                     tracker_point_popup_enabled,
+                    debug_mode_enabled,
                     tracker_pending_action: None,
                     tracker_status_text: "追踪未启动。".into(),
                     route_import_status: AsyncTaskStatus::idle("尚未导入路线文件。"),
@@ -761,6 +794,7 @@ impl TrackerWorkbench {
                     tracker_pip_window_bounds: None,
                     tracker_pip_always_on_top: false,
                     tracker_pip_pending_open: false,
+                    debug_log_revision: logging::debug_log_revision(),
                     ui_preferences_path: ui_preferences_path.clone(),
                     bwiki_resources,
                     bwiki_tile_cache,
@@ -1148,6 +1182,7 @@ impl TrackerWorkbench {
         workbench.request_center_on_current_point();
         workbench.sync_bwiki_visibility_defaults();
         if let Some(message) = preferences_error {
+            warn!(message, "continuing with default UI preferences after load failure");
             workbench.status_text = format!("{} {message}", workbench.status_text).into();
         }
 
@@ -1156,6 +1191,7 @@ impl TrackerWorkbench {
                 let updated = this.update(cx, |this, cx| {
                     if this.poll_tracking_events()
                         || this.poll_bwiki_resources()
+                        || this.poll_runtime_logs()
                         || this.tick_busy_indicator()
                     {
                         cx.notify();
@@ -1200,14 +1236,27 @@ impl TrackerWorkbench {
         match BwikiResourceManager::new(cache_dir.clone()) {
             Ok(manager) => {
                 manager.ensure_dataset_loaded();
+                info!(cache_dir = %cache_dir.display(), "BWiki resource manager initialized");
                 (manager, None)
             }
             Err(error) => {
+                warn!(
+                    cache_dir = %cache_dir.display(),
+                    error = %error,
+                    "failed to initialize BWiki resource manager, trying fallback cache"
+                );
                 let fallback = env::temp_dir()
                     .join("game-map-tracker-rs")
                     .join("bwiki-cache");
                 let manager = BwikiResourceManager::new(fallback.clone())
                     .unwrap_or_else(|fallback_error| {
+                        error!(
+                            cache_dir = %cache_dir.display(),
+                            fallback = %fallback.display(),
+                            error = %error,
+                            fallback_error = %fallback_error,
+                            "failed to initialize both primary and fallback BWiki caches"
+                        );
                         panic!(
                             "failed to initialize BWiki cache at {} ({error:#}) or fallback {} ({fallback_error:#})",
                             cache_dir.display(),
@@ -1215,6 +1264,11 @@ impl TrackerWorkbench {
                         )
                     });
                 manager.ensure_dataset_loaded();
+                info!(
+                    cache_dir = %cache_dir.display(),
+                    fallback = %fallback.display(),
+                    "BWiki resource manager initialized with fallback cache"
+                );
                 (
                     manager,
                     Some(format!(
@@ -1401,7 +1455,9 @@ impl TrackerWorkbench {
     }
 
     fn tracking_debug_enabled(&self) -> bool {
-        self.active_page == WorkbenchPage::Settings && self.settings_page == SettingsPage::Debug
+        self.debug_mode_enabled
+            && self.active_page == WorkbenchPage::Settings
+            && self.settings_page == SettingsPage::Debug
     }
 
     fn sync_tracker_debug_enabled(&self) {
@@ -1567,6 +1623,14 @@ impl TrackerWorkbench {
 
     pub(super) const fn is_tracker_point_popup_enabled(&self) -> bool {
         self.tracker_point_popup_enabled
+    }
+
+    pub(super) const fn is_debug_mode_enabled(&self) -> bool {
+        self.debug_mode_enabled
+    }
+
+    pub(super) fn debug_log_entries(&self, limit: usize) -> Vec<logging::DebugLogEntry> {
+        logging::debug_log_snapshot(limit)
     }
 
     pub(super) fn current_position_label(&self) -> String {
@@ -2258,6 +2322,7 @@ impl TrackerWorkbench {
         self.map_point_insert_armed = false;
         self.clear_selected_point_move_state();
         self.sync_tracker_debug_enabled();
+        info!(page = %page, "selected settings page");
         self.status_text = format!("设置页面已切换到{}。", page).into();
     }
 
@@ -2285,12 +2350,14 @@ impl TrackerWorkbench {
             self.active_page = WorkbenchPage::Settings;
             self.settings_nav_expanded = true;
             self.sync_tracker_debug_enabled();
+            info!("switched to settings page from navigation toggle");
             self.status_text = "已切换到设置页面。".into();
             return;
         }
 
         self.settings_nav_expanded = !self.settings_nav_expanded;
         self.sync_tracker_debug_enabled();
+        debug!(expanded = self.settings_nav_expanded, "toggled settings navigation");
         self.status_text = if self.settings_nav_expanded {
             "已展开设置导航。".into()
         } else {
@@ -2303,6 +2370,16 @@ impl TrackerWorkbench {
             || self.is_bwiki_refreshing()
             || self.is_bwiki_planner_busy()
             || self.is_route_import_busy()
+    }
+
+    fn poll_runtime_logs(&mut self) -> bool {
+        let revision = logging::debug_log_revision();
+        let changed = revision != self.debug_log_revision;
+        self.debug_log_revision = revision;
+        changed
+            && self.debug_mode_enabled
+            && self.active_page == WorkbenchPage::Settings
+            && self.settings_page == SettingsPage::Debug
     }
 
     fn tick_busy_indicator(&mut self) -> bool {
@@ -2371,6 +2448,7 @@ impl TrackerWorkbench {
     }
 
     pub(super) fn refresh_bwiki_dataset(&mut self) {
+        info!("requested BWiki dataset refresh from UI");
         self.bwiki_resources.refresh_dataset();
         self.status_text = "已请求刷新 BWiki 点位与图标目录。".into();
     }
@@ -3308,11 +3386,13 @@ impl TrackerWorkbench {
     ) {
         self.theme_preference = preference;
         apply_theme_preference(self.theme_preference, window, cx);
+        info!(theme = %self.theme_preference, "updated theme preference");
         self.persist_ui_preferences(&format!("界面主题已切换为 {}", self.theme_preference));
     }
 
     pub(super) fn set_auto_focus_enabled(&mut self, enabled: bool) {
         self.auto_focus_enabled = enabled;
+        info!(enabled, "updated auto-focus preference");
         if enabled {
             self.request_center_on_current_point();
             self.persist_ui_preferences("自动聚焦已开启");
@@ -3324,11 +3404,33 @@ impl TrackerWorkbench {
 
     pub(super) fn set_tracker_point_popup_enabled(&mut self, enabled: bool) {
         self.tracker_point_popup_enabled = enabled;
+        info!(enabled, "updated tracker point popup preference");
         self.persist_ui_preferences(if enabled {
             "节点浮窗已开启"
         } else {
             "节点浮窗已关闭"
         });
+    }
+
+    pub(super) fn set_debug_mode_enabled(&mut self, enabled: bool) {
+        self.debug_mode_enabled = enabled;
+        if !enabled {
+            self.debug_snapshot = None;
+        }
+        self.sync_tracker_debug_enabled();
+        info!(enabled, "updated debug mode preference");
+        self.persist_ui_preferences(if enabled {
+            "调试模式已开启"
+        } else {
+            "调试模式已关闭"
+        });
+    }
+
+    pub(super) fn clear_runtime_logs(&mut self) {
+        logging::clear_debug_logs();
+        self.debug_log_revision = logging::debug_log_revision();
+        info!("cleared in-memory runtime logs");
+        self.status_text = "已清空运行日志。".into();
     }
 
     pub(super) fn select_group(
@@ -3756,6 +3858,11 @@ impl TrackerWorkbench {
             return;
         }
 
+        info!(
+            engine = %self.selected_engine,
+            debug_enabled = self.tracking_debug_enabled(),
+            "starting tracker session from workbench"
+        );
         match spawn_tracker_session(
             self.workspace.clone(),
             self.selected_engine,
@@ -3777,6 +3884,11 @@ impl TrackerWorkbench {
                 self.status_text = self.tracker_status_text.clone();
             }
             Err(error) => {
+                error!(
+                    engine = %self.selected_engine,
+                    error = %error,
+                    "failed to start tracker session"
+                );
                 self.tracker_pending_action = None;
                 self.tracker_lifecycle = TrackerLifecycle::Failed;
                 self.tracker_status_text = format!("启动追踪失败：{error:#}").into();
@@ -3786,6 +3898,7 @@ impl TrackerWorkbench {
     }
 
     pub(super) fn stop_tracker(&mut self, preserve_preview: bool) {
+        info!(preserve_preview, "stopping tracker session from workbench");
         self.tracker_pending_action = Some(TrackerPendingAction::Stopping);
         self.tracker_status_text = "正在停止追踪线程。".into();
         self.release_tracker_session();
@@ -3800,6 +3913,7 @@ impl TrackerWorkbench {
 
     fn release_tracker_session(&mut self) {
         if let Some(mut session) = self.tracker_session.take() {
+            debug!("releasing tracker session");
             session.stop();
         }
     }
@@ -3818,6 +3932,7 @@ impl TrackerWorkbench {
         for event in events {
             match event {
                 TrackingEvent::LifecycleChanged(lifecycle) => {
+                    info!(lifecycle = ?lifecycle, "received tracker lifecycle event");
                     self.tracker_lifecycle = lifecycle;
                     match lifecycle {
                         TrackerLifecycle::Idle => {
@@ -3837,8 +3952,17 @@ impl TrackerWorkbench {
                 }
                 TrackingEvent::Status(status) => self.apply_tracking_status(status),
                 TrackingEvent::Position(position) => self.apply_tracking_position(position),
-                TrackingEvent::Debug(snapshot) => self.debug_snapshot = Some(snapshot),
+                TrackingEvent::Debug(snapshot) => {
+                    debug!(
+                        frame_index = snapshot.frame_index,
+                        image_count = snapshot.images.len(),
+                        field_count = snapshot.fields.len(),
+                        "received tracker debug snapshot"
+                    );
+                    self.debug_snapshot = Some(snapshot);
+                }
                 TrackingEvent::Error(message) => {
+                    error!(message, "received tracker error event");
                     self.tracker_pending_action = None;
                     self.tracker_lifecycle = TrackerLifecycle::Failed;
                     self.tracker_status_text = format!("追踪线程异常：{message}").into();
@@ -3856,6 +3980,16 @@ impl TrackerWorkbench {
     }
 
     fn apply_tracking_status(&mut self, status: crate::tracking::TrackingStatus) {
+        if status.frame_index <= 3 || status.frame_index % 30 == 0 {
+            debug!(
+                engine = %status.engine,
+                frame_index = status.frame_index,
+                lifecycle = ?status.lifecycle,
+                source = ?status.source,
+                match_score = ?status.match_score,
+                "applied tracking status"
+            );
+        }
         self.frame_index = status.frame_index;
         self.last_source = status.source;
         self.last_match_score = status.match_score;
@@ -3868,6 +4002,13 @@ impl TrackerWorkbench {
     }
 
     fn apply_tracking_position(&mut self, position: PositionEstimate) {
+        debug!(
+            world_x = position.world.x,
+            world_y = position.world.y,
+            source = ?position.source,
+            match_score = ?position.match_score,
+            "applied tracking position"
+        );
         let position = resolve_tracking_position_heading(self.preview_position.as_ref(), position);
         self.last_source = Some(position.source);
         self.last_match_score = position.match_score;
@@ -4212,6 +4353,7 @@ impl TrackerWorkbench {
         if self.is_route_import_busy() {
             return;
         }
+        info!("prompting for route files to import");
         let paths_receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -4237,6 +4379,7 @@ impl TrackerWorkbench {
         if self.is_route_import_busy() {
             return;
         }
+        info!("prompting for route folder to import");
         let folder_receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -4302,6 +4445,7 @@ impl TrackerWorkbench {
 
         let target_dir = self.workspace.assets.routes_dir.clone();
         let import_count = paths.len();
+        info!(import_count, target_dir = %target_dir.display(), "starting route import");
         self.route_import_status =
             AsyncTaskStatus::working(format!("正在导入 {} 个路线文件。", import_count));
 
@@ -4315,6 +4459,7 @@ impl TrackerWorkbench {
                 match result {
                     Ok(report) => this.apply_import_report(report, window, cx),
                     Err(error) => {
+                        error!(error = %error, "route import failed");
                         let message = format!("导入路线失败：{error:#}");
                         this.route_import_status = AsyncTaskStatus::failed(message.clone());
                         this.status_text = message.into();
@@ -4333,6 +4478,12 @@ impl TrackerWorkbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        info!(
+            imported_count = report.imported_count,
+            imported_point_count = report.imported_point_count,
+            failed_count = report.failed_sources.len(),
+            "applying route import report"
+        );
         if report.imported_count == 0 {
             if let Some(first_error) = report.failed_sources.first() {
                 let message = format!(
@@ -4802,6 +4953,7 @@ impl TrackerWorkbench {
         workspace.config = config;
 
         let started = format!("正在重建{}缓存。", kind.label());
+        info!(kind = ?kind, "starting tracker cache rebuild");
         *self.cache_rebuild_status_mut(kind) = AsyncTaskStatus::working(started.clone());
         self.status_text = started.into();
 
@@ -4817,12 +4969,14 @@ impl TrackerWorkbench {
             this.update_in(cx, |this, _, cx| {
                 match result {
                     Ok(()) => {
+                        info!(kind = ?kind, "tracker cache rebuild completed");
                         let message = format!("{}缓存已按当前表单参数重建完成。", kind.label());
                         *this.cache_rebuild_status_mut(kind) =
                             AsyncTaskStatus::succeeded(message.clone());
                         this.status_text = message.into();
                     }
                     Err(error) => {
+                        error!(kind = ?kind, error = %error, "tracker cache rebuild failed");
                         let message = format!("重建{}缓存失败：{error:#}", kind.label());
                         *this.cache_rebuild_status_mut(kind) =
                             AsyncTaskStatus::failed(message.clone());
@@ -4858,6 +5012,7 @@ impl TrackerWorkbench {
         let draft = match ConfigDraft::read(self, cx) {
             Ok(draft) => draft,
             Err(message) => {
+                warn!(message, "failed to parse config draft before save");
                 self.status_text = message.into();
                 return;
             }
@@ -4870,6 +5025,7 @@ impl TrackerWorkbench {
 
         match save_config(&self.workspace.project_root, &draft.config) {
             Ok(path) => {
+                info!(path = %path.display(), "saved application config");
                 self.update_workspace_config(draft.config);
                 self.invalidate_bwiki_route_plan_preview();
                 self.sync_config_form_from_workspace(window, cx);
@@ -4884,6 +5040,7 @@ impl TrackerWorkbench {
                 };
             }
             Err(error) => {
+                error!(error = %error, "failed to save application config");
                 self.status_text = format!("保存配置失败：{error:#}").into();
             }
         }
@@ -4895,6 +5052,7 @@ impl TrackerWorkbench {
         cx: &mut Context<Self>,
     ) {
         if self.is_tracker_pip_open() {
+            info!("closing tracker picture-in-picture window from toggle");
             self.close_tracker_pip_window(cx);
             return;
         }
@@ -4902,6 +5060,7 @@ impl TrackerWorkbench {
             return;
         }
 
+        info!("opening tracker picture-in-picture window from toggle");
         self.tracker_pip_pending_open = true;
         self.status_text = "正在打开追踪画中画。".into();
         cx.defer_in(window, |this, window, cx| {
@@ -4912,6 +5071,7 @@ impl TrackerWorkbench {
 
     pub(super) fn toggle_tracker_pip_always_on_top(&mut self, cx: &mut Context<Self>) {
         let always_on_top = !self.tracker_pip_always_on_top;
+        info!(always_on_top, "toggling tracker picture-in-picture always-on-top");
 
         if let Some(handle) = self.tracker_pip_window {
             match handle.update(cx, |_, pip_window, _| {
@@ -5011,6 +5171,7 @@ impl TrackerWorkbench {
 
         match open_result {
             Ok(handle) => {
+                info!(always_on_top = self.tracker_pip_always_on_top, "tracker picture-in-picture window opened");
                 self.tracker_pip_window = Some(handle);
                 self.tracker_pip_window_bounds = Some(initial_bounds);
                 self.status_text = "追踪画中画已打开。".into();
@@ -5034,6 +5195,7 @@ impl TrackerWorkbench {
                 }
             }
             Err(error) => {
+                error!(error = %error, "failed to open tracker picture-in-picture window");
                 self.tracker_pip_window = None;
                 self.status_text = format!("打开追踪画中画失败：{error:#}").into();
             }
@@ -5042,6 +5204,7 @@ impl TrackerWorkbench {
 
     fn close_tracker_pip_window(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.tracker_pip_window.take() {
+            info!("closing tracker picture-in-picture window");
             let _ = handle.update(cx, |_, pip_window, cx| {
                 pip_window.defer(cx, |pip_window, _| {
                     pip_window.remove_window();
@@ -5113,6 +5276,7 @@ impl TrackerWorkbench {
         cx: &mut Context<Self>,
     ) {
         if let Some(handle) = self.minimap_region_picker_window.take() {
+            info!("canceling minimap region picker");
             self.status_text = "已取消小地图取区。".into();
             let _ = handle.update(cx, |_, picker_window, cx| {
                 picker_window.defer(cx, |picker_window, _| {
@@ -5122,11 +5286,13 @@ impl TrackerWorkbench {
             return;
         }
 
+        info!("opening minimap region picker");
         self.open_minimap_region_picker(window, cx);
     }
 
     pub(super) fn toggle_minimap_region_picker_from_pip(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.minimap_region_picker_window.take() {
+            info!("canceling minimap region picker from picture-in-picture");
             self.status_text = "已取消小地图取区。".into();
             let _ = handle.update(cx, |_, picker_window, cx| {
                 picker_window.defer(cx, |picker_window, _| {
@@ -5136,6 +5302,7 @@ impl TrackerWorkbench {
             return;
         }
 
+        info!("opening minimap region picker from picture-in-picture");
         let workbench = cx.entity().downgrade();
         let workbench_for_error = workbench.clone();
         let main_window_handle = self.main_window_handle;
@@ -5161,6 +5328,7 @@ impl TrackerWorkbench {
 
     pub(super) fn toggle_minimap_presence_probe_picker_from_pip(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.minimap_presence_probe_picker_window.take() {
+            info!("canceling minimap presence probe picker from picture-in-picture");
             self.status_text = "已取消 F1-P 标签探针取区。".into();
             let _ = handle.update(cx, |_, picker_window, cx| {
                 picker_window.defer(cx, |picker_window, _| {
@@ -5170,6 +5338,7 @@ impl TrackerWorkbench {
             return;
         }
 
+        info!("opening minimap presence probe picker from picture-in-picture");
         let workbench = cx.entity().downgrade();
         let workbench_for_error = workbench.clone();
         let main_window_handle = self.main_window_handle;
@@ -5246,11 +5415,13 @@ impl TrackerWorkbench {
 
         match picker_result {
             Ok(handle) => {
+                info!("minimap region picker opened");
                 self.minimap_region_picker_window = Some(handle.into());
                 self.status_text =
                     "小地图环形取区已开启：拖外圈改截图范围，拖内圈改中心挖空，最后点确认。".into();
             }
             Err(error) => {
+                error!(error = %error, "failed to open minimap region picker");
                 self.status_text = format!("打开小地图取区窗口失败：{error:#}").into();
             }
         }
@@ -5350,6 +5521,15 @@ impl TrackerWorkbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        info!(
+            top = result.region.top,
+            left = result.region.left,
+            width = result.region.width,
+            height = result.region.height,
+            mask_inner_radius = result.mask_inner_radius,
+            mask_outer_radius = result.mask_outer_radius,
+            "finished minimap region pick"
+        );
         self.minimap_region_picker_window = None;
 
         let mut config = self.workspace.config.clone();
@@ -5426,6 +5606,7 @@ impl TrackerWorkbench {
         cx: &mut Context<Self>,
     ) {
         if let Some(handle) = self.minimap_presence_probe_picker_window.take() {
+            info!("canceling minimap presence probe picker");
             self.status_text = "已取消 F1-P 标签探针取区。".into();
             let _ = handle.update(cx, |_, picker_window, cx| {
                 picker_window.defer(cx, |picker_window, _| {
@@ -5435,6 +5616,7 @@ impl TrackerWorkbench {
             return;
         }
 
+        info!("opening minimap presence probe picker");
         self.open_minimap_presence_probe_picker(window, cx);
     }
 
@@ -5484,12 +5666,14 @@ impl TrackerWorkbench {
 
         match picker_result {
             Ok(handle) => {
+                info!("minimap presence probe picker opened");
                 self.minimap_presence_probe_picker_window = Some(handle.into());
                 self.status_text =
                     "F1-P 标签探针取区已开启：请只框住标签带，确认后会立刻抓当前区域作为模板。"
                         .into();
             }
             Err(error) => {
+                error!(error = %error, "failed to open minimap presence probe picker");
                 self.status_text = format!("打开 F1-P 标签探针取区窗口失败：{error:#}").into();
             }
         }
@@ -5540,6 +5724,13 @@ impl TrackerWorkbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        info!(
+            top = region.top,
+            left = region.left,
+            width = region.width,
+            height = region.height,
+            "finished minimap presence probe pick"
+        );
         self.minimap_presence_probe_picker_window = None;
 
         let template_path =
@@ -5741,14 +5932,17 @@ impl TrackerWorkbench {
             theme_mode: self.theme_preference,
             auto_focus_enabled: self.auto_focus_enabled,
             tracker_point_popup_enabled: self.tracker_point_popup_enabled,
+            debug_mode_enabled: self.debug_mode_enabled,
         };
 
         match UiPreferencesRepository::save(&self.workspace.project_root, &preferences) {
             Ok(path) => {
+                info!(path = %path.display(), action_label, "persisted UI preferences");
                 self.status_text =
                     format!("{action_label}，偏好已保存到 {}。", path.display()).into();
             }
             Err(error) => {
+                error!(error = %error, action_label, "failed to persist UI preferences");
                 self.status_text = format!("保存界面偏好失败：{error:#}").into();
             }
         }

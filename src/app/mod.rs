@@ -6,18 +6,27 @@ use gpui::{
     size,
 };
 use gpui_component::Root;
+use tracing::info;
+use tracing_subscriber::{
+    EnvFilter,
+    layer::{Layer as _, SubscriberExt},
+    util::SubscriberInitExt,
+};
 
 use crate::{
     embedded_assets,
+    logging::{DebugLogLayer, install_debug_log_store},
     resources::WorkspaceBootstrap,
     ui::{self, TrackerWorkbench},
 };
 
 pub fn launch() -> Result<()> {
     init_tracing();
+    info!("starting application launch");
     configure_windows_capture_compatibility();
 
     let workspace = WorkspaceBootstrap::prepare()?;
+    info!(workspace_root = %workspace.workspace_root.display(), "workspace prepared");
 
     Application::new()
         .with_assets(EmbeddedAssetSource)
@@ -75,8 +84,19 @@ fn configure_windows_capture_compatibility() {
 }
 
 fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("info,gpui_component=warn")
+    let debug_log_store = install_debug_log_store(2_000);
+    let fmt_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,gpui_component=warn"));
+    let debug_filter = EnvFilter::new("game_map_tracker_rs=debug,info,gpui_component=warn");
+
+    let _ = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_thread_names(true)
+                .with_target(true)
+                .with_filter(fmt_filter),
+        )
+        .with(DebugLogLayer::new(debug_log_store).with_filter(debug_filter))
         .try_init();
 }
 

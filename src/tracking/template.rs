@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
+use tracing::info;
+
 use crate::config::TemplateTrackingConfig;
 #[cfg(not(feature = "ai-burn"))]
 use crate::tracking::vision::crop_around_center;
@@ -161,6 +163,13 @@ const WGPU_CONV_IM2COL_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
 impl TemplateTrackerWorker {
     pub fn new(workspace: Arc<WorkspaceSnapshot>) -> Result<Self> {
+        info!(
+            cache_root = %workspace.assets.bwiki_cache_dir.display(),
+            view_size = workspace.config.view_size,
+            device = %workspace.config.template.device,
+            device_index = workspace.config.template.device_index,
+            "initializing template tracker worker"
+        );
         let config = workspace.config.clone();
         let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
         let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
@@ -852,6 +861,12 @@ fn coarse_refine_radius_px(config: &TemplateTrackingConfig) -> u32 {
 }
 
 pub fn rebuild_template_engine_cache(workspace: &WorkspaceSnapshot) -> Result<()> {
+    info!(
+        cache_root = %workspace.assets.bwiki_cache_dir.display(),
+        device = %workspace.config.template.device,
+        device_index = workspace.config.template.device_index,
+        "rebuilding template tracker cache"
+    );
     clear_match_pyramid_caches(workspace)?;
 
     #[cfg(feature = "ai-burn")]
@@ -879,6 +894,7 @@ pub fn rebuild_template_engine_cache(workspace: &WorkspaceSnapshot) -> Result<()
         )?;
     }
 
+    info!("rebuild of template tracker cache completed");
     Ok(())
 }
 

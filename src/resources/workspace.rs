@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use tracing::info;
 
 use crate::{
     config::{AppConfig, CONFIG_FILE_NAME, load_existing_config},
@@ -35,6 +36,7 @@ pub struct WorkspaceSnapshot {
 impl WorkspaceSnapshot {
     pub fn load(project_root: impl Into<PathBuf>) -> Result<Self> {
         let project_root = project_root.into();
+        info!(project_root = %project_root.display(), "loading workspace snapshot");
         let assets = discover_assets(&project_root)?;
         let config = load_existing_config(&project_root)?;
         let groups = RouteRepository::load_all(&assets.routes_dir)?;
@@ -44,6 +46,12 @@ impl WorkspaceSnapshot {
             point_count,
             map_dimensions: assets.map_dimensions,
         };
+        info!(
+            project_root = %project_root.display(),
+            group_count = report.group_count,
+            point_count = report.point_count,
+            "workspace snapshot loaded"
+        );
 
         Ok(Self {
             project_root,

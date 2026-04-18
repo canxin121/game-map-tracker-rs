@@ -1528,7 +1528,7 @@ fn settings_page(
         SettingsPage::Capture => settings_capture_page(this, cx, tokens).into_any_element(),
         SettingsPage::Convolution => settings_convolution_page(this, cx, tokens).into_any_element(),
         SettingsPage::Template => settings_template_page(this, cx, tokens).into_any_element(),
-        SettingsPage::Debug => settings_debug_page(this, tokens).into_any_element(),
+        SettingsPage::Debug => settings_debug_page(this, cx, tokens).into_any_element(),
         SettingsPage::Resources => settings_resources_page(this, cx, tokens).into_any_element(),
     }
 }
@@ -2476,8 +2476,31 @@ fn settings_template_page(
     )
 }
 
-fn settings_debug_page(this: &TrackerWorkbench, tokens: WorkbenchThemeTokens) -> impl IntoElement {
-    let snapshot = this.debug_snapshot.clone();
+fn settings_debug_page(
+    this: &TrackerWorkbench,
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    let debug_mode_picker = ButtonGroup::new("debug-mode-picker")
+        .children(
+            ["关闭", "开启"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    Button::new(("debug-mode", index))
+                        .label(label)
+                        .selected((index == 1) == this.is_debug_mode_enabled())
+                })
+                .collect::<Vec<_>>(),
+        )
+        .compact()
+        .on_click(cx.listener(|this, indices: &Vec<usize>, _, cx| {
+            if let Some(index) = indices.first().copied() {
+                this.set_debug_mode_enabled(index == 1);
+                cx.notify();
+            }
+        }));
+    let snapshot = this.is_debug_mode_enabled().then(|| this.debug_snapshot.clone()).flatten();
     let images = snapshot
         .as_ref()
         .map(|snapshot| snapshot.images.clone())
@@ -2486,45 +2509,257 @@ fn settings_debug_page(this: &TrackerWorkbench, tokens: WorkbenchThemeTokens) ->
         .as_ref()
         .map(|snapshot| snapshot.fields.clone())
         .unwrap_or_default();
+    let log_entries = this.debug_log_entries(240);
+    let header_actions = this.is_debug_mode_enabled().then(|| {
+        toolbar_cluster(vec![
+            toolbar_button_with_tooltip(
+                "debug-log-clear",
+                tokens,
+                "C",
+                "清空日志",
+                Some("清空当前内存中的运行日志缓冲。".into()),
+                ToolbarButtonTone::Neutral,
+                false,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.clear_runtime_logs();
+                    cx.notify();
+                }),
+            )
+            .into_any_element(),
+        ])
+        .into_any_element()
+    });
 
     settings_page_shell(
         "追踪调试",
-        snapshot.as_ref().map_or_else(
-            || "启动 tracker 后，这里会显示 minimap、heatmap、refine 预览和状态字段。".to_owned(),
-            |snapshot| {
-                format!(
-                    "引擎 {}，阶段 {}，帧序号 {}。",
-                    snapshot.engine, snapshot.stage_label, snapshot.frame_index
-                )
-            },
-        ),
-        None,
+        if this.is_debug_mode_enabled() {
+            snapshot.as_ref().map_or_else(
+                || "调试模式已开启。这里会显示最近运行日志，以及当前 tracker 的 minimap、heatmap、refine 预览和状态字段。".to_owned(),
+                |snapshot| {
+                    format!(
+                        "调试模式已开启。引擎 {}，阶段 {}，帧序号 {}。",
+                        snapshot.engine, snapshot.stage_label, snapshot.frame_index
+                    )
+                },
+            )
+        } else {
+            "调试模式关闭时，不会展示运行日志，也不会向 tracker 请求调试快照。".to_owned()
+        },
+        header_actions,
         vec![
-            div()
-                .flex()
-                .gap_3()
-                .flex_wrap()
-                .children(
-                    images
-                        .into_iter()
-                        .map(|image| debug_image_card(image, tokens))
-                        .collect::<Vec<_>>(),
-                )
-                .into_any_element(),
-            div()
-                .flex()
-                .gap_3()
-                .flex_wrap()
-                .children(
-                    fields
-                        .into_iter()
-                        .map(|field| debug_field_card(field, tokens).into_any_element())
-                        .collect::<Vec<_>>(),
-                )
-                .into_any_element(),
+            editable_config_section(
+                "调试模式",
+                vec![
+                    config_row(vec![
+                        div()
+                            .min_w(px(220.0))
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(field_label(tokens, "运行期调试开关"))
+                            .child(debug_mode_picker)
+                            .into_any_element(),
+                    ]),
+                    body_text(
+                        tokens,
+                        if this.is_debug_mode_enabled() {
+                            "开启后会显示最近运行日志；当当前页面停留在“调试”页时，tracker 还会额外产出调试快照。"
+                        } else {
+                            "关闭后调试页只保留开关，不展示日志或调试快照。"
+                        },
+                    )
+                    .into_any_element(),
+                ],
+                tokens,
+            )
+            .into_any_element(),
+            editable_config_section(
+                "运行日志",
+                vec![
+                    body_text(
+                        tokens,
+                        if this.is_debug_mode_enabled() {
+                            format!("当前缓冲中展示最近 {} 条日志，按时间倒序排列。", log_entries.len())
+                        } else {
+                            "开启调试模式后，这里会显示基于 tracing 收集的运行日志。".to_owned()
+                        },
+                    )
+                    .into_any_element(),
+                    if this.is_debug_mode_enabled() {
+                        div()
+                            .max_h(px(420.0))
+                            .overflow_y_scrollbar()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(
+                                if log_entries.is_empty() {
+                                    vec![empty_list_state(
+                                        tokens,
+                                        "当前还没有可显示的运行日志。",
+                                    )
+                                    .into_any_element()]
+                                } else {
+                                    log_entries
+                                        .into_iter()
+                                        .rev()
+                                        .map(|entry| {
+                                            debug_log_entry_card(entry, tokens).into_any_element()
+                                        })
+                                        .collect::<Vec<_>>()
+                                },
+                            )
+                            .into_any_element()
+                    } else {
+                        empty_list_state(tokens, "调试模式关闭。").into_any_element()
+                    },
+                ],
+                tokens,
+            )
+            .into_any_element(),
+            if this.is_debug_mode_enabled() {
+                div()
+                    .flex()
+                    .gap_3()
+                    .flex_wrap()
+                    .children(
+                        if images.is_empty() {
+                            vec![empty_list_state(tokens, "当前还没有可显示的调试图像。").into_any_element()]
+                        } else {
+                            images
+                                .into_iter()
+                                .map(|image| debug_image_card(image, tokens))
+                                .collect::<Vec<_>>()
+                        },
+                    )
+                    .into_any_element()
+            } else {
+                empty_list_state(tokens, "开启调试模式后，这里才会显示追踪调试图像。")
+                    .into_any_element()
+            },
+            if this.is_debug_mode_enabled() {
+                div()
+                    .flex()
+                    .gap_3()
+                    .flex_wrap()
+                    .children(
+                        if fields.is_empty() {
+                            vec![empty_list_state(tokens, "当前还没有可显示的调试字段。").into_any_element()]
+                        } else {
+                            fields
+                                .into_iter()
+                                .map(|field| debug_field_card(field, tokens).into_any_element())
+                                .collect::<Vec<_>>()
+                        },
+                    )
+                    .into_any_element()
+            } else {
+                empty_list_state(tokens, "开启调试模式后，这里才会显示追踪状态字段。")
+                    .into_any_element()
+            },
         ],
         tokens,
     )
+}
+
+fn debug_log_entry_card(
+    entry: crate::logging::DebugLogEntry,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    let level_background = match entry.level.as_str() {
+        "ERROR" => tokens.toolbar_button_danger_bg,
+        "WARN" => tokens.toolbar_button_primary_bg,
+        "INFO" => tokens.toolbar_button_bg,
+        _ => tokens.panel_alt_bg,
+    };
+    let location = match (entry.file.as_deref(), entry.line) {
+        (Some(file), Some(line)) => format!("{file}:{line}"),
+        (Some(file), None) => file.to_owned(),
+        _ => "-".to_owned(),
+    };
+    let meta_line = format!(
+        "{}  {}  {}  {}",
+        format_elapsed_label(entry.elapsed_millis),
+        entry.target,
+        entry.thread_name,
+        location
+    );
+    let detail_line = if entry.fields.is_empty() {
+        entry
+            .span_path
+            .map(|span| format!("span={span}"))
+            .unwrap_or_else(|| "无附加字段".to_owned())
+    } else if let Some(span_path) = entry.span_path {
+        format!("{} · span={span_path}", entry.fields.join(" · "))
+    } else {
+        entry.fields.join(" · ")
+    };
+
+    div()
+        .rounded_lg()
+        .bg(tokens.panel_sunken_bg)
+        .border_1()
+        .border_color(tokens.border)
+        .p_3()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(level_background)
+                                .border_1()
+                                .border_color(tokens.border_strong)
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(tokens.app_fg)
+                                        .child(entry.level),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .line_height(px(20.0))
+                                .text_color(tokens.app_fg)
+                                .child(entry.message),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .line_height(px(18.0))
+                        .text_color(tokens.text_muted)
+                        .child(meta_line),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .line_height(px(18.0))
+                        .text_color(tokens.text_soft)
+                        .child(detail_line),
+                ),
+        )
+}
+
+fn format_elapsed_label(elapsed_millis: u128) -> String {
+    let minutes = elapsed_millis / 60_000;
+    let seconds = (elapsed_millis % 60_000) / 1_000;
+    let millis = elapsed_millis % 1_000;
+    format!("+{minutes:02}:{seconds:02}.{millis:03}")
 }
 
 fn settings_resources_page(

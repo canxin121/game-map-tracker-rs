@@ -1,6 +1,7 @@
 use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Result;
+use tracing::info;
 #[cfg(feature = "ai-burn")]
 use burn::{
     backend::ndarray::NdArrayDevice,
@@ -200,6 +201,13 @@ const FEATURE_ENCODER_CACHE_VERSION: u32 = 1;
 
 impl BurnTrackerWorker {
     pub fn new(workspace: Arc<WorkspaceSnapshot>) -> Result<Self> {
+        info!(
+            cache_root = %workspace.assets.bwiki_cache_dir.display(),
+            view_size = workspace.config.view_size,
+            device = %workspace.config.ai.device,
+            device_index = workspace.config.ai.device_index,
+            "initializing convolution tracker worker"
+        );
         #[cfg(feature = "ai-burn")]
         {
             let config = workspace.config.clone();
@@ -240,6 +248,12 @@ impl BurnTrackerWorker {
 }
 
 pub fn rebuild_convolution_engine_cache(workspace: &WorkspaceSnapshot) -> Result<()> {
+    info!(
+        cache_root = %workspace.assets.bwiki_cache_dir.display(),
+        device = %workspace.config.ai.device,
+        device_index = workspace.config.ai.device_index,
+        "rebuilding convolution tracker cache"
+    );
     #[cfg(feature = "ai-burn")]
     {
         clear_match_pyramid_caches(workspace)?;
@@ -256,6 +270,7 @@ pub fn rebuild_convolution_engine_cache(workspace: &WorkspaceSnapshot) -> Result
             &masks,
             &prepared_pyramid.cache_key,
         )?;
+        info!("rebuild of convolution tracker cache completed");
         return Ok(());
     }
 

@@ -6,6 +6,7 @@ use std::{
 use anyhow::{Context as _, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info};
 
 use crate::domain::theme::ThemePreference;
 
@@ -19,6 +20,8 @@ pub struct UiPreferences {
     pub auto_focus_enabled: bool,
     #[serde(default = "default_tracker_point_popup_enabled")]
     pub tracker_point_popup_enabled: bool,
+    #[serde(default = "default_debug_mode_enabled")]
+    pub debug_mode_enabled: bool,
 }
 
 impl Default for UiPreferences {
@@ -27,6 +30,7 @@ impl Default for UiPreferences {
             theme_mode: ThemePreference::default(),
             auto_focus_enabled: default_auto_focus_enabled(),
             tracker_point_popup_enabled: default_tracker_point_popup_enabled(),
+            debug_mode_enabled: default_debug_mode_enabled(),
         }
     }
 }
@@ -42,13 +46,23 @@ impl UiPreferencesRepository {
     pub fn load(project_root: &Path) -> Result<UiPreferences> {
         let path = Self::path_for(project_root);
         if !path.exists() {
+            info!(path = %path.display(), "ui preferences file not found, using defaults");
             return Ok(UiPreferences::default());
         }
 
+        debug!(path = %path.display(), "loading ui preferences");
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read ui preferences at {}", path.display()))?;
-        toml::from_str::<UiPreferences>(&raw)
-            .with_context(|| format!("failed to parse ui preferences at {}", path.display()))
+        let preferences = toml::from_str::<UiPreferences>(&raw)
+            .with_context(|| format!("failed to parse ui preferences at {}", path.display()))?;
+        info!(
+            path = %path.display(),
+            debug_mode_enabled = preferences.debug_mode_enabled,
+            auto_focus_enabled = preferences.auto_focus_enabled,
+            tracker_point_popup_enabled = preferences.tracker_point_popup_enabled,
+            "loaded ui preferences"
+        );
+        Ok(preferences)
     }
 
     pub fn save(project_root: &Path, preferences: &UiPreferences) -> Result<PathBuf> {
@@ -69,7 +83,15 @@ impl UiPreferencesRepository {
         let raw = toml::to_string_pretty(preferences)
             .context("failed to serialize ui preferences as TOML")?;
         fs::write(path, raw)
-            .with_context(|| format!("failed to write ui preferences at {}", path.display()))
+            .with_context(|| format!("failed to write ui preferences at {}", path.display()))?;
+        info!(
+            path = %path.display(),
+            debug_mode_enabled = preferences.debug_mode_enabled,
+            auto_focus_enabled = preferences.auto_focus_enabled,
+            tracker_point_popup_enabled = preferences.tracker_point_popup_enabled,
+            "saved ui preferences"
+        );
+        Ok(())
     }
 }
 
@@ -79,4 +101,8 @@ const fn default_auto_focus_enabled() -> bool {
 
 const fn default_tracker_point_popup_enabled() -> bool {
     true
+}
+
+const fn default_debug_mode_enabled() -> bool {
+    false
 }

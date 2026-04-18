@@ -293,10 +293,10 @@ fn pip_titlebar(
                     cx.stop_propagation();
                 })
                 .child(pip_capture_menu(this, tokens))
-                .child(pip_control_button(
+                .child(pip_control_icon_button(
                     "tracker-pip-topmost-local",
                     tokens,
-                    "置顶",
+                    Icon::default().path("assets/icons/arrow-up.svg"),
                     if this.always_on_top {
                         "当前已置顶"
                     } else {
@@ -307,10 +307,10 @@ fn pip_titlebar(
                         this.toggle_always_on_top(window, cx);
                     }),
                 ))
-                .child(pip_control_button(
+                .child(pip_control_icon_button(
                     "tracker-pip-close-local",
                     tokens,
-                    "关闭",
+                    Icon::default().path("assets/icons/close.svg"),
                     "关闭追踪画中画",
                     PipControlTone::Danger,
                     cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -323,10 +323,11 @@ fn pip_titlebar(
 fn pip_capture_menu(this: &TrackerPipWindow, tokens: WorkbenchThemeTokens) -> impl IntoElement {
     ActionMenu::new(&this.capture_menu)
         .icon(Icon::new(IconName::ChevronDown))
+        .center_label()
         .with_size(Size::Small)
         .h(px(32.0))
-        .min_w(px(72.0))
-        .px_3()
+        .min_w(px(56.0))
+        .px_2()
         .rounded_lg()
         .bg(tokens.toolbar_button_bg)
         .border_1()
@@ -343,10 +344,10 @@ enum PipControlTone {
     Danger,
 }
 
-fn pip_control_button(
+fn pip_control_icon_button(
     id: impl Into<SharedString>,
     tokens: WorkbenchThemeTokens,
-    label: &'static str,
+    icon: Icon,
     tooltip: impl Into<SharedString>,
     tone: PipControlTone,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
@@ -372,9 +373,8 @@ fn pip_control_button(
 
     div()
         .id(id.into())
+        .w(px(32.0))
         .h(px(32.0))
-        .px_3()
-        .min_w(px(56.0))
         .flex()
         .items_center()
         .justify_center()
@@ -396,13 +396,7 @@ fn pip_control_button(
             cx.stop_propagation();
             on_click(event, window, cx);
         })
-        .child(
-            div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(tokens.app_fg)
-                .child(label),
-        )
+        .child(icon.small().text_color(tokens.app_fg))
 }
 
 fn install_tracker_pip_navigation_handlers(

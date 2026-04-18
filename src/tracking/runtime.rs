@@ -8,6 +8,7 @@ use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use derive_more::Display;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error, info};
 
 use crate::{
     domain::tracker::{PositionEstimate, TrackerEngineKind, TrackerLifecycle, TrackingSource},
@@ -114,6 +115,7 @@ pub fn spawn_tracker_session(
     engine: TrackerEngineKind,
     debug_enabled: bool,
 ) -> Result<TrackerSession> {
+    info!(%engine, debug_enabled, "spawning tracker session");
     let (command_tx, command_rx) = unbounded();
     let (event_tx, event_rx) = unbounded();
 
@@ -137,6 +139,7 @@ fn run_tracker_session(
     command_rx: Receiver<TrackerCommand>,
     event_tx: Sender<TrackingEvent>,
 ) {
+    info!(%engine, debug_enabled, "tracker thread started");
     let _ = event_tx.send(TrackingEvent::Status(TrackingStatus {
         engine,
         frame_index: 0,
@@ -147,13 +150,18 @@ fn run_tracker_session(
     }));
 
     if handle_tracker_commands_without_worker(&command_rx, &mut debug_enabled) {
+        info!(%engine, "tracker thread stopped before worker initialization");
         let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
         return;
     }
 
     let worker = match build_worker(workspace, engine) {
-        Ok(worker) => worker,
+        Ok(worker) => {
+            info!(%engine, "tracker worker initialized");
+            worker
+        }
         Err(error) => {
+            error!(%engine, error = %error, "failed to initialize tracker worker");
             let _ = event_tx.send(TrackingEvent::Error(error.to_string()));
             let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Failed));
             return;
@@ -161,6 +169,7 @@ fn run_tracker_session(
     };
 
     if handle_tracker_commands_without_worker(&command_rx, &mut debug_enabled) {
+        info!(%engine, "tracker thread stopped after worker initialization");
         let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
         return;
     }
@@ -175,6 +184,11 @@ fn build_worker(
     workspace: Arc<WorkspaceSnapshot>,
     engine: TrackerEngineKind,
 ) -> Result<Box<dyn TrackingWorker>> {
+    debug!(
+        %engine,
+        group_count = workspace.groups.len(),
+        "building tracker worker"
+    );
     Ok(match engine {
         TrackerEngineKind::MultiScaleTemplateMatch => {
             Box::new(TemplateTrackerWorker::new(workspace)?)
@@ -188,6 +202,8 @@ fn run_worker_loop(
     command_rx: Receiver<TrackerCommand>,
     event_tx: Sender<TrackingEvent>,
 ) {
+    let engine = worker.engine_kind();
+    info!(%engine, "tracker worker loop entered");
     let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Running));
     let mut initial_status = worker.initial_status();
     initial_status.lifecycle = TrackerLifecycle::Running;
@@ -202,6 +218,19 @@ fn run_worker_loop(
         let loop_started = Instant::now();
         match worker.tick() {
             Ok(tick) => {
+                if should_log_tick(tick.status.frame_index) {
+                    debug!(
+                        %engine,
+                        frame_index = tick.status.frame_index,
+                        lifecycle = ?tick.status.lifecycle,
+                        source = ?tick.status.source,
+                        match_score = ?tick.status.match_score,
+                        has_estimate = tick.estimate.is_some(),
+                        has_debug = tick.debug.is_some(),
+                        elapsed_ms = loop_started.elapsed().as_millis(),
+                        "tracker tick completed"
+                    );
+                }
                 let _ = event_tx.send(TrackingEvent::Status(tick.status));
                 if let Some(estimate) = tick.estimate {
                     let _ = event_tx.send(TrackingEvent::Position(estimate));
@@ -211,6 +240,7 @@ fn run_worker_loop(
                 }
             }
             Err(error) => {
+                error!(%engine, error = %error, "tracker tick failed");
                 let _ = event_tx.send(TrackingEvent::Error(error.to_string()));
                 let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Failed));
                 return;
@@ -226,10 +256,12 @@ fn run_worker_loop(
 
         match command_rx.recv_timeout(wait_for) {
             Ok(TrackerCommand::Stop) => {
+                info!(%engine, "tracker worker loop received stop command");
                 let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
                 return;
             }
             Ok(TrackerCommand::SetDebugEnabled(enabled)) => {
+                info!(%engine, enabled, "tracker debug mode changed");
                 worker.set_debug_enabled(enabled);
             }
             Err(_) => {}
@@ -243,8 +275,14 @@ fn handle_tracker_commands(
 ) -> bool {
     for command in command_rx.try_iter() {
         match command {
-            TrackerCommand::Stop => return true,
-            TrackerCommand::SetDebugEnabled(enabled) => worker.set_debug_enabled(enabled),
+            TrackerCommand::Stop => {
+                info!(engine = %worker.engine_kind(), "tracker command requested stop");
+                return true;
+            }
+            TrackerCommand::SetDebugEnabled(enabled) => {
+                info!(engine = %worker.engine_kind(), enabled, "tracker command changed debug mode");
+                worker.set_debug_enabled(enabled);
+            }
         }
     }
     false
@@ -256,9 +294,19 @@ fn handle_tracker_commands_without_worker(
 ) -> bool {
     for command in command_rx.try_iter() {
         match command {
-            TrackerCommand::Stop => return true,
-            TrackerCommand::SetDebugEnabled(enabled) => *debug_enabled = enabled,
+            TrackerCommand::Stop => {
+                info!("tracker command requested stop before worker was ready");
+                return true;
+            }
+            TrackerCommand::SetDebugEnabled(enabled) => {
+                info!(enabled, "tracker command changed pending debug mode");
+                *debug_enabled = enabled;
+            }
         }
     }
     false
+}
+
+fn should_log_tick(frame_index: u64) -> bool {
+    frame_index <= 3 || frame_index % 30 == 0
 }

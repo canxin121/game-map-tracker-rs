@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::domain::route::{RouteDocument, RouteId, RouteMetadata, RoutePointId};
@@ -26,6 +27,7 @@ impl RouteRepository {
             fs::create_dir_all(routes_dir).with_context(|| {
                 format!("failed to create routes directory {}", routes_dir.display())
             })?;
+            info!(routes_dir = %routes_dir.display(), "created missing routes directory");
             return Ok(Vec::new());
         }
 
@@ -37,10 +39,16 @@ impl RouteRepository {
 
         files.sort_by_key(|entry| entry.file_name());
 
-        files
+        let routes = files
             .into_iter()
             .map(|entry| Self::load_path(&entry.path()))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        info!(
+            routes_dir = %routes_dir.display(),
+            route_count = routes.len(),
+            "loaded route documents"
+        );
+        Ok(routes)
     }
 
     pub fn load_path(path: &Path) -> Result<RouteDocument> {
@@ -89,6 +97,12 @@ impl RouteRepository {
             .context("failed to serialize route group")?;
         fs::write(path, body)
             .with_context(|| format!("failed to write route file {}", path.display()))?;
+        debug!(
+            path = %path.display(),
+            route_id = %route.id,
+            point_count = route.point_count(),
+            "saved route document"
+        );
         Ok(())
     }
 
@@ -150,18 +164,46 @@ impl RouteRepository {
                             report
                                 .first_imported_group_id
                                 .get_or_insert_with(|| route.id.clone());
+                            info!(
+                                source = %source.display(),
+                                target = %target.display(),
+                                route_id = %route.id,
+                                point_count = route.point_count(),
+                                "imported route document"
+                            );
                         }
-                        Err(error) => report
-                            .failed_sources
-                            .push(format!("{}: {error:#}", source.display())),
+                        Err(error) => {
+                            warn!(
+                                source = %source.display(),
+                                error = %error,
+                                "failed to save imported route document"
+                            );
+                            report
+                                .failed_sources
+                                .push(format!("{}: {error:#}", source.display()));
+                        }
                     }
                 }
-                Err(error) => report
-                    .failed_sources
-                    .push(format!("{}: {error:#}", source.display())),
+                Err(error) => {
+                    warn!(
+                        source = %source.display(),
+                        error = %error,
+                        "failed to load imported route document"
+                    );
+                    report
+                        .failed_sources
+                        .push(format!("{}: {error:#}", source.display()));
+                }
             }
         }
 
+        info!(
+            routes_dir = %routes_dir.display(),
+            imported_count = report.imported_count,
+            imported_point_count = report.imported_point_count,
+            failed_count = report.failed_sources.len(),
+            "finished importing route documents"
+        );
         Ok(report)
     }
 
@@ -172,6 +214,7 @@ impl RouteRepository {
 
         fs::remove_file(path)
             .with_context(|| format!("failed to delete route file {}", path.display()))?;
+        info!(path = %path.display(), "deleted route document");
         Ok(())
     }
 
