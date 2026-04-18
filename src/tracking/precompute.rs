@@ -92,8 +92,7 @@ pub fn load_or_build_match_pyramid(workspace: &WorkspaceSnapshot) -> Result<Prep
         local_scale,
         global_scale,
         coarse_scale,
-    )
-    {
+    ) {
         return Ok(PreparedMatchPyramid {
             cache_key: initial_key,
             pyramid,
@@ -106,11 +105,11 @@ pub fn load_or_build_match_pyramid(workspace: &WorkspaceSnapshot) -> Result<Prep
         workspace.config.view_size,
     )
     .with_context(|| {
-            format!(
-                "failed to load augmented BWiki logic tiles from {}",
-                workspace.assets.bwiki_cache_dir.display()
-            )
-        })?;
+        format!(
+            "failed to load augmented BWiki logic tiles from {}",
+            workspace.assets.bwiki_cache_dir.display()
+        )
+    })?;
     let base_map = equalize_histogram(&base_map);
     let local_map = build_match_representation(&downscale_gray(&base_map, local_scale));
     let global_map = if global_scale == local_scale {
@@ -540,8 +539,7 @@ fn tracking_poi_revision_hash(bwiki_cache_dir: &Path) -> Result<String> {
                 path.file_name()
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| name.starts_with(&prefix))
-            })
-            {
+            }) {
                 update_hash_bytes(&mut hash, prefix.as_bytes());
                 hash_file_metadata(&mut hash, path);
             }

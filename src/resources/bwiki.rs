@@ -725,10 +725,7 @@ fn overlay_tracking_icon(
     for (x, y, pixel) in resized.enumerate_pixels() {
         let dst_x = left + x as i32;
         let dst_y = top + y as i32;
-        if dst_x < 0
-            || dst_y < 0
-            || dst_x >= image.width() as i32
-            || dst_y >= image.height() as i32
+        if dst_x < 0 || dst_y < 0 || dst_x >= image.width() as i32 || dst_y >= image.height() as i32
         {
             continue;
         }

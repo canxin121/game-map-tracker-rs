@@ -10,7 +10,10 @@ use image::GrayImage;
 
 use crate::{
     config::{AppConfig, CONFIG_FILE_NAME},
-    resources::{AssetManifest, BwikiCachePaths, WorkspaceLoadReport, WorkspaceSnapshot, default_map_dimensions},
+    resources::{
+        AssetManifest, BwikiCachePaths, WorkspaceLoadReport, WorkspaceSnapshot,
+        default_map_dimensions,
+    },
 };
 
 const APP_QUALIFIER: &str = "io";

@@ -164,11 +164,11 @@ pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyram
         config.view_size,
     )
     .with_context(|| {
-            format!(
-                "failed to load augmented BWiki logic tiles from {}",
-                workspace.assets.bwiki_cache_dir.display()
-            )
-        })?;
+        format!(
+            "failed to load augmented BWiki logic tiles from {}",
+            workspace.assets.bwiki_cache_dir.display()
+        )
+    })?;
     let base_map = equalize_histogram(&base_map);
     let local_map = downscale_gray(&base_map, local_scale);
     let global_map = if global_scale == local_scale {
@@ -257,6 +257,108 @@ pub fn build_mask(width: u32, height: u32, inner_radius: f32, outer_radius: f32)
         let enabled = distance <= outer_radius && distance >= inner_radius;
         Luma([if enabled { 255 } else { 0 }])
     })
+}
+
+pub fn capture_template_annulus(
+    captured: &GrayImage,
+    inner_radius: f32,
+    outer_radius: f32,
+) -> GrayImage {
+    let diameter_px = ((captured.width().min(captured.height()) as f32) * outer_radius)
+        .round()
+        .max(1.0) as u32;
+    let offset_x = captured.width().saturating_sub(diameter_px) / 2;
+    let offset_y = captured.height().saturating_sub(diameter_px) / 2;
+    let square = crop_imm(captured, offset_x, offset_y, diameter_px, diameter_px).to_image();
+    soften_capture_to_annulus(&square, inner_radius, outer_radius)
+}
+
+fn soften_capture_to_annulus(image: &GrayImage, inner_radius: f32, outer_radius: f32) -> GrayImage {
+    let feather = annulus_feather(image.width(), image.height());
+    let valid_inner = (inner_radius + feather).clamp(0.0, 1.5);
+    let valid_outer = (outer_radius - feather).clamp(valid_inner, 1.5);
+    let mut ring_sum = 0u64;
+    let mut ring_count = 0u64;
+    let mut weighted_sum = 0.0f32;
+    let mut weighted_count = 0.0f32;
+    let mut fallback_sum = 0u64;
+
+    for (x, y, pixel) in image.enumerate_pixels() {
+        let distance = annulus_distance(image.width(), image.height(), x, y);
+        let alpha = annulus_alpha(distance, inner_radius, outer_radius, feather);
+        if distance >= valid_inner && distance <= valid_outer {
+            ring_sum += u64::from(pixel.0[0]);
+            ring_count += 1;
+        }
+        weighted_sum += f32::from(pixel.0[0]) * alpha;
+        weighted_count += alpha;
+        fallback_sum += u64::from(pixel.0[0]);
+    }
+
+    let neutral = if ring_count > 0 {
+        (ring_sum / ring_count) as u8
+    } else if weighted_count > 1e-3 {
+        (weighted_sum / weighted_count).round().clamp(0.0, 255.0) as u8
+    } else {
+        let pixel_count = u64::from(image.width().max(1)) * u64::from(image.height().max(1));
+        (fallback_sum / pixel_count.max(1)) as u8
+    };
+
+    ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
+        let source = f32::from(image.get_pixel(x, y).0[0]);
+        let alpha = annulus_alpha(
+            annulus_distance(image.width(), image.height(), x, y),
+            inner_radius,
+            outer_radius,
+            feather,
+        );
+        let value = (f32::from(neutral) * (1.0 - alpha) + source * alpha)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        Luma([value])
+    })
+}
+
+fn annulus_alpha(distance: f32, inner_radius: f32, outer_radius: f32, feather: f32) -> f32 {
+    let inner = inner_radius.clamp(0.0, 1.0);
+    let outer = outer_radius.clamp(inner + f32::EPSILON, 1.5);
+
+    let inner_alpha = if inner <= 0.0 {
+        1.0
+    } else {
+        smoothstep(inner, inner + feather, distance)
+    };
+    let outer_alpha = if outer >= 1.5 {
+        1.0
+    } else {
+        1.0 - smoothstep((outer - feather).max(0.0), outer, distance)
+    };
+
+    (inner_alpha * outer_alpha).clamp(0.0, 1.0)
+}
+
+fn annulus_feather(width: u32, height: u32) -> f32 {
+    let diameter = width.min(height).max(1) as f32;
+    (8.0 / diameter).clamp(0.02, 0.06)
+}
+
+fn annulus_distance(width: u32, height: u32, x: u32, y: u32) -> f32 {
+    let center_x = (width.saturating_sub(1)) as f32 * 0.5;
+    let center_y = (height.saturating_sub(1)) as f32 * 0.5;
+    let radius_x = width.max(1) as f32 * 0.5;
+    let radius_y = height.max(1) as f32 * 0.5;
+    let dx = (x as f32 - center_x) / radius_x.max(1.0);
+    let dy = (y as f32 - center_y) / radius_y.max(1.0);
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if edge1 <= edge0 {
+        return if x >= edge1 { 1.0 } else { 0.0 };
+    }
+
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 pub fn build_match_representation(image: &GrayImage) -> GrayImage {
@@ -615,6 +717,39 @@ fn heatmap_color(value: f32) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_template_annulus_neutralizes_center_arrow_region() {
+        let image = GrayImage::from_fn(101, 101, |x, y| {
+            let distance = annulus_distance(101, 101, x, y);
+            let value = if distance <= 0.18 {
+                245
+            } else if distance <= 0.94 {
+                122
+            } else {
+                18
+            };
+            Luma([value])
+        });
+
+        let annulus = capture_template_annulus(&image, 0.22, 1.0);
+        let center = annulus.get_pixel(50, 50).0[0];
+        let ring = annulus.get_pixel(50, 28).0[0];
+        let corner = annulus.get_pixel(0, 0).0[0];
+
+        assert!(
+            (i32::from(center) - 122).abs() <= 12,
+            "center should be neutralized toward ring intensity, got {center}"
+        );
+        assert!(
+            (i32::from(corner) - 122).abs() <= 16,
+            "outer UI should be neutralized toward ring intensity, got {corner}"
+        );
+        assert!(
+            (i32::from(ring) - 122).abs() <= 10,
+            "ring texture should stay intact, got {ring}"
+        );
+    }
 
     #[test]
     fn local_candidate_accepts_normal_local_jump() {

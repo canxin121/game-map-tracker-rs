@@ -42,9 +42,10 @@ use crate::{
         vision::{
             DebugOverlay, LocalCandidateDecision, MapPyramid, MaskSet, MatchCandidate, SearchCrop,
             SearchStage, TrackerState, build_debug_snapshot, build_mask,
-            build_match_representation, center_to_scaled, coarse_global_downscale,
-            crop_search_region, local_candidate_decision, mask_as_unit_vec, preview_heatmap,
-            preview_image, preview_mask_image, scaled_dimension, search_region_around_center,
+            build_match_representation, capture_template_annulus, center_to_scaled,
+            coarse_global_downscale, crop_search_region, local_candidate_decision,
+            mask_as_unit_vec, preview_heatmap, preview_image, preview_mask_image, scaled_dimension,
+            search_region_around_center,
         },
     },
 };
@@ -508,7 +509,11 @@ fn prepare_capture_templates(
     config: &AppConfig,
     pyramid: &MapPyramid,
 ) -> (GrayImage, GrayImage, GrayImage) {
-    let square = capture_template_square(captured, config.template.mask_outer_radius);
+    let square = capture_template_annulus(
+        captured,
+        config.template.mask_inner_radius,
+        config.template.mask_outer_radius,
+    );
     (
         prepare_square_template(&square, config.view_size, pyramid.local.scale),
         prepare_square_template(&square, config.view_size, pyramid.global.scale),
@@ -522,20 +527,11 @@ fn prepare_capture_template(
     captured: &GrayImage,
     view_size: u32,
     scale: u32,
+    mask_inner_radius: f32,
     mask_outer_radius: f32,
 ) -> GrayImage {
-    let square = capture_template_square(captured, mask_outer_radius);
+    let square = capture_template_annulus(captured, mask_inner_radius, mask_outer_radius);
     prepare_square_template(&square, view_size, scale)
-}
-
-#[cfg(feature = "ai-burn")]
-fn capture_template_square(captured: &GrayImage, mask_outer_radius: f32) -> GrayImage {
-    let diameter_px = ((captured.width().min(captured.height()) as f32) * mask_outer_radius)
-        .round()
-        .max(1.0) as u32;
-    let offset_x = captured.width().saturating_sub(diameter_px) / 2;
-    let offset_y = captured.height().saturating_sub(diameter_px) / 2;
-    image::imageops::crop_imm(captured, offset_x, offset_y, diameter_px, diameter_px).to_image()
 }
 
 #[cfg(feature = "ai-burn")]
@@ -2194,8 +2190,16 @@ mod tests {
         sample_world_positions(&fixture.map, fixture.config.view_size, 1)
             .into_iter()
             .map(|start| {
-                let dir_x = if start.0 > fixture.map.width() / 2 { -1 } else { 1 };
-                let dir_y = if start.1 > fixture.map.height() / 2 { -1 } else { 1 };
+                let dir_x = if start.0 > fixture.map.width() / 2 {
+                    -1
+                } else {
+                    1
+                };
+                let dir_y = if start.1 > fixture.map.height() / 2 {
+                    -1
+                } else {
+                    1
+                };
                 [
                     bounded_world_point(fixture, start.0 as i32, start.1 as i32),
                     bounded_world_point(
@@ -2354,6 +2358,7 @@ mod tests {
                 &capture,
                 fixture.config.view_size,
                 fixture.pyramid.local.scale,
+                fixture.config.template.mask_inner_radius,
                 fixture.config.template.mask_outer_radius,
             )
         });
@@ -2362,6 +2367,7 @@ mod tests {
                 &capture,
                 fixture.config.view_size,
                 fixture.pyramid.global.scale,
+                fixture.config.template.mask_inner_radius,
                 fixture.config.template.mask_outer_radius,
             )
         });
@@ -2370,6 +2376,7 @@ mod tests {
                 &capture,
                 fixture.config.view_size,
                 fixture.pyramid.coarse.scale,
+                fixture.config.template.mask_inner_radius,
                 fixture.config.template.mask_outer_radius,
             )
         });
@@ -2518,8 +2525,11 @@ mod tests {
             for window in path.windows(2) {
                 let previous = WorldPoint::new(window[0].0 as f32, window[0].1 as f32);
                 let capture = synthetic_capture(fixture, window[1]);
-                let templates =
-                    matcher.prepare_capture_templates(&capture, &fixture.config, &fixture.pyramid)?;
+                let templates = matcher.prepare_capture_templates(
+                    &capture,
+                    &fixture.config,
+                    &fixture.pyramid,
+                )?;
                 let region = search_region_around_center(
                     fixture.pyramid.local.image.width(),
                     fixture.pyramid.local.image.height(),

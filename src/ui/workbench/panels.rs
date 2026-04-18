@@ -2094,9 +2094,9 @@ fn settings_capture_page(
                                 "手动取区"
                             },
                             Some(if this.is_minimap_region_picker_active() {
-                                "小地图取区窗口已打开：先拖出圆，再拖圆心移动、拖圆边改半径，最后点确认。最终会保存为圆的外接正方形截图框。".into()
+                                "小地图环形取区窗口已打开：拖圆心整体移动，拖外圈改截图范围，拖内圈改中心挖空，最后点确认。".into()
                             } else {
-                                "打开屏幕取区窗口，拖出并微调小地图圆形范围。".into()
+                                "打开屏幕取区窗口，拖出并微调小地图环形范围。".into()
                             }),
                             if this.is_minimap_region_picker_active() {
                                 ToolbarButtonTone::Primary
@@ -4059,7 +4059,10 @@ pub(super) fn paint_tracker_map_overlay_snapshot(
                 let screen = camera.world_to_screen(position.world);
                 paint_tracker_position_arrow(
                     window,
-                    point(bounds.origin.x + px(screen.x), bounds.origin.y + px(screen.y)),
+                    point(
+                        bounds.origin.x + px(screen.x),
+                        bounds.origin.y + px(screen.y),
+                    ),
                     position.heading_degrees.unwrap_or(0.0),
                     position.inertial,
                     tokens,

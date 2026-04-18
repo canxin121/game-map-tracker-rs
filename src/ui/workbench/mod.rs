@@ -56,7 +56,7 @@ use self::{
         PointReorderTargetItem, RoutePlannerFormInputs, parse_input_value, read_input_value,
         set_input_value,
     },
-    minimap_picker::MinimapRegionPicker,
+    minimap_picker::{MinimapRegionPickResult, MinimapRegionPicker},
     page::{MapPage, SettingsPage, WorkbenchPage},
     panels::render_workbench,
     probe_region_picker::MinimapPresenceProbePicker,
@@ -5204,6 +5204,9 @@ impl TrackerWorkbench {
         let workbench = cx.entity().downgrade();
         let workbench_for_close = workbench.clone();
         let main_window_handle = window.window_handle();
+        let minimap_region = self.workspace.config.minimap.clone();
+        let mask_inner_radius = self.workspace.config.template.mask_inner_radius;
+        let mask_outer_radius = self.workspace.config.template.mask_outer_radius;
         let picker_result = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(display_bounds)),
@@ -5229,7 +5232,14 @@ impl TrackerWorkbench {
                 });
 
                 cx.new(|_| {
-                    MinimapRegionPicker::new(workbench.clone(), main_window_handle, display_bounds)
+                    MinimapRegionPicker::new(
+                        workbench.clone(),
+                        main_window_handle,
+                        display_bounds,
+                        minimap_region.clone(),
+                        mask_inner_radius,
+                        mask_outer_radius,
+                    )
                 })
             },
         );
@@ -5238,7 +5248,7 @@ impl TrackerWorkbench {
             Ok(handle) => {
                 self.minimap_region_picker_window = Some(handle.into());
                 self.status_text =
-                    "小地图取区已开启：先拖出圆，再拖圆心移动、拖圆边改半径，最后点确认。".into();
+                    "小地图环形取区已开启：拖外圈改截图范围，拖内圈改中心挖空，最后点确认。".into();
             }
             Err(error) => {
                 self.status_text = format!("打开小地图取区窗口失败：{error:#}").into();
@@ -5313,38 +5323,69 @@ impl TrackerWorkbench {
         );
     }
 
-    pub(super) fn finish_minimap_region_pick(
+    fn sync_template_mask_form_radii(
         &mut self,
-        region: crate::config::CaptureRegion,
+        inner_radius: f32,
+        outer_radius: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        set_input_value(
+            &self.config_form.template_mask_outer_radius,
+            outer_radius.to_string(),
+            window,
+            cx,
+        );
+        set_input_value(
+            &self.config_form.template_mask_inner_radius,
+            inner_radius.to_string(),
+            window,
+            cx,
+        );
+    }
+
+    fn finish_minimap_region_pick(
+        &mut self,
+        result: MinimapRegionPickResult,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.minimap_region_picker_window = None;
 
         let mut config = self.workspace.config.clone();
-        config.minimap = region.clone();
+        config.minimap = result.region.clone();
+        config.template.mask_outer_radius = result.mask_outer_radius;
+        config.template.mask_inner_radius = result.mask_inner_radius;
         self.update_workspace_config(config.clone());
-        self.sync_minimap_form_region(&region, window, cx);
+        self.sync_minimap_form_region(&result.region, window, cx);
+        self.sync_template_mask_form_radii(
+            result.mask_inner_radius,
+            result.mask_outer_radius,
+            window,
+            cx,
+        );
 
         match save_config(&self.workspace.project_root, &config) {
             Ok(path) => {
                 self.status_text = if self.is_tracking_active() {
                     format!(
-                        "已更新小地图截图区域为 top {} / left {} / {}x{}，并保存到 {}。当前追踪需重启后才会应用新区域。",
-                        region.top,
-                        region.left,
-                        region.width,
-                        region.height,
+                        "已更新小地图环形取区为 top {} / left {} / {}x{}，内圈 {:.3}，并保存到 {}。当前追踪需重启后才会应用新区域。",
+                        result.region.top,
+                        result.region.left,
+                        result.region.width,
+                        result.region.height,
+                        result.mask_inner_radius,
                         path.display()
                     )
                     .into()
                 } else {
                     format!(
-                        "已更新小地图截图区域为 top {} / left {} / {}x{}，并保存到 {}。",
-                        region.top,
-                        region.left,
-                        region.width,
-                        region.height,
+                        "已更新小地图环形取区为 top {} / left {} / {}x{}，内圈 {:.3}，并保存到 {}。",
+                        result.region.top,
+                        result.region.left,
+                        result.region.width,
+                        result.region.height,
+                        result.mask_inner_radius,
                         path.display()
                     )
                     .into()
@@ -5352,8 +5393,12 @@ impl TrackerWorkbench {
             }
             Err(error) => {
                 self.status_text = format!(
-                    "小地图截图区域已更新为 top {} / left {} / {}x{}，但写入配置失败：{error:#}",
-                    region.top, region.left, region.width, region.height
+                    "小地图环形取区已更新为 top {} / left {} / {}x{}，内圈 {:.3}，但写入配置失败：{error:#}",
+                    result.region.top,
+                    result.region.left,
+                    result.region.width,
+                    result.region.height,
+                    result.mask_inner_radius
                 )
                 .into();
             }

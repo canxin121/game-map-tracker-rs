@@ -341,12 +341,9 @@ where
 {
     let backend = G::backend();
     let mut choices = Vec::new();
-    let discrete =
-        <WgpuRuntime as CubeRuntime>::enumerate_devices(0, &backend).into_iter();
-    let integrated =
-        <WgpuRuntime as CubeRuntime>::enumerate_devices(1, &backend).into_iter();
-    let virtual_gpus =
-        <WgpuRuntime as CubeRuntime>::enumerate_devices(2, &backend).into_iter();
+    let discrete = <WgpuRuntime as CubeRuntime>::enumerate_devices(0, &backend).into_iter();
+    let integrated = <WgpuRuntime as CubeRuntime>::enumerate_devices(1, &backend).into_iter();
+    let virtual_gpus = <WgpuRuntime as CubeRuntime>::enumerate_devices(2, &backend).into_iter();
 
     let devices = discrete
         .chain(integrated)

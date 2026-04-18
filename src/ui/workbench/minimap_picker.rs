@@ -11,28 +11,54 @@ use super::TrackerWorkbench;
 
 const MIN_SELECTION_SIZE: f32 = 24.0;
 const OUTLINE_STROKE_WIDTH: f32 = 3.0;
+const INNER_OUTLINE_STROKE_WIDTH: f32 = 2.0;
+const MIN_RING_THICKNESS: f32 = 12.0;
 const MOVE_HANDLE_RADIUS: f32 = 7.0;
-const MOVE_HANDLE_HIT_RADIUS: f32 = 18.0;
-const RESIZE_HIT_TOLERANCE: f32 = 14.0;
+const MOVE_HANDLE_HIT_RADIUS: f32 = 12.0;
+const OUTER_RESIZE_HIT_TOLERANCE: f32 = 14.0;
+const INNER_RESIZE_HIT_TOLERANCE: f32 = 10.0;
+const MIN_INNER_RESIZE_HIT_TOLERANCE: f32 = 4.0;
+const MIN_OUTER_SELECTION_RATIO: f32 = 0.1;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct CircleSelection {
     center: Point<Pixels>,
     radius: Pixels,
+    inner_ratio: f32,
+}
+
+impl CircleSelection {
+    fn inner_radius(self) -> Pixels {
+        px(f32::from(self.radius) * self.inner_ratio)
+    }
 }
 
 #[derive(Clone, Copy)]
 enum DragMode {
-    Drawing { anchor: Point<Pixels> },
-    Moving { pointer_offset: Point<Pixels> },
-    Resizing,
+    Drawing {
+        anchor: Point<Pixels>,
+        inner_ratio: f32,
+    },
+    Moving {
+        pointer_offset: Point<Pixels>,
+    },
+    ResizingOuter,
+    ResizingInner,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HitTarget {
     None,
     Move,
-    Resize,
+    ResizeOuter,
+    ResizeInner,
+}
+
+#[derive(Clone)]
+pub(super) struct MinimapRegionPickResult {
+    pub(super) region: CaptureRegion,
+    pub(super) mask_inner_radius: f32,
+    pub(super) mask_outer_radius: f32,
 }
 
 pub(super) struct MinimapRegionPicker {
@@ -42,6 +68,7 @@ pub(super) struct MinimapRegionPicker {
     selection: Option<CircleSelection>,
     drag_mode: Option<DragMode>,
     pointer_position: Option<Point<Pixels>>,
+    default_inner_ratio: f32,
 }
 
 impl MinimapRegionPicker {
@@ -49,14 +76,25 @@ impl MinimapRegionPicker {
         workbench: gpui::WeakEntity<TrackerWorkbench>,
         main_window_handle: AnyWindowHandle,
         display_bounds: Bounds<Pixels>,
+        minimap_region: CaptureRegion,
+        mask_inner_radius: f32,
+        mask_outer_radius: f32,
     ) -> Self {
+        let default_inner_ratio = normalized_inner_ratio(mask_inner_radius, mask_outer_radius);
+        let selection = selection_from_existing_region(
+            display_bounds,
+            &minimap_region,
+            mask_inner_radius,
+            mask_outer_radius,
+        );
         Self {
             workbench,
             main_window_handle,
             display_bounds,
-            selection: None,
+            selection,
             drag_mode: None,
             pointer_position: None,
+            default_inner_ratio,
         }
     }
 
@@ -66,6 +104,7 @@ impl MinimapRegionPicker {
         let Some(selection) = self.selection else {
             self.drag_mode = Some(DragMode::Drawing {
                 anchor: event.position,
+                inner_ratio: self.default_inner_ratio,
             });
             return;
         };
@@ -77,8 +116,12 @@ impl MinimapRegionPicker {
                     event.position.y - selection.center.y,
                 ),
             }),
-            HitTarget::Resize => Some(DragMode::Resizing),
-            HitTarget::None => None,
+            HitTarget::ResizeOuter => Some(DragMode::ResizingOuter),
+            HitTarget::ResizeInner => Some(DragMode::ResizingInner),
+            HitTarget::None => Some(DragMode::Drawing {
+                anchor: event.position,
+                inner_ratio: self.default_inner_ratio,
+            }),
         };
     }
 
@@ -86,8 +129,14 @@ impl MinimapRegionPicker {
         self.pointer_position = Some(event.position);
 
         match self.drag_mode {
-            Some(DragMode::Drawing { anchor }) => {
-                self.selection = Some(circle_from_drag(anchor, event.position));
+            Some(DragMode::Drawing {
+                anchor,
+                inner_ratio,
+            }) => {
+                self.selection = Some(clamp_circle_to_bounds(
+                    circle_from_drag(anchor, event.position, inner_ratio),
+                    self.local_bounds(),
+                ));
             }
             Some(DragMode::Moving { pointer_offset }) => {
                 if let Some(selection) = self.selection {
@@ -98,12 +147,13 @@ impl MinimapRegionPicker {
                                 event.position.y - pointer_offset.y,
                             ),
                             radius: selection.radius,
+                            inner_ratio: selection.inner_ratio,
                         },
                         self.local_bounds(),
                     ));
                 }
             }
-            Some(DragMode::Resizing) => {
+            Some(DragMode::ResizingOuter) => {
                 if let Some(selection) = self.selection {
                     let next_radius = distance(selection.center, event.position).clamp(
                         MIN_SELECTION_SIZE / 2.0,
@@ -112,6 +162,17 @@ impl MinimapRegionPicker {
                     self.selection = Some(CircleSelection {
                         center: selection.center,
                         radius: px(next_radius),
+                        inner_ratio: clamp_inner_ratio(selection.inner_ratio, px(next_radius)),
+                    });
+                }
+            }
+            Some(DragMode::ResizingInner) => {
+                if let Some(selection) = self.selection {
+                    let next_inner_ratio = inner_ratio_for_pointer(selection, event.position);
+                    self.selection = Some(CircleSelection {
+                        center: selection.center,
+                        radius: selection.radius,
+                        inner_ratio: next_inner_ratio,
                     });
                 }
             }
@@ -154,13 +215,13 @@ impl MinimapRegionPicker {
             return;
         };
 
-        let region = self.capture_region_for(selection);
-        self.commit_region(region, window, cx);
+        let result = self.pick_result_for(selection);
+        self.commit_region(result, window, cx);
     }
 
     fn commit_region(
         &mut self,
-        region: CaptureRegion,
+        result: MinimapRegionPickResult,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -170,7 +231,7 @@ impl MinimapRegionPicker {
         let _ = main_window_handle.update(cx, move |_, main_window, cx| {
             if let Some(workbench) = workbench.upgrade() {
                 let _ = workbench.update(cx, |this, cx| {
-                    this.finish_minimap_region_pick(region, main_window, cx);
+                    this.finish_minimap_region_pick(result, main_window, cx);
                 });
             }
         });
@@ -178,16 +239,8 @@ impl MinimapRegionPicker {
         window.remove_window();
     }
 
-    fn capture_region_for(&self, selection: CircleSelection) -> CaptureRegion {
-        let bounds = circle_selection_bounds(selection);
-        CaptureRegion {
-            top: (f32::from(self.display_bounds.origin.y) + f32::from(bounds.origin.y)).round()
-                as i32,
-            left: (f32::from(self.display_bounds.origin.x) + f32::from(bounds.origin.x)).round()
-                as i32,
-            width: f32::from(bounds.size.width).round().max(1.0) as u32,
-            height: f32::from(bounds.size.height).round().max(1.0) as u32,
-        }
+    fn pick_result_for(&self, selection: CircleSelection) -> MinimapRegionPickResult {
+        pick_result_for_selection(self.display_bounds, selection)
     }
 
     fn local_bounds(&self) -> Bounds<Pixels> {
@@ -201,7 +254,7 @@ impl MinimapRegionPicker {
         match self.drag_mode {
             Some(DragMode::Drawing { .. }) => CursorStyle::Crosshair,
             Some(DragMode::Moving { .. }) => CursorStyle::ClosedHand,
-            Some(DragMode::Resizing) => CursorStyle::ResizeLeftRight,
+            Some(DragMode::ResizingOuter | DragMode::ResizingInner) => CursorStyle::ResizeLeftRight,
             None => {
                 let Some(selection) = self.selection else {
                     return CursorStyle::Crosshair;
@@ -213,7 +266,7 @@ impl MinimapRegionPicker {
                     .unwrap_or(HitTarget::None)
                 {
                     HitTarget::Move => CursorStyle::OpenHand,
-                    HitTarget::Resize => CursorStyle::ResizeLeftRight,
+                    HitTarget::ResizeOuter | HitTarget::ResizeInner => CursorStyle::ResizeLeftRight,
                     HitTarget::None => CursorStyle::Crosshair,
                 }
             }
@@ -302,7 +355,7 @@ fn picker_controls(has_selection: bool, cx: &mut Context<MinimapRegionPicker>) -
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(hsla(0.0, 0.0, 1.0, 0.95))
-                .child("小地图圆形取区"),
+                .child("小地图环形取区"),
         )
         .child(
             div()
@@ -310,9 +363,9 @@ fn picker_controls(has_selection: bool, cx: &mut Context<MinimapRegionPicker>) -
                 .line_height(px(18.0))
                 .text_color(hsla(0.0, 0.0, 1.0, 0.82))
                 .child(if has_selection {
-                    "拖动圆心可整体移动，拖动圆边可调整半径。确认后会保存为圆的外接正方形截图范围。"
+                    "拖动圆心可整体移动，拖动外圈改截图范围，拖动内圈改中心挖空。确认后会保存外圈截图和环形遮罩。"
                 } else {
-                    "先按住左键拖出一个圆，再继续微调位置和半径。右键或取消按钮可退出。"
+                    "先按住左键拖出外圈，再继续微调外圈和内圈。右键或取消按钮可退出。"
                 }),
         )
         .child(
@@ -444,14 +497,16 @@ fn circle_selection_bounds(selection: CircleSelection) -> Bounds<Pixels> {
     }
 }
 
-fn circle_from_drag(start: Point<Pixels>, end: Point<Pixels>) -> CircleSelection {
+fn circle_from_drag(start: Point<Pixels>, end: Point<Pixels>, inner_ratio: f32) -> CircleSelection {
     let bounds = circular_selection_bounds(start, end);
+    let radius = px(f32::from(bounds.size.width).min(f32::from(bounds.size.height)) / 2.0);
     CircleSelection {
         center: point(
             bounds.origin.x + bounds.size.width / 2.0,
             bounds.origin.y + bounds.size.height / 2.0,
         ),
-        radius: px(f32::from(bounds.size.width).min(f32::from(bounds.size.height)) / 2.0),
+        radius,
+        inner_ratio: clamp_inner_ratio(inner_ratio, radius),
     }
 }
 
@@ -459,17 +514,26 @@ fn translate_circle(selection: CircleSelection, origin: Point<Pixels>) -> Circle
     CircleSelection {
         center: point(origin.x + selection.center.x, origin.y + selection.center.y),
         radius: selection.radius,
+        inner_ratio: selection.inner_ratio,
     }
 }
 
 fn hit_target(selection: CircleSelection, position: Point<Pixels>) -> HitTarget {
     let distance = distance(selection.center, position);
     let radius = f32::from(selection.radius);
-    if (distance - radius).abs() <= RESIZE_HIT_TOLERANCE {
-        return HitTarget::Resize;
+    let inner_radius = f32::from(selection.inner_radius());
+
+    if inner_radius > 0.0
+        && (distance - inner_radius).abs() <= inner_resize_hit_tolerance(inner_radius)
+    {
+        return HitTarget::ResizeInner;
     }
 
-    let move_radius = (radius * 0.35).max(MOVE_HANDLE_HIT_RADIUS).min(radius);
+    if (distance - radius).abs() <= OUTER_RESIZE_HIT_TOLERANCE {
+        return HitTarget::ResizeOuter;
+    }
+
+    let move_radius = MOVE_HANDLE_HIT_RADIUS.min(radius);
     if distance <= move_radius {
         HitTarget::Move
     } else {
@@ -483,6 +547,11 @@ fn distance(a: Point<Pixels>, b: Point<Pixels>) -> f32 {
     dx.hypot(dy)
 }
 
+fn inner_resize_hit_tolerance(inner_radius: f32) -> f32 {
+    INNER_RESIZE_HIT_TOLERANCE
+        .min((inner_radius - MOVE_HANDLE_HIT_RADIUS - 2.0).max(MIN_INNER_RESIZE_HIT_TOLERANCE))
+}
+
 fn max_radius_for_center(center: Point<Pixels>, bounds: Bounds<Pixels>) -> f32 {
     let center_x = f32::from(center.x);
     let center_y = f32::from(center.y);
@@ -494,6 +563,28 @@ fn max_radius_for_center(center: Point<Pixels>, bounds: Bounds<Pixels>) -> f32 {
         .min(top)
         .min(bottom)
         .max(MIN_SELECTION_SIZE / 2.0)
+}
+
+fn max_inner_ratio_for_radius(radius: Pixels) -> f32 {
+    let radius = f32::from(radius).max(1.0);
+    ((radius - MIN_RING_THICKNESS).max(0.0) / radius).clamp(0.0, 1.0)
+}
+
+fn clamp_inner_ratio(inner_ratio: f32, radius: Pixels) -> f32 {
+    inner_ratio.clamp(0.0, max_inner_ratio_for_radius(radius))
+}
+
+fn normalized_inner_ratio(mask_inner_radius: f32, mask_outer_radius: f32) -> f32 {
+    if mask_outer_radius <= f32::EPSILON {
+        0.0
+    } else {
+        (mask_inner_radius / mask_outer_radius).clamp(0.0, 1.0)
+    }
+}
+
+fn inner_ratio_for_pointer(selection: CircleSelection, position: Point<Pixels>) -> f32 {
+    let normalized = distance(selection.center, position) / f32::from(selection.radius).max(1.0);
+    clamp_inner_ratio(normalized, selection.radius)
 }
 
 fn clamp_circle_to_bounds(selection: CircleSelection, bounds: Bounds<Pixels>) -> CircleSelection {
@@ -513,10 +604,15 @@ fn clamp_circle_to_bounds(selection: CircleSelection, bounds: Bounds<Pixels>) ->
             px(f32::from(selection.center.y).clamp(min_y, max_y)),
         ),
         radius: px(radius),
+        inner_ratio: clamp_inner_ratio(selection.inner_ratio, px(radius)),
     }
 }
 
 fn paint_selection(window: &mut Window, selection: CircleSelection) {
+    if let Some(path) = circle_path(PathBuilder::fill(), selection.center, selection.radius) {
+        window.paint_path(path, hsla(0.56, 0.76, 0.82, 0.14));
+    }
+
     let outline_radius =
         px((f32::from(selection.radius) - OUTLINE_STROKE_WIDTH / 2.0)
             .max(MOVE_HANDLE_RADIUS + 2.0));
@@ -526,6 +622,24 @@ fn paint_selection(window: &mut Window, selection: CircleSelection) {
         outline_radius,
     ) {
         window.paint_path(path, hsla(0.0, 0.0, 1.0, 0.98));
+    }
+
+    let inner_radius = selection.inner_radius();
+    if f32::from(inner_radius) > 1.0 {
+        if let Some(path) = circle_path(
+            PathBuilder::fill(),
+            selection.center,
+            px((f32::from(inner_radius) - INNER_OUTLINE_STROKE_WIDTH).max(1.0)),
+        ) {
+            window.paint_path(path, hsla(0.0, 0.0, 0.0, 0.54));
+        }
+        if let Some(path) = circle_path(
+            PathBuilder::stroke(px(INNER_OUTLINE_STROKE_WIDTH)),
+            selection.center,
+            px((f32::from(inner_radius) - INNER_OUTLINE_STROKE_WIDTH / 2.0).max(1.0)),
+        ) {
+            window.paint_path(path, hsla(0.12, 0.86, 0.60, 0.98));
+        }
     }
 
     if let Some(path) = circle_path(
@@ -571,4 +685,155 @@ fn circle_path(
     );
     builder.close();
     builder.build().ok()
+}
+
+fn pick_result_for_selection(
+    display_bounds: Bounds<Pixels>,
+    selection: CircleSelection,
+) -> MinimapRegionPickResult {
+    let bounds = circle_selection_bounds(selection);
+    MinimapRegionPickResult {
+        region: CaptureRegion {
+            top: (f32::from(display_bounds.origin.y) + f32::from(bounds.origin.y)).round() as i32,
+            left: (f32::from(display_bounds.origin.x) + f32::from(bounds.origin.x)).round() as i32,
+            width: f32::from(bounds.size.width).round().max(1.0) as u32,
+            height: f32::from(bounds.size.height).round().max(1.0) as u32,
+        },
+        mask_inner_radius: selection.inner_ratio,
+        mask_outer_radius: 1.0,
+    }
+}
+
+fn selection_from_existing_region(
+    display_bounds: Bounds<Pixels>,
+    region: &CaptureRegion,
+    mask_inner_radius: f32,
+    mask_outer_radius: f32,
+) -> Option<CircleSelection> {
+    if region.width == 0 || region.height == 0 {
+        return None;
+    }
+
+    let base_radius = region.width.min(region.height) as f32 * 0.5;
+    if base_radius <= 0.0 {
+        return None;
+    }
+
+    let outer_ratio = if mask_outer_radius <= f32::EPSILON {
+        1.0
+    } else {
+        mask_outer_radius.clamp(MIN_OUTER_SELECTION_RATIO, 1.0)
+    };
+    let selection = CircleSelection {
+        center: point(
+            px(region.left as f32 - f32::from(display_bounds.origin.x) + region.width as f32 * 0.5),
+            px(region.top as f32 - f32::from(display_bounds.origin.y) + region.height as f32 * 0.5),
+        ),
+        radius: px((base_radius * outer_ratio).max(MIN_SELECTION_SIZE * 0.5)),
+        inner_ratio: normalized_inner_ratio(mask_inner_radius, outer_ratio),
+    };
+
+    Some(clamp_circle_to_bounds(
+        selection,
+        Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: display_bounds.size,
+        },
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_selection() -> CircleSelection {
+        CircleSelection {
+            center: point(px(120.0), px(80.0)),
+            radius: px(100.0),
+            inner_ratio: 0.2,
+        }
+    }
+
+    #[test]
+    fn existing_region_is_migrated_to_direct_annulus_selection() {
+        let display_bounds = Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(500.0), px(400.0)),
+        };
+        let selection = selection_from_existing_region(
+            display_bounds,
+            &CaptureRegion {
+                top: 40,
+                left: 60,
+                width: 200,
+                height: 200,
+            },
+            0.16,
+            0.8,
+        )
+        .expect("selection");
+
+        assert!((f32::from(selection.radius) - 80.0).abs() < 0.1);
+        assert!((selection.inner_ratio - 0.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn pick_result_saves_outer_circle_as_capture_box() {
+        let result = pick_result_for_selection(
+            Bounds {
+                origin: point(px(100.0), px(50.0)),
+                size: size(px(600.0), px(400.0)),
+            },
+            test_selection(),
+        );
+
+        assert_eq!(
+            result.region,
+            CaptureRegion {
+                top: 30,
+                left: 120,
+                width: 200,
+                height: 200,
+            }
+        );
+        assert!((result.mask_inner_radius - 0.2).abs() < 0.001);
+        assert!((result.mask_outer_radius - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn inner_ring_hover_wins_over_move_handle() {
+        let selection = CircleSelection {
+            center: point(px(100.0), px(100.0)),
+            radius: px(90.0),
+            inner_ratio: 0.18,
+        };
+
+        let target = hit_target(selection, point(px(116.0), px(100.0)));
+        assert_eq!(target, HitTarget::ResizeInner);
+        assert_eq!(
+            hit_target(selection, point(px(100.0), px(100.0))),
+            HitTarget::Move
+        );
+    }
+
+    #[test]
+    fn shrinking_outer_radius_clamps_inner_ratio_to_leave_ring_thickness() {
+        let selection = clamp_circle_to_bounds(
+            CircleSelection {
+                center: point(px(40.0), px(40.0)),
+                radius: px(20.0),
+                inner_ratio: 0.85,
+            },
+            Bounds {
+                origin: point(px(0.0), px(0.0)),
+                size: size(px(80.0), px(80.0)),
+            },
+        );
+
+        assert!(selection.inner_ratio <= max_inner_ratio_for_radius(selection.radius));
+        assert!(
+            f32::from(selection.radius) * (1.0 - selection.inner_ratio)
+                >= MIN_RING_THICKNESS - 0.01
+        );
+    }
 }
