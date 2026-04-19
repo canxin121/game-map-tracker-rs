@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use strum::Display;
 
 use crate::{
+    config::AppConfig,
     domain::{geometry::WorldPoint, tracker::TrackerEngineKind},
     resources::{
         WorkspaceSnapshot, load_logic_map_with_tracking_poi_scaled_image,
@@ -23,6 +24,30 @@ use crate::{
 };
 
 const INSCRIBED_SQUARE_SCALE: f32 = std::f32::consts::FRAC_1_SQRT_2;
+const SYNTHETIC_CAPTURE_MAP_RADIUS_RATIO: f32 = 0.84;
+const SYNTHETIC_CAPTURE_FRAME_RADIUS_RATIO: f32 = 0.93;
+const SYNTHETIC_CAPTURE_BORDER_RADIUS_RATIO: f32 = 1.0;
+
+#[derive(Debug, Clone, Copy)]
+struct CaptureSelectionLayout {
+    square_side_px: u32,
+    source_offset_x: u32,
+    source_offset_y: u32,
+    circle_diameter_px: u32,
+    circle_offset_x: u32,
+    circle_offset_y: u32,
+    normalized_inner_radius: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SyntheticCaptureLayout {
+    circle_diameter_px: u32,
+    circle_offset_x: u32,
+    circle_offset_y: u32,
+    map_diameter_px: u32,
+    map_inset_px: u32,
+    normalized_inner_radius: f32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
 pub enum SearchStage {
@@ -203,6 +228,13 @@ pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyram
     let local_scale = config.template.local_downscale.max(1);
     let global_scale = config.template.global_downscale.max(local_scale);
     let coarse_scale = coarse_global_downscale(config);
+    let annulus_inner = normalized_inner_radius(
+        config.template.mask_inner_radius,
+        config.template.mask_outer_radius,
+    );
+    let local_size = scaled_template_dimension(config.view_size.max(1), local_scale);
+    let global_size = scaled_dimension(config.view_size.max(1), global_scale);
+    let coarse_size = scaled_dimension(config.view_size.max(1), coarse_scale);
     let base_map = load_logic_map_with_tracking_poi_scaled_image(
         &workspace.assets.bwiki_cache_dir,
         1,
@@ -243,24 +275,14 @@ pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyram
     };
 
     let masks = MaskSet {
-        local: build_mask(
-            scaled_dimension(config.minimap.width, local_scale),
-            scaled_dimension(config.minimap.height, local_scale),
+        local: build_inner_square_mask(
+            local_size,
+            local_size,
             config.template.mask_inner_radius,
             config.template.mask_outer_radius,
         ),
-        global: build_mask(
-            scaled_dimension(config.minimap.width, global_scale),
-            scaled_dimension(config.minimap.height, global_scale),
-            config.template.mask_inner_radius,
-            config.template.mask_outer_radius,
-        ),
-        coarse: build_mask(
-            scaled_dimension(config.minimap.width, coarse_scale),
-            scaled_dimension(config.minimap.height, coarse_scale),
-            config.template.mask_inner_radius,
-            config.template.mask_outer_radius,
-        ),
+        global: build_mask(global_size, global_size, annulus_inner, 1.0),
+        coarse: build_mask(coarse_size, coarse_size, annulus_inner, 1.0),
     };
 
     Ok((pyramid, masks))
@@ -386,18 +408,336 @@ pub fn build_inner_square_mask(
     })
 }
 
+fn capture_selection_layout(
+    width: u32,
+    height: u32,
+    inner_radius: f32,
+    outer_radius: f32,
+) -> CaptureSelectionLayout {
+    let square_side_px = width.max(height).max(1);
+    let short_side = width.min(height).max(1);
+    let circle_diameter_px = ((short_side as f32) * outer_radius.clamp(0.1, 1.5))
+        .round()
+        .clamp(1.0, short_side as f32) as u32;
+
+    CaptureSelectionLayout {
+        square_side_px,
+        source_offset_x: square_side_px.saturating_sub(width) / 2,
+        source_offset_y: square_side_px.saturating_sub(height) / 2,
+        circle_diameter_px,
+        circle_offset_x: square_side_px.saturating_sub(circle_diameter_px) / 2,
+        circle_offset_y: square_side_px.saturating_sub(circle_diameter_px) / 2,
+        normalized_inner_radius: normalized_inner_radius(inner_radius, outer_radius),
+    }
+}
+
+fn capture_selection_distance(layout: CaptureSelectionLayout, x: u32, y: u32) -> Option<f32> {
+    let local_x = x.checked_sub(layout.circle_offset_x)?;
+    let local_y = y.checked_sub(layout.circle_offset_y)?;
+    if local_x >= layout.circle_diameter_px || local_y >= layout.circle_diameter_px {
+        return None;
+    }
+
+    Some(annulus_distance(
+        layout.circle_diameter_px,
+        layout.circle_diameter_px,
+        local_x,
+        local_y,
+    ))
+}
+
+pub(crate) fn capture_selection_outer_square(
+    captured: &GrayImage,
+    inner_radius: f32,
+    outer_radius: f32,
+) -> GrayImage {
+    let layout = capture_selection_layout(
+        captured.width(),
+        captured.height(),
+        inner_radius,
+        outer_radius,
+    );
+    GrayImage::from_fn(layout.square_side_px, layout.square_side_px, |x, y| {
+        let Some(source_x) = x.checked_sub(layout.source_offset_x) else {
+            return Luma([0]);
+        };
+        let Some(source_y) = y.checked_sub(layout.source_offset_y) else {
+            return Luma([0]);
+        };
+        if source_x >= captured.width() || source_y >= captured.height() {
+            return Luma([0]);
+        }
+        let Some(distance) = capture_selection_distance(layout, x, y) else {
+            return Luma([0]);
+        };
+        if distance > 1.0 || distance < layout.normalized_inner_radius {
+            return Luma([0]);
+        }
+
+        *captured.get_pixel(source_x, source_y)
+    })
+}
+
+pub(crate) fn capture_selection_outer_square_rgba(
+    captured: &RgbaImage,
+    inner_radius: f32,
+    outer_radius: f32,
+) -> RgbaImage {
+    let layout = capture_selection_layout(
+        captured.width(),
+        captured.height(),
+        inner_radius,
+        outer_radius,
+    );
+    RgbaImage::from_fn(layout.square_side_px, layout.square_side_px, |x, y| {
+        let Some(source_x) = x.checked_sub(layout.source_offset_x) else {
+            return Rgba([0, 0, 0, 255]);
+        };
+        let Some(source_y) = y.checked_sub(layout.source_offset_y) else {
+            return Rgba([0, 0, 0, 255]);
+        };
+        if source_x >= captured.width() || source_y >= captured.height() {
+            return Rgba([0, 0, 0, 255]);
+        }
+        let Some(distance) = capture_selection_distance(layout, x, y) else {
+            return Rgba([0, 0, 0, 255]);
+        };
+        if distance > 1.0 || distance < layout.normalized_inner_radius {
+            return Rgba([0, 0, 0, 255]);
+        }
+
+        *captured.get_pixel(source_x, source_y)
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn crop_view_square(image: &GrayImage, view_size: u32, center: (u32, u32)) -> GrayImage {
+    let side = view_size.min(image.width()).min(image.height()).max(1);
+    let left = center.0.saturating_sub(side / 2).min(image.width() - side);
+    let top = center.1.saturating_sub(side / 2).min(image.height() - side);
+    crop_imm(image, left, top, side, side).to_image()
+}
+
+fn crop_view_square_rgba(image: &RgbaImage, view_size: u32, center: (u32, u32)) -> RgbaImage {
+    let side = view_size.min(image.width()).min(image.height()).max(1);
+    let left = center.0.saturating_sub(side / 2).min(image.width() - side);
+    let top = center.1.saturating_sub(side / 2).min(image.height() - side);
+    crop_imm(image, left, top, side, side).to_image()
+}
+
+fn synthetic_capture_layout(config: &AppConfig) -> SyntheticCaptureLayout {
+    let capture_width = config.minimap.width.max(1);
+    let capture_height = config.minimap.height.max(1);
+    let capture_short_side = capture_width.min(capture_height).max(1);
+    let circle_diameter_px = ((capture_short_side as f32)
+        * config.template.mask_outer_radius.clamp(0.1, 1.5))
+    .round()
+    .clamp(1.0, capture_short_side as f32) as u32;
+    let map_diameter_px = ((circle_diameter_px as f32) * SYNTHETIC_CAPTURE_MAP_RADIUS_RATIO)
+        .round()
+        .clamp(1.0, circle_diameter_px as f32) as u32;
+
+    SyntheticCaptureLayout {
+        circle_diameter_px,
+        circle_offset_x: capture_width.saturating_sub(circle_diameter_px) / 2,
+        circle_offset_y: capture_height.saturating_sub(circle_diameter_px) / 2,
+        map_diameter_px,
+        map_inset_px: circle_diameter_px.saturating_sub(map_diameter_px) / 2,
+        normalized_inner_radius: normalized_inner_radius(
+            config.template.mask_inner_radius,
+            config.template.mask_outer_radius,
+        ),
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn mean_gray_value(image: &GrayImage) -> u8 {
+    let (sum, count) = image.pixels().fold((0u64, 0u64), |(sum, count), pixel| {
+        (sum + u64::from(pixel.0[0]), count + 1)
+    });
+    if count == 0 { 0 } else { (sum / count) as u8 }
+}
+
+fn mean_rgb_value(image: &RgbaImage) -> [u8; 3] {
+    let (sum, count) = image
+        .pixels()
+        .fold(([0u64; 3], 0u64), |(mut sum, count), pixel| {
+            sum[0] += u64::from(pixel.0[0]);
+            sum[1] += u64::from(pixel.0[1]);
+            sum[2] += u64::from(pixel.0[2]);
+            (sum, count + 1)
+        });
+    if count == 0 {
+        [0, 0, 0]
+    } else {
+        [
+            (sum[0] / count) as u8,
+            (sum[1] / count) as u8,
+            (sum[2] / count) as u8,
+        ]
+    }
+}
+
+fn shade_channel(value: u8, factor: f32, lift: f32) -> u8 {
+    (f32::from(value) * factor + lift).round().clamp(0.0, 255.0) as u8
+}
+
+fn shade_rgb(value: [u8; 3], factor: f32, lift: f32) -> [u8; 3] {
+    [
+        shade_channel(value[0], factor, lift),
+        shade_channel(value[1], factor, lift),
+        shade_channel(value[2], factor, lift),
+    ]
+}
+
+fn blend_rgb(base: [u8; 3], overlay: [u8; 3], alpha: f32) -> [u8; 3] {
+    [
+        blend_channel(base[0], overlay[0], alpha),
+        blend_channel(base[1], overlay[1], alpha),
+        blend_channel(base[2], overlay[2], alpha),
+    ]
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn synthesize_runtime_capture_from_map(
+    map: &GrayImage,
+    config: &AppConfig,
+    center: (u32, u32),
+) -> GrayImage {
+    let crop = crop_view_square(map, config.view_size.max(1), center);
+    let layout = synthetic_capture_layout(config);
+    let map_square = resize(
+        &crop,
+        layout.map_diameter_px,
+        layout.map_diameter_px,
+        FilterType::Triangle,
+    );
+    let mean = mean_gray_value(&map_square);
+    let background = shade_channel(mean, 0.08, 6.0);
+    let border = shade_channel(mean, 0.18, 12.0);
+    let frame = shade_channel(mean, 0.32, 20.0);
+    let hole = shade_channel(mean, 0.60, 72.0);
+    let mut canvas = GrayImage::from_pixel(
+        config.minimap.width,
+        config.minimap.height,
+        Luma([background]),
+    );
+
+    for local_y in 0..layout.circle_diameter_px {
+        for local_x in 0..layout.circle_diameter_px {
+            let distance = annulus_distance(
+                layout.circle_diameter_px,
+                layout.circle_diameter_px,
+                local_x,
+                local_y,
+            );
+            if distance > SYNTHETIC_CAPTURE_BORDER_RADIUS_RATIO {
+                continue;
+            }
+
+            let value = if distance > SYNTHETIC_CAPTURE_FRAME_RADIUS_RATIO {
+                border
+            } else if distance > SYNTHETIC_CAPTURE_MAP_RADIUS_RATIO {
+                frame
+            } else {
+                let map_x = local_x
+                    .saturating_sub(layout.map_inset_px)
+                    .min(map_square.width().saturating_sub(1));
+                let map_y = local_y
+                    .saturating_sub(layout.map_inset_px)
+                    .min(map_square.height().saturating_sub(1));
+                let source = map_square.get_pixel(map_x, map_y).0[0];
+                if distance <= layout.normalized_inner_radius {
+                    blend_channel(hole, source, 0.22)
+                } else {
+                    source
+                }
+            };
+
+            canvas.put_pixel(
+                layout.circle_offset_x + local_x,
+                layout.circle_offset_y + local_y,
+                Luma([value]),
+            );
+        }
+    }
+
+    canvas
+}
+
+pub(crate) fn synthesize_runtime_capture_rgba_from_map(
+    map: &RgbaImage,
+    config: &AppConfig,
+    center: (u32, u32),
+) -> RgbaImage {
+    let crop = crop_view_square_rgba(map, config.view_size.max(1), center);
+    let layout = synthetic_capture_layout(config);
+    let map_square = resize(
+        &crop,
+        layout.map_diameter_px,
+        layout.map_diameter_px,
+        FilterType::Triangle,
+    );
+    let mean = mean_rgb_value(&map_square);
+    let background = shade_rgb(mean, 0.08, 6.0);
+    let border = shade_rgb(mean, 0.18, 12.0);
+    let frame = shade_rgb(mean, 0.32, 20.0);
+    let hole = blend_rgb(shade_rgb(mean, 0.60, 54.0), [236, 232, 220], 0.55);
+    let mut canvas = RgbaImage::from_pixel(
+        config.minimap.width,
+        config.minimap.height,
+        Rgba([background[0], background[1], background[2], 255]),
+    );
+
+    for local_y in 0..layout.circle_diameter_px {
+        for local_x in 0..layout.circle_diameter_px {
+            let distance = annulus_distance(
+                layout.circle_diameter_px,
+                layout.circle_diameter_px,
+                local_x,
+                local_y,
+            );
+            if distance > SYNTHETIC_CAPTURE_BORDER_RADIUS_RATIO {
+                continue;
+            }
+
+            let pixel = if distance > SYNTHETIC_CAPTURE_FRAME_RADIUS_RATIO {
+                Rgba([border[0], border[1], border[2], 255])
+            } else if distance > SYNTHETIC_CAPTURE_MAP_RADIUS_RATIO {
+                Rgba([frame[0], frame[1], frame[2], 255])
+            } else {
+                let map_x = local_x
+                    .saturating_sub(layout.map_inset_px)
+                    .min(map_square.width().saturating_sub(1));
+                let map_y = local_y
+                    .saturating_sub(layout.map_inset_px)
+                    .min(map_square.height().saturating_sub(1));
+                let source = map_square.get_pixel(map_x, map_y).0;
+                let [r, g, b] = if distance <= layout.normalized_inner_radius {
+                    blend_rgb(hole, [source[0], source[1], source[2]], 0.22)
+                } else {
+                    [source[0], source[1], source[2]]
+                };
+                Rgba([r, g, b, 255])
+            };
+
+            canvas.put_pixel(
+                layout.circle_offset_x + local_x,
+                layout.circle_offset_y + local_y,
+                pixel,
+            );
+        }
+    }
+
+    canvas
+}
+
 pub fn capture_template_annulus(
     captured: &GrayImage,
     inner_radius: f32,
     outer_radius: f32,
 ) -> GrayImage {
-    let diameter_px = ((captured.width().min(captured.height()) as f32) * outer_radius)
-        .round()
-        .max(1.0) as u32;
-    let offset_x = captured.width().saturating_sub(diameter_px) / 2;
-    let offset_y = captured.height().saturating_sub(diameter_px) / 2;
-    let square = crop_imm(captured, offset_x, offset_y, diameter_px, diameter_px).to_image();
-    soften_capture_to_annulus(&square, inner_radius, outer_radius)
+    capture_selection_outer_square(captured, inner_radius, outer_radius)
 }
 
 pub fn capture_template_inner_square(
@@ -405,15 +745,7 @@ pub fn capture_template_inner_square(
     inner_radius: f32,
     outer_radius: f32,
 ) -> GrayImage {
-    let diameter_px = ((captured.width().min(captured.height()) as f32) * outer_radius)
-        .round()
-        .max(1.0) as u32;
-    let square_side =
-        inscribed_square_dimension(diameter_px).min(captured.width().min(captured.height()).max(1));
-    let offset_x = captured.width().saturating_sub(square_side) / 2;
-    let offset_y = captured.height().saturating_sub(square_side) / 2;
-    let square = crop_imm(captured, offset_x, offset_y, square_side, square_side).to_image();
-    soften_capture_center_hole(&square, normalized_inner_radius(inner_radius, outer_radius))
+    capture_selection_outer_square(captured, inner_radius, outer_radius)
 }
 
 pub fn capture_template_annulus_rgba(
@@ -421,13 +753,7 @@ pub fn capture_template_annulus_rgba(
     inner_radius: f32,
     outer_radius: f32,
 ) -> RgbaImage {
-    let diameter_px = ((captured.width().min(captured.height()) as f32) * outer_radius)
-        .round()
-        .max(1.0) as u32;
-    let offset_x = captured.width().saturating_sub(diameter_px) / 2;
-    let offset_y = captured.height().saturating_sub(diameter_px) / 2;
-    let square = crop_imm(captured, offset_x, offset_y, diameter_px, diameter_px).to_image();
-    soften_capture_to_annulus_rgba(&square, inner_radius, outer_radius)
+    capture_selection_outer_square_rgba(captured, inner_radius, outer_radius)
 }
 
 pub fn capture_template_inner_square_rgba(
@@ -435,300 +761,13 @@ pub fn capture_template_inner_square_rgba(
     inner_radius: f32,
     outer_radius: f32,
 ) -> RgbaImage {
-    let diameter_px = ((captured.width().min(captured.height()) as f32) * outer_radius)
-        .round()
-        .max(1.0) as u32;
-    let square_side =
-        inscribed_square_dimension(diameter_px).min(captured.width().min(captured.height()).max(1));
-    let offset_x = captured.width().saturating_sub(square_side) / 2;
-    let offset_y = captured.height().saturating_sub(square_side) / 2;
-    let square = crop_imm(captured, offset_x, offset_y, square_side, square_side).to_image();
-    soften_capture_center_hole_rgba(&square, normalized_inner_radius(inner_radius, outer_radius))
-}
-
-fn soften_capture_to_annulus(image: &GrayImage, inner_radius: f32, outer_radius: f32) -> GrayImage {
-    let feather = annulus_feather(image.width(), image.height());
-    let valid_inner = (inner_radius + feather).clamp(0.0, 1.5);
-    let valid_outer = (outer_radius - feather).clamp(valid_inner, 1.5);
-    let mut ring_sum = 0u64;
-    let mut ring_count = 0u64;
-    let mut weighted_sum = 0.0f32;
-    let mut weighted_count = 0.0f32;
-    let mut fallback_sum = 0u64;
-
-    for (x, y, pixel) in image.enumerate_pixels() {
-        let distance = annulus_distance(image.width(), image.height(), x, y);
-        let alpha = annulus_alpha(distance, inner_radius, outer_radius, feather);
-        if distance >= valid_inner && distance <= valid_outer {
-            ring_sum += u64::from(pixel.0[0]);
-            ring_count += 1;
-        }
-        weighted_sum += f32::from(pixel.0[0]) * alpha;
-        weighted_count += alpha;
-        fallback_sum += u64::from(pixel.0[0]);
-    }
-
-    let neutral = if ring_count > 0 {
-        (ring_sum / ring_count) as u8
-    } else if weighted_count > 1e-3 {
-        (weighted_sum / weighted_count).round().clamp(0.0, 255.0) as u8
-    } else {
-        let pixel_count = u64::from(image.width().max(1)) * u64::from(image.height().max(1));
-        (fallback_sum / pixel_count.max(1)) as u8
-    };
-
-    ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
-        let source = f32::from(image.get_pixel(x, y).0[0]);
-        let alpha = annulus_alpha(
-            annulus_distance(image.width(), image.height(), x, y),
-            inner_radius,
-            outer_radius,
-            feather,
-        );
-        let value = (f32::from(neutral) * (1.0 - alpha) + source * alpha)
-            .round()
-            .clamp(0.0, 255.0) as u8;
-        Luma([value])
-    })
-}
-
-fn soften_capture_center_hole(image: &GrayImage, inner_radius: f32) -> GrayImage {
-    let feather = annulus_feather(image.width(), image.height());
-    let valid_inner = (inner_radius + feather).clamp(0.0, 1.0);
-    let mut ring_sum = 0u64;
-    let mut ring_count = 0u64;
-    let mut weighted_sum = 0.0f32;
-    let mut weighted_count = 0.0f32;
-    let mut fallback_sum = 0u64;
-
-    for (x, y, pixel) in image.enumerate_pixels() {
-        let distance = inscribed_square_circle_ratio(image.width(), image.height(), x, y);
-        let alpha = inner_hole_alpha(distance, inner_radius, feather);
-        if distance >= valid_inner {
-            ring_sum += u64::from(pixel.0[0]);
-            ring_count += 1;
-        }
-        weighted_sum += f32::from(pixel.0[0]) * alpha;
-        weighted_count += alpha;
-        fallback_sum += u64::from(pixel.0[0]);
-    }
-
-    let neutral = if ring_count > 0 {
-        (ring_sum / ring_count) as u8
-    } else if weighted_count > 1e-3 {
-        (weighted_sum / weighted_count).round().clamp(0.0, 255.0) as u8
-    } else {
-        let pixel_count = u64::from(image.width().max(1)) * u64::from(image.height().max(1));
-        (fallback_sum / pixel_count.max(1)) as u8
-    };
-
-    ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
-        let source = f32::from(image.get_pixel(x, y).0[0]);
-        let alpha = inner_hole_alpha(
-            inscribed_square_circle_ratio(image.width(), image.height(), x, y),
-            inner_radius,
-            feather,
-        );
-        let value = (f32::from(neutral) * (1.0 - alpha) + source * alpha)
-            .round()
-            .clamp(0.0, 255.0) as u8;
-        Luma([value])
-    })
-}
-
-fn soften_capture_to_annulus_rgba(
-    image: &RgbaImage,
-    inner_radius: f32,
-    outer_radius: f32,
-) -> RgbaImage {
-    let feather = annulus_feather(image.width(), image.height());
-    let valid_inner = (inner_radius + feather).clamp(0.0, 1.5);
-    let valid_outer = (outer_radius - feather).clamp(valid_inner, 1.5);
-    let mut ring_sum = [0u64; 3];
-    let mut ring_count = 0u64;
-    let mut weighted_sum = [0.0f32; 3];
-    let mut weighted_count = 0.0f32;
-    let mut fallback_sum = [0u64; 3];
-
-    for (x, y, pixel) in image.enumerate_pixels() {
-        let distance = annulus_distance(image.width(), image.height(), x, y);
-        let alpha = annulus_alpha(distance, inner_radius, outer_radius, feather);
-        if distance >= valid_inner && distance <= valid_outer {
-            ring_sum[0] += u64::from(pixel.0[0]);
-            ring_sum[1] += u64::from(pixel.0[1]);
-            ring_sum[2] += u64::from(pixel.0[2]);
-            ring_count += 1;
-        }
-        weighted_sum[0] += f32::from(pixel.0[0]) * alpha;
-        weighted_sum[1] += f32::from(pixel.0[1]) * alpha;
-        weighted_sum[2] += f32::from(pixel.0[2]) * alpha;
-        weighted_count += alpha;
-        fallback_sum[0] += u64::from(pixel.0[0]);
-        fallback_sum[1] += u64::from(pixel.0[1]);
-        fallback_sum[2] += u64::from(pixel.0[2]);
-    }
-
-    let neutral = rgba_neutral_fill(
-        image.width(),
-        image.height(),
-        ring_sum,
-        ring_count,
-        weighted_sum,
-        weighted_count,
-        fallback_sum,
-    );
-
-    ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
-        let source = image.get_pixel(x, y).0;
-        let alpha = annulus_alpha(
-            annulus_distance(image.width(), image.height(), x, y),
-            inner_radius,
-            outer_radius,
-            feather,
-        );
-        image::Rgba([
-            blend_channel(neutral[0], source[0], alpha),
-            blend_channel(neutral[1], source[1], alpha),
-            blend_channel(neutral[2], source[2], alpha),
-            255,
-        ])
-    })
-}
-
-fn soften_capture_center_hole_rgba(image: &RgbaImage, inner_radius: f32) -> RgbaImage {
-    let feather = annulus_feather(image.width(), image.height());
-    let valid_inner = (inner_radius + feather).clamp(0.0, 1.0);
-    let mut ring_sum = [0u64; 3];
-    let mut ring_count = 0u64;
-    let mut weighted_sum = [0.0f32; 3];
-    let mut weighted_count = 0.0f32;
-    let mut fallback_sum = [0u64; 3];
-
-    for (x, y, pixel) in image.enumerate_pixels() {
-        let distance = inscribed_square_circle_ratio(image.width(), image.height(), x, y);
-        let alpha = if distance >= inner_radius + feather {
-            1.0
-        } else if distance <= inner_radius {
-            0.0
-        } else {
-            (distance - inner_radius) / feather.max(1e-6)
-        };
-        if distance >= valid_inner {
-            ring_sum[0] += u64::from(pixel.0[0]);
-            ring_sum[1] += u64::from(pixel.0[1]);
-            ring_sum[2] += u64::from(pixel.0[2]);
-            ring_count += 1;
-        }
-        weighted_sum[0] += f32::from(pixel.0[0]) * alpha;
-        weighted_sum[1] += f32::from(pixel.0[1]) * alpha;
-        weighted_sum[2] += f32::from(pixel.0[2]) * alpha;
-        weighted_count += alpha;
-        fallback_sum[0] += u64::from(pixel.0[0]);
-        fallback_sum[1] += u64::from(pixel.0[1]);
-        fallback_sum[2] += u64::from(pixel.0[2]);
-    }
-
-    let neutral = rgba_neutral_fill(
-        image.width(),
-        image.height(),
-        ring_sum,
-        ring_count,
-        weighted_sum,
-        weighted_count,
-        fallback_sum,
-    );
-
-    ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
-        let distance = inscribed_square_circle_ratio(image.width(), image.height(), x, y);
-        let alpha = if distance >= inner_radius + feather {
-            1.0
-        } else if distance <= inner_radius {
-            0.0
-        } else {
-            (distance - inner_radius) / feather.max(1e-6)
-        };
-        let source = image.get_pixel(x, y).0;
-        image::Rgba([
-            blend_channel(neutral[0], source[0], alpha),
-            blend_channel(neutral[1], source[1], alpha),
-            blend_channel(neutral[2], source[2], alpha),
-            255,
-        ])
-    })
+    capture_selection_outer_square_rgba(captured, inner_radius, outer_radius)
 }
 
 fn blend_channel(neutral: u8, source: u8, alpha: f32) -> u8 {
     (f32::from(neutral) * (1.0 - alpha) + f32::from(source) * alpha)
         .round()
         .clamp(0.0, 255.0) as u8
-}
-
-fn rgba_neutral_fill(
-    width: u32,
-    height: u32,
-    ring_sum: [u64; 3],
-    ring_count: u64,
-    weighted_sum: [f32; 3],
-    weighted_count: f32,
-    fallback_sum: [u64; 3],
-) -> [u8; 3] {
-    if ring_count > 0 {
-        return [
-            (ring_sum[0] / ring_count) as u8,
-            (ring_sum[1] / ring_count) as u8,
-            (ring_sum[2] / ring_count) as u8,
-        ];
-    }
-
-    if weighted_count > 1e-3 {
-        return [
-            (weighted_sum[0] / weighted_count).round().clamp(0.0, 255.0) as u8,
-            (weighted_sum[1] / weighted_count).round().clamp(0.0, 255.0) as u8,
-            (weighted_sum[2] / weighted_count).round().clamp(0.0, 255.0) as u8,
-        ];
-    }
-
-    let pixel_count = u64::from(width.max(1)) * u64::from(height.max(1));
-    [
-        (fallback_sum[0] / pixel_count.max(1)) as u8,
-        (fallback_sum[1] / pixel_count.max(1)) as u8,
-        (fallback_sum[2] / pixel_count.max(1)) as u8,
-    ]
-}
-
-fn annulus_alpha(distance: f32, inner_radius: f32, outer_radius: f32, feather: f32) -> f32 {
-    let inner = inner_radius.clamp(0.0, 1.0);
-    let outer = outer_radius.clamp(inner + f32::EPSILON, 1.5);
-
-    let inner_alpha = if inner <= 0.0 {
-        1.0
-    } else {
-        smoothstep(inner, inner + feather, distance)
-    };
-    let outer_alpha = if outer >= 1.5 {
-        1.0
-    } else {
-        1.0 - smoothstep((outer - feather).max(0.0), outer, distance)
-    };
-
-    (inner_alpha * outer_alpha).clamp(0.0, 1.0)
-}
-
-fn inner_hole_alpha(distance: f32, inner_radius: f32, feather: f32) -> f32 {
-    let inner = inner_radius.clamp(0.0, 1.0);
-    if inner <= 0.0 {
-        return 1.0;
-    }
-    if inner >= 1.0 {
-        return 0.0;
-    }
-
-    smoothstep(inner, (inner + feather).min(1.0), distance)
-}
-
-fn annulus_feather(width: u32, height: u32) -> f32 {
-    let diameter = width.min(height).max(1) as f32;
-    (8.0 / diameter).clamp(0.02, 0.06)
 }
 
 fn annulus_distance(width: u32, height: u32, x: u32, y: u32) -> f32 {
@@ -745,21 +784,12 @@ fn inscribed_square_circle_ratio(width: u32, height: u32, x: u32, y: u32) -> f32
     annulus_distance(width, height, x, y) * INSCRIBED_SQUARE_SCALE
 }
 
-fn normalized_inner_radius(inner_radius: f32, outer_radius: f32) -> f32 {
+pub fn normalized_inner_radius(inner_radius: f32, outer_radius: f32) -> f32 {
     if outer_radius <= f32::EPSILON {
         0.0
     } else {
         (inner_radius / outer_radius).clamp(0.0, 1.0)
     }
-}
-
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    if edge1 <= edge0 {
-        return if x >= edge1 { 1.0 } else { 0.0 };
-    }
-
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 pub fn build_match_representation(image: &GrayImage) -> GrayImage {
@@ -1410,14 +1440,8 @@ mod tests {
         let ring = annulus.get_pixel(50, 28).0[0];
         let corner = annulus.get_pixel(0, 0).0[0];
 
-        assert!(
-            (i32::from(center) - 122).abs() <= 12,
-            "center should be neutralized toward ring intensity, got {center}"
-        );
-        assert!(
-            (i32::from(corner) - 122).abs() <= 16,
-            "outer UI should be neutralized toward ring intensity, got {corner}"
-        );
+        assert!(center <= 6, "center hole should stay blank, got {center}");
+        assert!(corner <= 6, "outer corner should stay blank, got {corner}");
         assert!(
             (i32::from(ring) - 122).abs() <= 10,
             "ring texture should stay intact, got {ring}"
@@ -1425,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_template_inner_square_preserves_real_corners_and_neutralizes_center() {
+    fn capture_template_inner_square_returns_selection_outer_square() {
         let image = GrayImage::from_fn(121, 121, |x, y| {
             let distance = annulus_distance(121, 121, x, y);
             let value = if distance <= 0.16 {
@@ -1439,32 +1463,14 @@ mod tests {
         });
 
         let square = capture_template_inner_square(&image, 0.16, 1.0);
-        let side = inscribed_square_dimension(121);
-        let offset = (121 - side) / 2;
-        let raw_square = crop_imm(&image, offset, offset, side, side).to_image();
-        let expected_corner = raw_square.get_pixel(0, 0).0[0];
-        let outer_sample = raw_square.get_pixel(side / 2, 6).0[0];
+        let expected = capture_selection_outer_square(&image, 0.16, 1.0);
         let center = square.get_pixel(square.width() / 2, square.height() / 2).0[0];
-        let (retained_sum, retained_count) = raw_square
-            .enumerate_pixels()
-            .filter(|(x, y, _)| inscribed_square_circle_ratio(side, side, *x, *y) >= 0.24)
-            .fold((0u64, 0u64), |(sum, count), (_, _, pixel)| {
-                (sum + u64::from(pixel.0[0]), count + 1)
-            });
-        let retained_mean = retained_sum as f32 / retained_count.max(1) as f32;
 
-        assert_eq!(square.width(), side);
-        assert_eq!(square.height(), side);
-        assert_eq!(square.get_pixel(0, 0).0[0], expected_corner);
-        assert_eq!(square.get_pixel(side / 2, 6).0[0], outer_sample);
-        assert!(
-            (f32::from(center) - retained_mean).abs() <= 18.0,
-            "center should be neutralized toward the retained map texture, got center {center} vs mean {retained_mean:.1}"
-        );
-        assert!(
-            (i32::from(center) - 245).abs() >= 40,
-            "center should not keep the original hole highlight, got {center}"
-        );
+        assert_eq!(square.width(), 121);
+        assert_eq!(square.height(), 121);
+        assert_eq!(square, expected);
+        assert_eq!(square.get_pixel(0, 0).0[0], 0);
+        assert!(center <= 6, "center hole should stay blank, got {center}");
     }
 
     #[test]
@@ -1474,6 +1480,113 @@ mod tests {
         assert_eq!(mask.get_pixel(0, 0).0[0], 255);
         assert_eq!(mask.get_pixel(mask.width() / 2, mask.height() / 2).0[0], 0);
         assert_eq!(mask.get_pixel(mask.width() / 2, 0).0[0], 255);
+    }
+
+    #[test]
+    fn capture_selection_outer_square_pads_to_square_and_blanks_exterior() {
+        let image = GrayImage::from_pixel(12, 12, Luma([91]));
+        let square = capture_selection_outer_square(&image, 0.25, 1.0);
+
+        assert_eq!(square.width(), 12);
+        assert_eq!(square.height(), 12);
+        assert_eq!(square.get_pixel(0, 0).0[0], 0);
+        assert_eq!(square.get_pixel(square.width() / 2, square.height() / 2).0[0], 0);
+        assert_ne!(
+            square.get_pixel(square.width() / 2, 2).0[0],
+            0,
+            "ring pixels should survive the approximate outer-square preprocessing",
+        );
+    }
+
+    #[test]
+    fn capture_template_inner_square_uses_selection_outer_square_geometry() {
+        let config = AppConfig {
+            view_size: 96,
+            minimap: crate::config::CaptureRegion {
+                top: 0,
+                left: 0,
+                width: 160,
+                height: 120,
+            },
+            template: crate::config::TemplateTrackingConfig {
+                mask_inner_radius: 0.16,
+                mask_outer_radius: 80.0 / 120.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let map = GrayImage::from_fn(256, 256, |x, y| Luma([((x * 11 + y * 7) % 251) as u8]));
+        let capture = synthesize_runtime_capture_from_map(&map, &config, (128, 128));
+        let square = capture_template_inner_square(
+            &capture,
+            config.template.mask_inner_radius,
+            config.template.mask_outer_radius,
+        );
+
+        assert_eq!(square.width(), 160);
+        assert_eq!(square.height(), 160);
+        assert_eq!(square.get_pixel(0, 0).0[0], 0);
+        assert_eq!(square.get_pixel(square.width() / 2, square.height() / 2).0[0], 0);
+    }
+
+    #[test]
+    fn capture_template_inner_square_keeps_off_center_selection_square() {
+        let circle_left = 4u32;
+        let circle_top = 6u32;
+        let circle_diameter = 104u32;
+        let capture = GrayImage::from_fn(120, 116, |x, y| {
+            let local_x = x as i32 - circle_left as i32;
+            let local_y = y as i32 - circle_top as i32;
+            if local_x < 0
+                || local_y < 0
+                || local_x >= circle_diameter as i32
+                || local_y >= circle_diameter as i32
+            {
+                return Luma([8]);
+            }
+
+            let distance = annulus_distance(
+                circle_diameter,
+                circle_diameter,
+                local_x as u32,
+                local_y as u32,
+            );
+            let value = if distance <= 0.16 {
+                244
+            } else if distance <= 0.86 {
+                (((local_x as u32) * 9 + (local_y as u32) * 7) % 251) as u8
+            } else if distance <= 0.93 {
+                68
+            } else if distance <= 1.0 {
+                26
+            } else {
+                8
+            };
+            Luma([value])
+        });
+
+        let square = capture_template_inner_square(&capture, 0.16, 1.0);
+        let expected = capture_selection_outer_square(&capture, 0.16, 1.0);
+
+        assert_eq!(square.width(), 120);
+        assert_eq!(square.height(), 120);
+        assert_eq!(square, expected);
+    }
+
+    #[test]
+    fn prepare_color_capture_template_scales_inner_square_to_template_dimension() {
+        let image = RgbaImage::from_pixel(128, 128, Rgba([90, 120, 160, 255]));
+        let template = prepare_color_capture_template(
+            &image,
+            120,
+            2,
+            0.18,
+            1.0,
+            ColorTemplateShape::InnerSquare,
+        );
+
+        assert_eq!(template.width(), scaled_dimension(120, 2));
+        assert_eq!(template.height(), scaled_dimension(120, 2));
     }
 
     #[test]

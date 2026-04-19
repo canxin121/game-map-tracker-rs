@@ -20,15 +20,12 @@ use burn::{
     },
 };
 #[cfg(feature = "ai-burn")]
-use image::{
-    GrayImage, Rgba, RgbaImage,
-    imageops::{FilterType, crop_imm, replace, resize},
-};
+use image::{GrayImage, RgbaImage, imageops::crop_imm};
 #[cfg(feature = "ai-burn")]
 use safetensors::{Dtype, SafeTensors, serialize_to_file, tensor::TensorView};
 #[cfg(feature = "ai-burn")]
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::{
     config::TemplateTrackingConfig,
@@ -53,22 +50,22 @@ use crate::{
             BurnDeviceSelection, available_burn_backends, burn_device_label,
             burn_score_map_capture_enabled, select_burn_device,
         },
-        capture::{CaptureSource, DesktopCapture, preprocess_capture},
+        capture::{DesktopCapture, preprocess_capture},
         debug::{DebugField, TrackingDebugSnapshot},
         precompute::{
             PersistedTensorCache, clear_match_pyramid_caches, clear_tensor_caches_by_prefix,
             load_tensor_cache, metadata_fingerprint, save_tensor_cache, tracker_map_cache_key,
             tracker_tensor_cache_path,
         },
-        presence::{MinimapPresenceDetector, MinimapPresenceSample},
         vision::{
             ColorCaptureTemplates, ColorMapPyramid, ColorTemplateShape, LocalCandidateDecision,
             MaskSet, MatchCandidate, SearchCrop, SearchStage, TrackerState, build_debug_snapshot,
-            build_mask, capture_template_inner_square, center_to_scaled, coarse_global_downscale,
-            crop_search_region_rgba, load_logic_color_map_pyramid, local_candidate_decision,
-            mask_as_unit_vec, prepare_color_capture_template, preview_image,
-            rgba_image_as_unit_vec, scaled_color_score, scaled_dimension,
-            search_region_around_center, top_score_peaks,
+            build_mask, capture_template_inner_square, center_to_scaled,
+            coarse_global_downscale, crop_search_region_rgba, load_logic_color_map_pyramid,
+            local_candidate_decision, mask_as_unit_vec, normalized_inner_radius,
+            prepare_color_capture_template, preview_image, rgba_image_as_unit_vec,
+            scaled_color_score, scaled_dimension,
+            search_region_around_center, synthesize_runtime_capture_rgba_from_map, top_score_peaks,
         },
     },
 };
@@ -76,8 +73,6 @@ use crate::{
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 struct LocateResult {
-    best_left: u32,
-    best_top: u32,
     best_score: f32,
     score_width: u32,
     score_height: u32,
@@ -97,7 +92,6 @@ pub struct BurnTrackerWorker {
 struct BurnTrackerInner {
     config: AppConfig,
     capture: DesktopCapture,
-    presence_detector: Option<MinimapPresenceDetector>,
     color_pyramid: ColorMapPyramid,
     state: TrackerState,
     debug_enabled: bool,
@@ -241,7 +235,6 @@ impl BurnTrackerWorker {
         {
             let config = workspace.config.clone();
             let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
-            let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
             let map_cache_key = tracker_map_cache_key(workspace.as_ref())?;
             let masks = build_template_masks(&config);
             let color_pyramid = load_logic_color_map_pyramid(workspace.as_ref())?;
@@ -257,7 +250,6 @@ impl BurnTrackerWorker {
                 inner: BurnTrackerInner {
                     config,
                     capture,
-                    presence_detector,
                     color_pyramid,
                     state: TrackerState::default(),
                     debug_enabled: false,
@@ -1104,31 +1096,6 @@ fn sample_local_world_point(
 }
 
 #[cfg(feature = "ai-burn")]
-fn synthetic_capture_rgba_from_map(
-    map: &RgbaImage,
-    config: &AppConfig,
-    center: (u32, u32),
-) -> RgbaImage {
-    let half = config.view_size / 2;
-    let left = center.0.saturating_sub(half);
-    let top = center.1.saturating_sub(half);
-    let crop = crop_imm(map, left, top, config.view_size, config.view_size).to_image();
-
-    let diameter_px = config.minimap.width.min(config.minimap.height).max(1);
-    let diameter_px = ((diameter_px as f32) * config.template.mask_outer_radius).round() as u32;
-    let minimap = resize(&crop, diameter_px, diameter_px, FilterType::Triangle);
-    let mut canvas = RgbaImage::from_pixel(
-        config.minimap.width,
-        config.minimap.height,
-        Rgba([0, 0, 0, 255]),
-    );
-    let offset_x = i64::from((config.minimap.width - diameter_px) / 2);
-    let offset_y = i64::from((config.minimap.height - diameter_px) / 2);
-    replace(&mut canvas, &minimap, offset_x, offset_y);
-    canvas
-}
-
-#[cfg(feature = "ai-burn")]
 fn crop_centered_training_patch(
     image: &RgbaImage,
     center: (u32, u32),
@@ -1366,11 +1333,11 @@ fn compute_training_sample_loss(
     let local_world = sample_local_world_point(fixture, rng, global_world);
 
     let global_capture =
-        synthetic_capture_rgba_from_map(&fixture.color_map, &fixture.config, global_world);
+        synthesize_runtime_capture_rgba_from_map(&fixture.color_map, &fixture.config, global_world);
     let global_templates =
         prepare_color_capture_templates(&global_capture, &fixture.config, &fixture.color_pyramid);
     let local_capture =
-        synthetic_capture_rgba_from_map(&fixture.color_map, &fixture.config, local_world);
+        synthesize_runtime_capture_rgba_from_map(&fixture.color_map, &fixture.config, local_world);
     let local_templates =
         prepare_color_capture_templates(&local_capture, &fixture.config, &fixture.color_pyramid);
 
@@ -1763,7 +1730,7 @@ fn prepare_color_capture_templates(
             pyramid.local.scale,
             config.template.mask_inner_radius,
             config.template.mask_outer_radius,
-            ColorTemplateShape::Annulus,
+            ColorTemplateShape::InnerSquare,
         ),
         global: prepare_color_capture_template(
             captured,
@@ -1792,26 +1759,15 @@ fn build_template_masks(config: &AppConfig) -> MaskSet {
     let local_size = scaled_dimension(config.view_size.max(1), local_scale);
     let global_size = scaled_dimension(config.view_size.max(1), global_scale);
     let coarse_size = scaled_dimension(config.view_size.max(1), coarse_scale);
+    let annulus_inner = normalized_inner_radius(
+        config.template.mask_inner_radius,
+        config.template.mask_outer_radius,
+    );
 
     MaskSet {
-        local: build_mask(
-            local_size,
-            local_size,
-            config.template.mask_inner_radius,
-            config.template.mask_outer_radius,
-        ),
-        global: build_mask(
-            global_size,
-            global_size,
-            config.template.mask_inner_radius,
-            config.template.mask_outer_radius,
-        ),
-        coarse: build_mask(
-            coarse_size,
-            coarse_size,
-            config.template.mask_inner_radius,
-            config.template.mask_outer_radius,
-        ),
+        local: build_mask(local_size, local_size, annulus_inner, 1.0),
+        global: build_mask(global_size, global_size, annulus_inner, 1.0),
+        coarse: build_mask(coarse_size, coarse_size, annulus_inner, 1.0),
     }
 }
 
@@ -2729,8 +2685,6 @@ fn best_match_in_flat_scores(score_map: &[f32], score_width: u32) -> Option<(f32
 
 fn empty_locate_result() -> LocateResult {
     LocateResult {
-        best_left: 0,
-        best_top: 0,
         best_score: f32::MIN,
         score_width: 0,
         score_height: 0,
@@ -2796,8 +2750,6 @@ fn locate_result_from_best(
     };
 
     LocateResult {
-        best_left,
-        best_top,
         best_score,
         score_width,
         score_height,
@@ -2810,57 +2762,6 @@ fn locate_result_from_best(
 impl BurnTrackerInner {
     fn run_frame(&mut self) -> Result<TrackingTick> {
         self.state.begin_frame();
-        if self.presence_detector.is_none() {
-            let mut status = self.base_status();
-            status.probe_summary = self.probe_summary(None);
-            let estimate = self.apply_probe_unavailable_fallback(&mut status);
-            status.locate_summary =
-                Self::blocked_locate_summary("小地图圆环未启用", estimate.as_ref());
-            return Ok(TrackingTick {
-                status,
-                estimate,
-                debug: None,
-            });
-        }
-
-        let probe_sample = self
-            .presence_detector
-            .as_ref()
-            .map(MinimapPresenceDetector::sample)
-            .transpose()?;
-        if let Some(sample) = probe_sample.as_ref().filter(|sample| !sample.present) {
-            let mut status = self.base_status();
-            status.probe_summary = self.probe_summary(probe_sample.as_ref());
-            let estimate = self.apply_probe_absent_fallback(&mut status);
-            status.locate_summary =
-                Self::blocked_locate_summary("小地图圆环未命中", estimate.as_ref());
-            let debug_captured = if self.debug_enabled {
-                match self.capture.capture_gray() {
-                    Ok(captured) => Some(captured),
-                    Err(error) => {
-                        warn!(
-                            error = %format!("{error:#}"),
-                            "failed to capture minimap input for probe-miss debug snapshot"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            let debug = self.debug_enabled.then(|| {
-                self.build_probe_miss_debug_snapshot(
-                    debug_captured.as_ref(),
-                    sample,
-                    estimate.as_ref(),
-                )
-            });
-            return Ok(TrackingTick {
-                status,
-                estimate,
-                debug,
-            });
-        }
 
         let captured_rgba = self.capture.capture_rgba()?;
         let captured = preprocess_capture(captured_rgba.clone());
@@ -2871,7 +2772,7 @@ impl BurnTrackerInner {
         )?;
 
         let mut status = self.base_status();
-        status.probe_summary = self.probe_summary(probe_sample.as_ref());
+        status.probe_summary = self.probe_summary();
         let mut estimate = None;
         let mut global_result = None;
         let mut refine_result = None;
@@ -3023,7 +2924,6 @@ impl BurnTrackerInner {
                 None,
                 refine_result.as_ref().or(local_result.as_ref()),
                 estimate.as_ref(),
-                probe_sample.as_ref(),
             )
         });
 
@@ -3047,21 +2947,8 @@ impl BurnTrackerInner {
         }
     }
 
-    fn probe_summary(&self, sample: Option<&MinimapPresenceSample>) -> String {
-        match sample {
-            Some(sample) => format!(
-                "{} {:.3}/{:.3}",
-                if sample.present {
-                    "存在"
-                } else {
-                    "不存在"
-                },
-                sample.score,
-                sample.threshold
-            ),
-            None if self.presence_detector.is_some() => "等待判断".to_owned(),
-            None => "未启用".to_owned(),
-        }
+    fn probe_summary(&self) -> String {
+        "默认存在".to_owned()
     }
 
     fn locate_success_summary(scope: &str, candidate: &MatchCandidate) -> String {
@@ -3075,18 +2962,6 @@ impl BurnTrackerInner {
         result.map_or_else(
             || format!("{scope}未命中"),
             |result| format!("{scope}未命中 {:.3}", result.best_score),
-        )
-    }
-
-    fn blocked_locate_summary(reason: &str, estimate: Option<&PositionEstimate>) -> String {
-        estimate.map_or_else(
-            || format!("已阻止定位，{reason}"),
-            |estimate| {
-                format!(
-                    "已阻止定位，{reason}，惯性保位 @ {:.0}, {:.0}",
-                    estimate.world.x, estimate.world.y
-                )
-            },
         )
     }
 
@@ -3125,43 +3000,6 @@ impl BurnTrackerInner {
         ))
     }
 
-    fn apply_probe_absent_fallback(
-        &mut self,
-        status: &mut TrackingStatus,
-    ) -> Option<PositionEstimate> {
-        let estimate = self.apply_inertial_fallback(status);
-        if estimate.is_some() {
-            status.message = format!(
-                "小地图圆环探针未命中，小地图疑似被遮挡，已阻止定位，{}",
-                status.message
-            );
-            return estimate;
-        }
-
-        status.source = None;
-        status.match_score = None;
-        status.message =
-            "小地图圆环探针未命中，小地图疑似被遮挡，已阻止定位，等待界面恢复。".to_owned();
-        None
-    }
-
-    fn apply_probe_unavailable_fallback(
-        &mut self,
-        status: &mut TrackingStatus,
-    ) -> Option<PositionEstimate> {
-        let estimate = self.apply_inertial_fallback(status);
-        if estimate.is_some() {
-            status.message = format!("小地图圆环探针未启用，已阻止定位，{}", status.message);
-            return estimate;
-        }
-
-        status.source = None;
-        status.match_score = None;
-        status.message =
-            "小地图圆环探针未启用，已阻止定位；请先完成小地图圆形取区并启用探针。".to_owned();
-        None
-    }
-
     fn build_debug_snapshot(
         &self,
         captured: &GrayImage,
@@ -3170,7 +3008,6 @@ impl BurnTrackerInner {
         _refine_crop: Option<&SearchCrop>,
         refine_result: Option<&LocateResult>,
         estimate: Option<&PositionEstimate>,
-        probe_sample: Option<&MinimapPresenceSample>,
     ) -> TrackingDebugSnapshot {
         let minimap_input = preview_image(
             "Minimap Input",
@@ -3215,68 +3052,8 @@ impl BurnTrackerInner {
                 format!("{:.0}, {:.0}", position.world.x, position.world.y),
             ));
         }
-        if let (Some(detector), Some(sample)) = (self.presence_detector.as_ref(), probe_sample) {
-            fields.extend(detector.debug_fields(sample));
-        }
 
-        let mut images = vec![minimap_input];
-        if let (Some(detector), Some(sample)) = (self.presence_detector.as_ref(), probe_sample) {
-            images.extend(detector.debug_images(sample));
-        }
-
-        build_debug_snapshot(
-            TrackerEngineKind::ConvolutionFeatureMatch,
-            self.state.frame_index,
-            self.state.stage,
-            images,
-            fields,
-        )
-    }
-
-    fn build_probe_miss_debug_snapshot(
-        &self,
-        captured: Option<&GrayImage>,
-        sample: &MinimapPresenceSample,
-        estimate: Option<&PositionEstimate>,
-    ) -> TrackingDebugSnapshot {
-        let mut fields = vec![
-            DebugField::new("阶段", self.state.stage.to_string()),
-            DebugField::new("设备", self.matcher.device_label()),
-            DebugField::new("编码器", self.matcher.source_label()),
-            DebugField::new("局部失败", self.state.local_fail_streak.to_string()),
-            DebugField::new("丢失帧", self.state.lost_frames.to_string()),
-            DebugField::new(
-                "重获锚点",
-                self.state.reacquire_anchor.map_or_else(
-                    || "--".to_owned(),
-                    |world| format!("{:.0}, {:.0}", world.x, world.y),
-                ),
-            ),
-        ];
-        let mut images = Vec::new();
-        if let Some(captured) = captured {
-            images.push(preview_image(
-                "Minimap Input",
-                &capture_template_inner_square(
-                    captured,
-                    self.config.template.mask_inner_radius,
-                    self.config.template.mask_outer_radius,
-                ),
-                &[],
-                196,
-            ));
-        }
-
-        if let Some(detector) = self.presence_detector.as_ref() {
-            fields.extend(detector.debug_fields(sample));
-            images.extend(detector.debug_images(sample));
-        }
-        if let Some(position) = estimate {
-            fields.push(DebugField::new(
-                "输出坐标",
-                format!("{:.0}, {:.0}", position.world.x, position.world.y),
-            ));
-        }
+        let images = vec![minimap_input];
 
         build_debug_snapshot(
             TrackerEngineKind::ConvolutionFeatureMatch,
@@ -3470,8 +3247,7 @@ mod tests {
         tracking::test_support::{
             StressFailure, StressRoundStats, build_test_workspace, print_perf_ms,
             random_stress_paths, require_vulkan_discrete_ordinal, runtime_config_or_default,
-            stress_env_u32, stress_env_usize, synthetic_capture_rgba_from_map, timed,
-            write_stress_report,
+            stress_env_u32, stress_env_usize, timed, write_stress_report,
         },
     };
     use anyhow::{Result, bail};
@@ -3613,8 +3389,6 @@ mod tests {
     ) -> Result<FrameResult> {
         let templates =
             matcher.prepare_capture_templates(capture, &fixture.config, &fixture.color_pyramid)?;
-        let mut best_score = None;
-        let mut best_color = None;
         let mut note = String::new();
 
         if fixture.config.local_search.enabled && matches!(state.stage, SearchStage::LocalTrack) {
@@ -3637,8 +3411,6 @@ mod tests {
                     crop.origin_y,
                     fixture.color_pyramid.local.scale,
                 )?;
-                best_score = Some(result.best_score);
-                best_color = Some(result.best_score);
                 if let Some(candidate) = result.accepted.clone() {
                     match local_candidate_decision(
                         last_world,
@@ -3677,8 +3449,8 @@ mod tests {
         }
 
         let global = locate_global_runtime(fixture, matcher, &templates)?;
-        best_score = Some(global.best_score);
-        best_color = Some(global.best_score);
+        let mut best_score = Some(global.best_score);
+        let mut best_color = Some(global.best_score);
         if let Some(coarse) = global.accepted {
             let region = search_region_around_center(
                 fixture.color_pyramid.local.image.width(),
@@ -3744,8 +3516,11 @@ mod tests {
         for (case_index, case) in cases.iter().enumerate() {
             let mut state = TrackerState::default();
 
-            let capture =
-                synthetic_capture_rgba_from_map(&fixture.color_map, &fixture.config, case.start);
+            let capture = synthesize_runtime_capture_rgba_from_map(
+                &fixture.color_map,
+                &fixture.config,
+                case.start,
+            );
             let frame = simulate_runtime_frame(fixture, matcher, &capture, &mut state)?;
             stats.global_total += 1;
             if within_tolerance(frame.world, case.start, GLOBAL_TOLERANCE) {
@@ -3765,8 +3540,11 @@ mod tests {
             }
 
             for (step_index, target) in case.locals.iter().copied().enumerate() {
-                let capture =
-                    synthetic_capture_rgba_from_map(&fixture.color_map, &fixture.config, target);
+                let capture = synthesize_runtime_capture_rgba_from_map(
+                    &fixture.color_map,
+                    &fixture.config,
+                    target,
+                );
                 let frame = simulate_runtime_frame(fixture, matcher, &capture, &mut state)?;
                 stats.local_total += 1;
                 if within_tolerance(frame.world, target, LOCAL_TOLERANCE) {

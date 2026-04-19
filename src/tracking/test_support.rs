@@ -1,15 +1,11 @@
 use std::{
     env, fs,
-    hint::black_box,
     path::PathBuf,
     time::{Duration, Instant},
 };
 
 use directories::ProjectDirs;
-use image::{
-    GrayImage, Luma, Rgba, RgbaImage,
-    imageops::{FilterType, crop_imm, replace, resize},
-};
+use image::{GrayImage, RgbaImage};
 
 #[cfg(all(feature = "ai-burn", burn_vulkan_backend))]
 use crate::tracking::burn_support::available_burn_device_descriptors;
@@ -18,6 +14,9 @@ use crate::{
     resources::{
         AssetManifest, BwikiCachePaths, WorkspaceLoadReport, WorkspaceSnapshot,
         default_map_dimensions,
+    },
+    tracking::vision::{
+        synthesize_runtime_capture_rgba_from_map,
     },
 };
 
@@ -68,86 +67,10 @@ pub(crate) fn runtime_config_or_default() -> AppConfig {
     })
 }
 
-pub(crate) fn sample_world_positions(
-    image: &GrayImage,
-    view_size: u32,
-    desired: usize,
-) -> Vec<(u32, u32)> {
-    let min_center = align_to(view_size / 2 + 32, 4);
-    let max_x = align_to(image.width().saturating_sub(view_size / 2 + 32), 4);
-    let max_y = align_to(image.height().saturating_sub(view_size / 2 + 32), 4);
-    if max_x <= min_center || max_y <= min_center {
-        return vec![(min_center, min_center)];
-    }
-
-    let stride = align_to((view_size / 2).max(160), 4).max(4);
-    let radius = (view_size / 2).clamp(96, 180);
-    let mut candidates = Vec::new();
-
-    for y in stepped_positions(min_center, max_y, stride) {
-        for x in stepped_positions(min_center, max_x, stride) {
-            candidates.push((local_texture_score(image, x, y, radius), x, y));
-        }
-    }
-
-    candidates.sort_by(|left, right| right.0.cmp(&left.0));
-    let min_separation = view_size.max(600);
-    let mut points = Vec::new();
-    for (_, x, y) in candidates {
-        if points
-            .iter()
-            .all(|(px, py)| x.abs_diff(*px) + y.abs_diff(*py) >= min_separation)
-        {
-            points.push((x, y));
-        }
-        if points.len() >= desired {
-            return points;
-        }
-    }
-
-    for (x, y) in fallback_grid_positions(min_center, max_x, max_y) {
-        if points
-            .iter()
-            .all(|(px, py)| x.abs_diff(*px) + y.abs_diff(*py) >= min_separation / 2)
-        {
-            points.push((x, y));
-        }
-        if points.len() >= desired {
-            break;
-        }
-    }
-
-    points
-}
-
 pub(crate) fn timed<T>(operation: impl FnOnce() -> T) -> (T, Duration) {
     let started = Instant::now();
     let value = operation();
     (value, started.elapsed())
-}
-
-pub(crate) fn benchmark_repeated<T>(
-    warmups: usize,
-    iterations: usize,
-    mut operation: impl FnMut() -> T,
-) -> (T, Duration) {
-    assert!(iterations > 0, "benchmark iterations must be > 0");
-
-    for _ in 0..warmups {
-        black_box(operation());
-    }
-
-    let started = Instant::now();
-    let mut last = None;
-    for _ in 0..iterations {
-        last = Some(operation());
-    }
-    let elapsed = started.elapsed();
-
-    (
-        last.expect("benchmark_repeated must execute at least once"),
-        elapsed,
-    )
 }
 
 pub(crate) fn stress_env_usize(name: &str, default: usize) -> usize {
@@ -170,19 +93,6 @@ pub(crate) fn print_perf_ms(scope: &str, metric: &str, duration: Duration) {
     println!(
         "[perf][{scope}] {metric}={:.2}ms",
         duration.as_secs_f64() * 1000.0
-    );
-}
-
-pub(crate) fn print_perf_per_op(scope: &str, metric: &str, iterations: usize, total: Duration) {
-    let total_ms = total.as_secs_f64() * 1000.0;
-    let avg_ms = total_ms / iterations.max(1) as f64;
-    let throughput = if total.as_secs_f64() > 0.0 {
-        iterations as f64 / total.as_secs_f64()
-    } else {
-        f64::INFINITY
-    };
-    println!(
-        "[perf][{scope}] {metric} avg={avg_ms:.2}ms/op throughput={throughput:.2}ops/s iterations={iterations} total={total_ms:.2}ms",
     );
 }
 
@@ -231,48 +141,12 @@ impl StressRoundStats {
     }
 }
 
-pub(crate) fn synthetic_capture_from_map(
-    map: &GrayImage,
-    config: &AppConfig,
-    center: (u32, u32),
-) -> GrayImage {
-    let half = config.view_size / 2;
-    let left = center.0.saturating_sub(half);
-    let top = center.1.saturating_sub(half);
-    let crop = crop_imm(map, left, top, config.view_size, config.view_size).to_image();
-
-    let diameter_px = config.minimap.width.min(config.minimap.height).max(1);
-    let diameter_px = ((diameter_px as f32) * config.template.mask_outer_radius).round() as u32;
-    let minimap = resize(&crop, diameter_px, diameter_px, FilterType::Triangle);
-    let mut canvas = GrayImage::from_pixel(config.minimap.width, config.minimap.height, Luma([0]));
-    let offset_x = i64::from((config.minimap.width - diameter_px) / 2);
-    let offset_y = i64::from((config.minimap.height - diameter_px) / 2);
-    replace(&mut canvas, &minimap, offset_x, offset_y);
-    canvas
-}
-
 pub(crate) fn synthetic_capture_rgba_from_map(
     map: &RgbaImage,
     config: &AppConfig,
     center: (u32, u32),
 ) -> RgbaImage {
-    let half = config.view_size / 2;
-    let left = center.0.saturating_sub(half);
-    let top = center.1.saturating_sub(half);
-    let crop = crop_imm(map, left, top, config.view_size, config.view_size).to_image();
-
-    let diameter_px = config.minimap.width.min(config.minimap.height).max(1);
-    let diameter_px = ((diameter_px as f32) * config.template.mask_outer_radius).round() as u32;
-    let minimap = resize(&crop, diameter_px, diameter_px, FilterType::Triangle);
-    let mut canvas = RgbaImage::from_pixel(
-        config.minimap.width,
-        config.minimap.height,
-        Rgba([0, 0, 0, 255]),
-    );
-    let offset_x = i64::from((config.minimap.width - diameter_px) / 2);
-    let offset_y = i64::from((config.minimap.height - diameter_px) / 2);
-    replace(&mut canvas, &minimap, offset_x, offset_y);
-    canvas
+    synthesize_runtime_capture_rgba_from_map(map, config, center)
 }
 
 pub(crate) fn random_stress_paths(
@@ -432,34 +306,6 @@ fn runtime_workspace_root() -> PathBuf {
 
 fn align_to(value: u32, step: u32) -> u32 {
     (value / step.max(1)) * step.max(1)
-}
-
-fn stepped_positions(start: u32, end: u32, step: u32) -> Vec<u32> {
-    let mut positions = Vec::new();
-    let mut current = start;
-    while current <= end {
-        positions.push(current);
-        current = current.saturating_add(step.max(1));
-        if current == positions.last().copied().unwrap_or(current) {
-            break;
-        }
-    }
-    if positions.last().copied() != Some(end) {
-        positions.push(end);
-    }
-    positions
-}
-
-fn fallback_grid_positions(min_center: u32, max_x: u32, max_y: u32) -> Vec<(u32, u32)> {
-    let anchors_x = [min_center, (min_center + max_x) / 2, max_x];
-    let anchors_y = [min_center, (min_center + max_y) / 2, max_y];
-    let mut positions = Vec::new();
-    for y in anchors_y {
-        for x in anchors_x {
-            positions.push((align_to(x, 4), align_to(y, 4)));
-        }
-    }
-    positions
 }
 
 fn local_texture_score(image: &GrayImage, center_x: u32, center_y: u32, radius: u32) -> u64 {
