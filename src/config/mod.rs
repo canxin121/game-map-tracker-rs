@@ -135,7 +135,7 @@ impl Default for AiTrackingConfig {
             track_radius: 500,
             device: AiDevicePreference::default(),
             device_index: 0,
-            weights_path: Some("models/tracker_encoder.safetensors".to_owned()),
+            weights_path: None,
         }
     }
 }
@@ -232,7 +232,14 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn normalize_in_place(&mut self) {
-        // Keep explicit probe enablement as user-configured.
+        if self
+            .ai
+            .weights_path
+            .as_deref()
+            .is_some_and(is_legacy_default_ai_weights_path)
+        {
+            self.ai.weights_path = None;
+        }
     }
 
     #[must_use]
@@ -240,6 +247,14 @@ impl AppConfig {
         self.normalize_in_place();
         self
     }
+}
+
+fn is_legacy_default_ai_weights_path(path: &str) -> bool {
+    let normalized = path.trim().replace('\\', "/");
+    matches!(
+        normalized.as_str(),
+        "models/tracker_encoder.safetensors" | "models/candle_edge_bank.safetensors"
+    )
 }
 
 impl MinimapPresenceProbeConfig {
@@ -344,5 +359,28 @@ mod tests {
 
         assert!(!loaded.minimap_presence_probe.enabled);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn normalized_clears_legacy_default_ai_weights_path() {
+        let mut config = AppConfig::default();
+        config.ai.weights_path = Some("models\\tracker_encoder.safetensors".to_owned());
+
+        let normalized = config.normalized();
+
+        assert_eq!(normalized.ai.weights_path, None);
+    }
+
+    #[test]
+    fn normalized_preserves_custom_ai_weights_path() {
+        let mut config = AppConfig::default();
+        config.ai.weights_path = Some("custom/tracker_encoder.safetensors".to_owned());
+
+        let normalized = config.normalized();
+
+        assert_eq!(
+            normalized.ai.weights_path,
+            Some("custom/tracker_encoder.safetensors".to_owned())
+        );
     }
 }

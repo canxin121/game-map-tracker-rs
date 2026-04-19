@@ -1,5 +1,4 @@
 use std::{
-    env,
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
@@ -20,8 +19,6 @@ use burn::{
         ops::ConvOptions,
     },
 };
-#[cfg(feature = "ai-burn")]
-use directories::ProjectDirs;
 #[cfg(feature = "ai-burn")]
 use image::{
     GrayImage, Rgba, RgbaImage,
@@ -46,6 +43,7 @@ use crate::{
         geometry::WorldPoint,
         tracker::{PositionEstimate, TrackingSource},
     },
+    model_assets::{embedded_tracker_encoder_bytes, repository_root},
     resources::{
         WorkspaceBootstrap, load_logic_map_with_tracking_poi_scaled_image,
         load_logic_map_with_tracking_poi_scaled_rgba_image,
@@ -205,6 +203,7 @@ where
 #[derive(Debug, Clone)]
 enum EncoderSource {
     Safetensors(PathBuf),
+    EmbeddedPretrained,
     BuiltIn,
 }
 
@@ -212,6 +211,9 @@ impl EncoderSource {
     fn label(&self) -> String {
         match self {
             Self::Safetensors(path) => format!("Safetensors ({})", path.display()),
+            Self::EmbeddedPretrained => {
+                "Embedded Pretrained Encoder (models/tracker_encoder.safetensors)".to_owned()
+            }
             Self::BuiltIn => "Built-in Conv Edge Bank".to_owned(),
         }
     }
@@ -373,15 +375,43 @@ where
             }
         }
 
+        if let Ok(encoder) = Self::load_embedded_safetensors(device, device_label) {
+            return Ok(Some(encoder));
+        }
+
         Ok(None)
     }
 
     fn load_single_safetensors(
-        path: &PathBuf,
+        path: &Path,
         device: B::Device,
         device_label: String,
     ) -> Result<Self> {
         let bytes = fs::read(path)?;
+        Self::load_safetensors_bytes(
+            &bytes,
+            EncoderSource::Safetensors(path.to_path_buf()),
+            device,
+            device_label,
+        )
+    }
+
+    fn load_embedded_safetensors(device: B::Device, device_label: String) -> Result<Self> {
+        Self::load_safetensors_bytes(
+            embedded_tracker_encoder_bytes(),
+            EncoderSource::EmbeddedPretrained,
+            device,
+            device_label,
+        )
+    }
+
+    fn load_safetensors_bytes(
+        bytes: &[u8],
+        source: EncoderSource,
+        device: B::Device,
+        device_label: String,
+    ) -> Result<Self> {
+        let source_label = source.label();
         let tensors = SafeTensors::deserialize(&bytes)?;
         let weight_name = find_safetensor_name(
             &tensors,
@@ -398,7 +428,7 @@ where
             anyhow::bail!(
                 "unsupported encoder kernel shape {:?} in {}",
                 shape,
-                path.display()
+                source_label
             );
         }
 
@@ -427,7 +457,7 @@ where
                 anyhow::bail!(
                     "unsupported encoder bias shape {:?} in {}",
                     view.shape(),
-                    path.display()
+                    source_label
                 );
             }
             Ok(Tensor::<B, 1>::from_data(
@@ -442,7 +472,7 @@ where
             device_label,
             edge_kernels: weight,
             edge_bias: bias,
-            source: EncoderSource::Safetensors(path.clone()),
+            source,
             padding: kernel_h / 2,
             output_channels: out_channels + 3,
         })
@@ -468,6 +498,11 @@ where
                     self.output_channels
                 )
             }
+            EncoderSource::EmbeddedPretrained => format!(
+                "ev{FEATURE_ENCODER_CACHE_VERSION}-embedded-{}-c{}",
+                embedded_encoder_cache_fingerprint(embedded_tracker_encoder_bytes()),
+                self.output_channels
+            ),
             EncoderSource::Safetensors(path) => format!(
                 "ev{FEATURE_ENCODER_CACHE_VERSION}-sf-{}-c{}",
                 metadata_fingerprint(path)?,
@@ -512,26 +547,6 @@ fn encoder_weight_candidates(workspace: &WorkspaceSnapshot) -> Vec<PathBuf> {
         ));
     }
 
-    candidates.extend([
-        workspace
-            .project_root
-            .join("models")
-            .join("candle_edge_bank.safetensors"),
-        workspace
-            .project_root
-            .join("models")
-            .join("tracker_encoder.safetensors"),
-    ]);
-    if let Some(runtime_root) = default_runtime_workspace_root() {
-        candidates.extend([
-            runtime_root
-                .join("models")
-                .join("tracker_encoder.safetensors"),
-            runtime_root
-                .join("models")
-                .join("candle_edge_bank.safetensors"),
-        ]);
-    }
     dedupe_paths(&mut candidates);
     candidates
 }
@@ -546,27 +561,19 @@ fn resolve_workspace_relative_path(workspace_root: &Path, path: &Path) -> PathBu
 }
 
 #[cfg(feature = "ai-burn")]
-fn default_runtime_workspace_root() -> Option<PathBuf> {
-    const DATA_DIR_ENV: &str = "GAME_MAP_TRACKER_RS_DATA_DIR";
-    const APP_QUALIFIER: &str = "io";
-    const APP_ORGANIZATION: &str = "rocom";
-    const APP_NAME: &str = "game-map-tracker-rs";
-
-    if let Ok(path) = env::var(DATA_DIR_ENV) {
-        let path = PathBuf::from(path);
-        if !path.as_os_str().is_empty() {
-            return Some(path);
-        }
-    }
-
-    ProjectDirs::from(APP_QUALIFIER, APP_ORGANIZATION, APP_NAME)
-        .map(|dirs| dirs.data_local_dir().to_path_buf())
-}
-
-#[cfg(feature = "ai-burn")]
 fn dedupe_paths(paths: &mut Vec<PathBuf>) {
     let mut seen = std::collections::HashSet::new();
     paths.retain(|path| seen.insert(path.clone()));
+}
+
+#[cfg(feature = "ai-burn")]
+fn embedded_encoder_cache_fingerprint(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[cfg(feature = "ai-burn")]
@@ -820,9 +827,9 @@ fn print_encoder_training_usage() {
     println!(
         "用法: game-map-tracker-rs train-encoder [workspace_root] [选项]\n\
          选项:\n\
-         \t--workspace <path>                指定工作区根目录，默认使用 app 运行目录\n\
-         \t--output <path>                   最终/持续导出的 safetensors，默认 models/tracker_encoder.safetensors\n\
-         \t--checkpoint-dir <path>           checkpoint 目录，默认 cache/training/tracker-encoder\n\
+         \t--workspace <path>                指定训练数据工作区根目录，默认使用 app 运行目录\n\
+         \t--output <path>                   最终/持续导出的 safetensors，默认写入仓库 models/tracker_encoder.safetensors\n\
+         \t--checkpoint-dir <path>           checkpoint 目录，默认写入仓库 models/checkpoints/tracker-encoder\n\
          \t--epochs <n>                      训练轮数，默认 6\n\
          \t--steps-per-epoch <n>             每轮步数，默认 120\n\
          \t--samples-per-step <n>            每步样本数，默认 6\n\
@@ -921,23 +928,24 @@ fn resolve_encoder_training_paths(config: &EncoderTrainingConfig) -> Result<Enco
         Some(path) => std::env::current_dir()?.join(path),
         None => WorkspaceBootstrap::prepare()?.workspace_root,
     };
+    let output_root = repository_root().unwrap_or(std::env::current_dir()?);
     let output_weights = config
         .output_path
         .clone()
-        .map(|path| normalize_training_path(&workspace_root, path))
+        .map(|path| normalize_training_path(&output_root, path))
         .unwrap_or_else(|| {
-            workspace_root
+            output_root
                 .join("models")
                 .join("tracker_encoder.safetensors")
         });
     let checkpoint_dir = config
         .checkpoint_dir
         .clone()
-        .map(|path| normalize_training_path(&workspace_root, path))
+        .map(|path| normalize_training_path(&output_root, path))
         .unwrap_or_else(|| {
-            workspace_root
-                .join("cache")
-                .join("training")
+            output_root
+                .join("models")
+                .join("checkpoints")
                 .join("tracker-encoder")
         });
 

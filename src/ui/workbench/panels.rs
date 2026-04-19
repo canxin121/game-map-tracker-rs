@@ -18,6 +18,7 @@ use strum::IntoEnumIterator;
 
 use crate::{
     domain::{theme::ThemePreference, tracker::TrackingSource},
+    model_assets::repository_tracker_encoder_path,
     resources::{
         BwikiResourceManager, tile_coordinate_to_world_origin, visible_tile_layers,
         zoom_world_bounds,
@@ -2637,16 +2638,13 @@ fn settings_resources_page(
     cx: &mut Context<TrackerWorkbench>,
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
-    let models_dir = this
-        .workspace
-        .project_root
-        .join("models")
-        .display()
-        .to_string();
+    let pretrained_model = repository_tracker_encoder_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "已内置到程序内存".to_owned());
 
     settings_page_shell(
         "本地数据路径",
-        "路线文件、配置和 BWiki 运行时缓存都会真实落盘。BWiki 只缓存点位目录、图标和按需下载的瓦片，不再生成或保留整张拼接地图。",
+        "路线文件、配置和 BWiki 运行时缓存都会真实落盘。AI 预训练模型默认内置到程序内存；开发环境下重新训练时，产物会写回仓库 models 目录。",
         None,
         vec![
             resource_path(
@@ -2673,8 +2671,14 @@ fn settings_resources_page(
                 &this.workspace.assets.bwiki_cache_dir.display().to_string(),
             )
             .into_any_element(),
-            resource_path("resource-models-dir", cx, tokens, "模型目录", &models_dir)
-                .into_any_element(),
+            resource_path(
+                "resource-models-dir",
+                cx,
+                tokens,
+                "预训练模型",
+                &pretrained_model,
+            )
+            .into_any_element(),
             resource_path(
                 "resource-config-file",
                 cx,

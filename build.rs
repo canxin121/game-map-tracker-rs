@@ -8,12 +8,16 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));
     let generated_path = out_dir.join("embedded_assets.rs");
     let icon_assets_root = manifest_dir.join("assets").join("icons");
+    let tracker_encoder_path = manifest_dir
+        .join("models")
+        .join("tracker_encoder.safetensors");
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let ai_burn_enabled = env::var_os("CARGO_FEATURE_AI_BURN").is_some();
 
     for root in [&icon_assets_root] {
         println!("cargo:rerun-if-changed={}", root.display());
     }
+    println!("cargo:rerun-if-changed={}", tracker_encoder_path.display());
 
     println!("cargo:rustc-check-cfg=cfg(burn_cuda_backend)");
     println!("cargo:rustc-check-cfg=cfg(burn_vulkan_backend)");

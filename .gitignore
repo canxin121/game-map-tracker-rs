@@ -4,3 +4,4 @@
 .tmp-bootstrap-check-*
 *.log
 /.tmp-bwiki-rocom/
+/models/checkpoints/

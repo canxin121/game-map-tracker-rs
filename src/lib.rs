@@ -1,4 +1,5 @@
 mod embedded_assets;
+mod model_assets;
 
 pub mod app;
 pub mod config;

@@ -77,7 +77,6 @@ fn ensure_default_config(root: &Path) -> Result<()> {
 
 fn ensure_workspace_layout(root: &Path) -> Result<()> {
     for path in [
-        root.join("models"),
         root.join("routes"),
         root.join("cache").join("bwiki"),
         root.join("cache").join("tracking"),
