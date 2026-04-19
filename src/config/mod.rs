@@ -177,10 +177,10 @@ impl Default for TemplateTrackingConfig {
         Self {
             refresh_rate_ms: 120,
             local_downscale: 4,
-            global_downscale: 16,
+            global_downscale: 8,
             global_refine_radius_px: 480,
-            local_match_threshold: 0.53,
-            global_match_threshold: 0.45,
+            local_match_threshold: 0.45,
+            global_match_threshold: 0.40,
             mask_outer_radius: 0.96,
             mask_inner_radius: 0.16,
             device: AiDevicePreference::default(),
@@ -232,7 +232,7 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn normalize_in_place(&mut self) {
-        self.minimap_presence_probe.enabled = true;
+        // Keep explicit probe enablement as user-configured.
     }
 
     #[must_use]
@@ -309,17 +309,17 @@ mod tests {
     }
 
     #[test]
-    fn normalized_forces_minimap_presence_probe_enabled() {
+    fn normalized_preserves_minimap_presence_probe_enabled_flag() {
         let mut config = AppConfig::default();
         config.minimap_presence_probe.enabled = false;
 
         let normalized = config.normalized();
 
-        assert!(normalized.minimap_presence_probe.enabled);
+        assert!(!normalized.minimap_presence_probe.enabled);
     }
 
     #[test]
-    fn load_existing_config_forces_minimap_presence_probe_enabled() {
+    fn load_existing_config_preserves_minimap_presence_probe_enabled_flag() {
         let root = temp_config_root("load-config");
         let mut config = AppConfig::default();
         config.minimap_presence_probe.enabled = false;
@@ -328,21 +328,21 @@ mod tests {
 
         let loaded = load_existing_config(&root).expect("failed to load config");
 
-        assert!(loaded.minimap_presence_probe.enabled);
+        assert!(!loaded.minimap_presence_probe.enabled);
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn save_config_persists_minimap_presence_probe_as_enabled() {
+    fn save_config_persists_minimap_presence_probe_enabled_flag() {
         let root = temp_config_root("save-config");
         let mut config = AppConfig::default();
         config.minimap_presence_probe.enabled = false;
 
         let path = save_config(&root, &config).expect("failed to save config");
-        let raw = fs::read_to_string(path).expect("failed to read saved config");
+        let loaded = load_existing_config(path.parent().expect("config path should have parent"))
+            .expect("failed to reload saved config");
 
-        assert!(raw.contains("enabled = true"));
-        assert!(!raw.contains("enabled = false"));
+        assert!(!loaded.minimap_presence_probe.enabled);
         let _ = fs::remove_dir_all(root);
     }
 }

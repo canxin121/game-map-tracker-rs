@@ -46,6 +46,7 @@ use crate::{
             capture_template_annulus, capture_template_inner_square, center_to_scaled,
             coarse_global_downscale, crop_search_region, local_candidate_decision,
             mask_as_unit_vec, preview_image, scaled_dimension, search_region_around_center,
+            top_score_peaks,
         },
     },
 };
@@ -61,6 +62,9 @@ struct LocateResult {
     score_map: Option<Vec<f32>>,
     accepted: Option<MatchCandidate>,
 }
+
+#[cfg(feature = "ai-burn")]
+const MAX_GLOBAL_COARSE_CANDIDATES: usize = 12;
 
 pub struct BurnTrackerWorker {
     #[cfg(feature = "ai-burn")]
@@ -1028,6 +1032,7 @@ where
             &self.coarse_search,
             &prepared,
             Some(self.coarse_search_patch_energy.clone()),
+            true,
             threshold,
             origin_x,
             origin_y,
@@ -1047,6 +1052,7 @@ where
             &self.coarse_search,
             template,
             Some(self.coarse_search_patch_energy.clone()),
+            true,
             threshold,
             origin_x,
             origin_y,
@@ -1079,7 +1085,7 @@ where
     ) -> Result<LocateResult> {
         let search = SearchTensorCache::<B>::from_gray_image(image, &self.encoder)?;
         self.locate_cached(
-            &search, template, None, threshold, origin_x, origin_y, scale,
+            &search, template, None, false, threshold, origin_x, origin_y, scale,
         )
     }
 
@@ -1108,7 +1114,7 @@ where
     ) -> Result<LocateResult> {
         let search = SearchTensorCache::<B>::from_gray_image(image, &self.encoder)?;
         self.locate_cached(
-            &search, template, None, threshold, origin_x, origin_y, scale,
+            &search, template, None, false, threshold, origin_x, origin_y, scale,
         )
     }
 
@@ -1117,6 +1123,7 @@ where
         search: &SearchTensorCache<B>,
         template: &BurnPreparedTemplate<B>,
         precomputed_patch_energy: Option<Tensor<B, 4>>,
+        capture_score_map: bool,
         threshold: f32,
         origin_x: u32,
         origin_y: u32,
@@ -1144,6 +1151,7 @@ where
                 &template.mask,
                 precomputed_patch_energy,
                 template.template_energy,
+                capture_score_map,
                 threshold,
                 origin_x,
                 origin_y,
@@ -1171,7 +1179,7 @@ where
         };
         let normalized = numerator / (search_patch_energy * template.template_energy + 1e-6).sqrt();
 
-        if burn_score_map_capture_enabled() {
+        if capture_score_map || burn_score_map_capture_enabled() {
             let score_map = tensor4_to_flat_f32(normalized)?;
             return Ok(locate_result_from_flat_scores(
                 score_map,
@@ -1359,6 +1367,7 @@ fn locate_cached_in_chunks<B>(
     mask: &Tensor<B, 4>,
     precomputed_patch_energy: Option<Tensor<B, 4>>,
     template_energy: f32,
+    capture_score_map: bool,
     threshold: f32,
     origin_x: u32,
     origin_y: u32,
@@ -1372,7 +1381,7 @@ where
 {
     let score_width = search.width - template_width + 1;
     let score_height = search.height - template_height + 1;
-    let capture_score_map = burn_score_map_capture_enabled();
+    let capture_score_map = capture_score_map || burn_score_map_capture_enabled();
     let mut score_map =
         capture_score_map.then(|| Vec::with_capacity(score_width as usize * score_height as usize));
     let mut output_row = 0u32;
@@ -1724,36 +1733,13 @@ impl BurnTrackerInner {
         }
 
         if estimate.is_none() {
-            let coarse = self.matcher.locate_coarse_prepared(
+            let result = locate_global_relocate_runtime(
+                &self.matcher,
+                &self.pyramid,
+                &self.config.template,
                 &templates.coarse,
-                self.config.template.global_match_threshold,
-                0,
-                0,
-                self.pyramid.coarse.scale,
+                &templates.global,
             )?;
-            let result = if let Some(candidate) = coarse.accepted.clone() {
-                let region = search_region_around_center(
-                    self.pyramid.global.image.width(),
-                    self.pyramid.global.image.height(),
-                    center_to_scaled(candidate.world, self.pyramid.global.scale),
-                    coarse_refine_radius_px(&self.config.template)
-                        / self.pyramid.global.scale.max(1),
-                    templates.global.width(),
-                    templates.global.height(),
-                )?;
-                let crop = crop_search_region(&self.pyramid.global.image, region)?;
-                let refined = self.matcher.locate_global_crop_prepared(
-                    &crop.image,
-                    &templates.global,
-                    self.config.template.global_match_threshold,
-                    crop.origin_x,
-                    crop.origin_y,
-                    self.pyramid.global.scale,
-                )?;
-                refined.accepted.clone().map_or(coarse, |_| refined)
-            } else {
-                coarse
-            };
             global_result = Some(result.clone());
 
             if let Some(coarse) = result.accepted {
@@ -2085,6 +2071,114 @@ fn coarse_refine_radius_px(config: &TemplateTrackingConfig) -> u32 {
     config.global_refine_radius_px.max(384)
 }
 
+#[cfg(feature = "ai-burn")]
+fn coarse_peak_suppression_radius(
+    config: &TemplateTrackingConfig,
+    coarse_scale: u32,
+    template_width: u32,
+    template_height: u32,
+) -> u32 {
+    (coarse_refine_radius_px(config) / coarse_scale.max(1))
+        .max(template_width.max(template_height) / 2)
+        .max(1)
+}
+
+#[cfg(feature = "ai-burn")]
+fn coarse_peak_candidates(
+    result: &LocateResult,
+    config: &TemplateTrackingConfig,
+    template_width: u32,
+    template_height: u32,
+    origin_x: u32,
+    origin_y: u32,
+    scale: u32,
+) -> Vec<MatchCandidate> {
+    let mut candidates = Vec::new();
+    if let Some(score_map) = result.score_map.as_ref() {
+        let peaks = top_score_peaks(
+            score_map,
+            result.score_width,
+            result.score_height,
+            config.global_match_threshold,
+            coarse_peak_suppression_radius(config, scale, template_width, template_height),
+            MAX_GLOBAL_COARSE_CANDIDATES,
+        );
+        candidates.extend(peaks.into_iter().map(|peak| MatchCandidate {
+            world: WorldPoint::new(
+                (origin_x + peak.left + template_width / 2) as f32 * scale as f32,
+                (origin_y + peak.top + template_height / 2) as f32 * scale as f32,
+            ),
+            score: peak.score,
+        }));
+    }
+
+    if candidates.is_empty() {
+        if let Some(candidate) = result.accepted.clone() {
+            candidates.push(candidate);
+        }
+    }
+
+    candidates
+}
+
+#[cfg(feature = "ai-burn")]
+fn locate_global_relocate_runtime(
+    matcher: &BurnFeatureMatcher,
+    pyramid: &MapPyramid,
+    config: &TemplateTrackingConfig,
+    coarse_template: &PreparedTemplate,
+    global_template: &PreparedTemplate,
+) -> Result<LocateResult> {
+    let coarse = matcher.locate_coarse_prepared(
+        coarse_template,
+        config.global_match_threshold,
+        0,
+        0,
+        pyramid.coarse.scale,
+    )?;
+    if coarse.accepted.is_none() {
+        return Ok(coarse);
+    }
+
+    let mut best_refined = None;
+    for candidate in coarse_peak_candidates(
+        &coarse,
+        config,
+        coarse_template.width(),
+        coarse_template.height(),
+        0,
+        0,
+        pyramid.coarse.scale,
+    ) {
+        let region = search_region_around_center(
+            pyramid.global.image.width(),
+            pyramid.global.image.height(),
+            center_to_scaled(candidate.world, pyramid.global.scale),
+            coarse_refine_radius_px(config) / pyramid.global.scale.max(1),
+            global_template.width(),
+            global_template.height(),
+        )?;
+        let crop = crop_search_region(&pyramid.global.image, region)?;
+        let refined = matcher.locate_global_crop_prepared(
+            &crop.image,
+            global_template,
+            config.global_match_threshold,
+            crop.origin_x,
+            crop.origin_y,
+            pyramid.global.scale,
+        )?;
+        if refined.accepted.is_some()
+            && best_refined
+                .as_ref()
+                .is_none_or(|best: &LocateResult| refined.best_score > best.best_score)
+        {
+            best_refined = Some(refined);
+        }
+    }
+
+    Ok(best_refined.unwrap_or(coarse))
+}
+
 impl TrackingWorker for BurnTrackerWorker {
     fn refresh_interval(&self) -> Duration {
         #[cfg(feature = "ai-burn")]
@@ -2142,27 +2236,36 @@ impl TrackingWorker for BurnTrackerWorker {
     }
 }
 
-#[cfg(all(test, feature = "ai-burn"))]
+#[cfg(all(test, feature = "ai-burn", burn_vulkan_backend))]
 mod tests {
     use std::sync::OnceLock;
 
     use super::*;
     use crate::{
-        config::{AiDevicePreference, AppConfig, CaptureRegion},
+        config::{AiDevicePreference, AppConfig},
+        domain::tracker::TrackingSource,
         resources::{WorkspaceSnapshot, load_logic_map_with_tracking_poi_scaled_image},
         tracking::{
             precompute::load_or_build_match_pyramid,
             test_support::{
-                benchmark_repeated, build_test_workspace, print_perf_ms, print_perf_per_op,
-                sample_world_positions, timed,
+                StressFailure, StressRoundStats, build_test_workspace, print_perf_ms,
+                random_stress_paths, require_vulkan_discrete_ordinal, runtime_config_or_default,
+                stress_env_u32, stress_env_usize, synthetic_capture_from_map, timed,
+                write_stress_report,
             },
         },
     };
-    use anyhow::Result;
-    use image::{
-        GrayImage, Luma,
-        imageops::{FilterType, crop_imm, replace, resize},
-    };
+    use anyhow::{Result, bail};
+    use image::GrayImage;
+
+    const MAX_ROUNDS: usize = 6;
+    const GLOBAL_CASES_PER_ROUND: usize = 40;
+    const LOCAL_STEPS_PER_CASE: usize = 6;
+    const LOCAL_STEP_MIN: u32 = 28;
+    const LOCAL_STEP_MAX: u32 = 112;
+    const GLOBAL_TOLERANCE: f32 = 16.0;
+    const LOCAL_TOLERANCE: f32 = 12.0;
+    const TARGET_ACCURACY: f32 = 0.90;
 
     struct TestFixture {
         config: AppConfig,
@@ -2173,27 +2276,45 @@ mod tests {
         masks: MaskSet,
     }
 
+    #[derive(Debug, Clone)]
+    struct FrameResult {
+        world: Option<WorldPoint>,
+        score: Option<f32>,
+        source: Option<TrackingSource>,
+        note: String,
+    }
+
     static FIXTURE: OnceLock<TestFixture> = OnceLock::new();
+
+    fn max_rounds() -> usize {
+        stress_env_usize("GAME_MAP_TRACKER_STRESS_ROUNDS", MAX_ROUNDS)
+    }
+
+    fn global_cases_per_round() -> usize {
+        stress_env_usize(
+            "GAME_MAP_TRACKER_STRESS_GLOBAL_CASES",
+            GLOBAL_CASES_PER_ROUND,
+        )
+    }
+
+    fn local_steps_per_case() -> usize {
+        stress_env_usize("GAME_MAP_TRACKER_STRESS_LOCAL_STEPS", LOCAL_STEPS_PER_CASE)
+    }
+
+    fn local_step_min() -> u32 {
+        stress_env_u32("GAME_MAP_TRACKER_STRESS_LOCAL_STEP_MIN", LOCAL_STEP_MIN)
+    }
+
+    fn local_step_max() -> u32 {
+        stress_env_u32("GAME_MAP_TRACKER_STRESS_LOCAL_STEP_MAX", LOCAL_STEP_MAX)
+    }
 
     fn fixture() -> &'static TestFixture {
         FIXTURE.get_or_init(|| {
             let (fixture, elapsed) = timed(|| {
-                let mut config = AppConfig::default();
-                config.minimap = CaptureRegion {
-                    top: 0,
-                    left: 0,
-                    width: 255,
-                    height: 235,
-                };
-                // Keep the AI regression fixture representative of the production path,
-                // but use a lighter pyramid so CPU smoke tests finish in practical time.
-                config.view_size = 320;
-                config.template.local_downscale = 6;
-                config.template.global_downscale = 12;
-                config.template.local_match_threshold = 0.45;
-                config.template.global_match_threshold = 0.40;
+                let mut config = runtime_config_or_default();
                 config.ai.weights_path = None;
-                let workspace = build_test_workspace(config.clone(), "ai");
+                let workspace = build_test_workspace(config.clone(), "ai-vulkan");
                 let prepared_pyramid =
                     load_or_build_match_pyramid(&workspace).expect("failed to build match pyramid");
                 let raw_map = load_logic_map_with_tracking_poi_scaled_image(
@@ -2203,7 +2324,6 @@ mod tests {
                 )
                 .expect("failed to assemble augmented z8 logic map");
                 let map = imageproc::contrast::equalize_histogram(&raw_map);
-                let pyramid = prepared_pyramid.pyramid;
                 let masks = build_template_masks(&config);
 
                 TestFixture {
@@ -2211,134 +2331,19 @@ mod tests {
                     workspace,
                     map_cache_key: prepared_pyramid.cache_key,
                     map,
-                    pyramid,
+                    pyramid: prepared_pyramid.pyramid,
                     masks,
                 }
             });
-            print_perf_ms("ai", "fixture_prepare", elapsed);
+            print_perf_ms("ai/vulkan", "fixture_prepare", elapsed);
             fixture
         })
     }
 
-    fn sample_positions(image: &GrayImage, view_size: u32) -> Vec<(u32, u32)> {
-        sample_world_positions(image, view_size, 1)
-    }
-
-    fn stress_positions(image: &GrayImage, view_size: u32) -> Vec<(u32, u32)> {
-        sample_world_positions(image, view_size, 2)
-    }
-
-    fn align_to(value: u32, step: u32) -> u32 {
-        (value / step.max(1)) * step.max(1)
-    }
-
-    fn bounded_world_point(fixture: &TestFixture, x: i32, y: i32) -> (u32, u32) {
-        let min_center = align_to(fixture.config.view_size / 2 + 32, 4);
-        let max_x = align_to(
-            fixture
-                .map
-                .width()
-                .saturating_sub(fixture.config.view_size / 2 + 32),
-            4,
-        );
-        let max_y = align_to(
-            fixture
-                .map
-                .height()
-                .saturating_sub(fixture.config.view_size / 2 + 32),
-            4,
-        );
-        (
-            align_to(x.clamp(min_center as i32, max_x as i32) as u32, 4),
-            align_to(y.clamp(min_center as i32, max_y as i32) as u32, 4),
-        )
-    }
-
-    fn stress_paths(fixture: &TestFixture) -> Vec<[(u32, u32); 4]> {
-        sample_world_positions(&fixture.map, fixture.config.view_size, 1)
-            .into_iter()
-            .map(|start| {
-                let dir_x = if start.0 > fixture.map.width() / 2 {
-                    -1
-                } else {
-                    1
-                };
-                let dir_y = if start.1 > fixture.map.height() / 2 {
-                    -1
-                } else {
-                    1
-                };
-                [
-                    bounded_world_point(fixture, start.0 as i32, start.1 as i32),
-                    bounded_world_point(
-                        fixture,
-                        start.0 as i32 + dir_x * 96,
-                        start.1 as i32 + dir_y * 48,
-                    ),
-                    bounded_world_point(
-                        fixture,
-                        start.0 as i32 + dir_x * 176,
-                        start.1 as i32 + dir_y * 104,
-                    ),
-                    bounded_world_point(
-                        fixture,
-                        start.0 as i32 + dir_x * 236,
-                        start.1 as i32 + dir_y * 144,
-                    ),
-                ]
-            })
-            .collect()
-    }
-
-    fn synthetic_capture(fixture: &TestFixture, center: (u32, u32)) -> GrayImage {
-        let half = fixture.config.view_size / 2;
-        let left = center.0.saturating_sub(half);
-        let top = center.1.saturating_sub(half);
-        let crop = crop_imm(
-            &fixture.map,
-            left,
-            top,
-            fixture.config.view_size,
-            fixture.config.view_size,
-        )
-        .to_image();
-
-        let diameter_px = fixture
-            .config
-            .minimap
-            .width
-            .min(fixture.config.minimap.height)
-            .max(1);
-        let diameter_px =
-            ((diameter_px as f32) * fixture.config.template.mask_outer_radius).round() as u32;
-        let minimap = resize(&crop, diameter_px, diameter_px, FilterType::Triangle);
-        let mut canvas = GrayImage::from_pixel(
-            fixture.config.minimap.width,
-            fixture.config.minimap.height,
-            Luma([0]),
-        );
-        let offset_x = i64::from((fixture.config.minimap.width - diameter_px) / 2);
-        let offset_y = i64::from((fixture.config.minimap.height - diameter_px) / 2);
-        replace(&mut canvas, &minimap, offset_x, offset_y);
-        canvas
-    }
-
-    fn assert_world_close(actual: WorldPoint, expected: (u32, u32), tolerance: f32) {
-        let dx = (actual.x - expected.0 as f32).abs();
-        let dy = (actual.y - expected.1 as f32).abs();
-        assert!(
-            dx <= tolerance && dy <= tolerance,
-            "expected ({}, {}), got ({:.1}, {:.1}), dx={dx:.1}, dy={dy:.1}",
-            expected.0,
-            expected.1,
-            actual.x,
-            actual.y
-        );
-    }
-
-    fn matcher_for_device(fixture: &TestFixture, device: AiDevicePreference) -> BurnFeatureMatcher {
+    fn matcher_for_vulkan(fixture: &TestFixture, ordinal: usize) -> BurnFeatureMatcher {
         let mut config = fixture.config.ai.clone();
-        config.device = device;
+        config.device = AiDevicePreference::Vulkan;
+        config.device_index = ordinal;
         BurnFeatureMatcher::new(
             &fixture.workspace,
             &config,
@@ -2346,268 +2351,53 @@ mod tests {
             &fixture.masks,
             &fixture.map_cache_key,
         )
-        .expect("failed to create feature matcher")
+        .expect("failed to create Vulkan feature matcher")
     }
 
-    fn locate_fixture_burn(
+    fn within_tolerance(actual: Option<WorldPoint>, expected: (u32, u32), tolerance: f32) -> bool {
+        actual.is_some_and(|actual| {
+            (actual.x - expected.0 as f32).abs() <= tolerance
+                && (actual.y - expected.1 as f32).abs() <= tolerance
+        })
+    }
+
+    fn locate_global_runtime(
+        fixture: &TestFixture,
+        matcher: &BurnFeatureMatcher,
+        templates: &PreparedCaptureTemplates,
+    ) -> Result<LocateResult> {
+        locate_global_relocate_runtime(
+            matcher,
+            &fixture.pyramid,
+            &fixture.config.template,
+            &templates.coarse,
+            &templates.global,
+        )
+    }
+
+    fn simulate_runtime_frame(
         fixture: &TestFixture,
         matcher: &BurnFeatureMatcher,
         capture: &GrayImage,
-    ) -> Result<MatchCandidate> {
+        state: &mut TrackerState,
+    ) -> Result<FrameResult> {
         let templates =
             matcher.prepare_capture_templates(capture, &fixture.config, &fixture.pyramid)?;
-        let coarse = matcher.locate_coarse_prepared(
-            &templates.coarse,
-            fixture.config.template.global_match_threshold,
-            0,
-            0,
-            fixture.pyramid.coarse.scale,
-        )?;
-        let coarse = coarse.accepted.unwrap_or_else(|| {
-            panic!(
-                "global locate should accept, best_score={:.3}, best_left={}, best_top={}",
-                coarse.best_score, coarse.best_left, coarse.best_top
-            )
-        });
-        let global_region = search_region_around_center(
-            fixture.pyramid.global.image.width(),
-            fixture.pyramid.global.image.height(),
-            center_to_scaled(coarse.world, fixture.pyramid.global.scale),
-            coarse_refine_radius_px(&fixture.config.template) / fixture.pyramid.global.scale.max(1),
-            templates.global.width(),
-            templates.global.height(),
-        )?;
-        let global_crop = crop_search_region(&fixture.pyramid.global.image, global_region)?;
-        let global = matcher.locate_global_crop_prepared(
-            &global_crop.image,
-            &templates.global,
-            fixture.config.template.global_match_threshold,
-            global_crop.origin_x,
-            global_crop.origin_y,
-            fixture.pyramid.global.scale,
-        )?;
-        let global = global
-            .accepted
-            .or(Some(coarse))
-            .expect("global refine should accept");
-        let region = search_region_around_center(
-            fixture.pyramid.local.image.width(),
-            fixture.pyramid.local.image.height(),
-            center_to_scaled(global.world, fixture.pyramid.local.scale),
-            fixture.config.template.global_refine_radius_px / fixture.pyramid.local.scale.max(1),
-            templates.local.width(),
-            templates.local.height(),
-        )?;
-        let crop = crop_search_region(&fixture.pyramid.local.image, region)?;
-        let refine = matcher.locate_dynamic_prepared(
-            &crop.image,
-            &templates.local,
-            fixture.config.template.global_match_threshold,
-            crop.origin_x,
-            crop.origin_y,
-            fixture.pyramid.local.scale,
-        )?;
+        let mut best_score = None;
+        let mut note = String::new();
 
-        Ok(refine
-            .accepted
-            .or(Some(global))
-            .expect("refine locate should accept"))
-    }
-
-    #[test]
-    fn prepared_template_uses_world_view_diameter() {
-        let fixture = fixture();
-        let capture = synthetic_capture(
-            fixture,
-            sample_positions(&fixture.map, fixture.config.view_size)[0],
-        );
-        let (local, local_elapsed) = timed(|| {
-            prepare_capture_template(
-                &capture,
-                fixture.config.view_size,
-                fixture.pyramid.local.scale,
-                fixture.config.template.mask_inner_radius,
-                fixture.config.template.mask_outer_radius,
-            )
-        });
-        let (global, global_elapsed) = timed(|| {
-            prepare_capture_template(
-                &capture,
-                fixture.config.view_size,
-                fixture.pyramid.global.scale,
-                fixture.config.template.mask_inner_radius,
-                fixture.config.template.mask_outer_radius,
-            )
-        });
-        let (coarse, coarse_elapsed) = timed(|| {
-            prepare_capture_template(
-                &capture,
-                fixture.config.view_size,
-                fixture.pyramid.coarse.scale,
-                fixture.config.template.mask_inner_radius,
-                fixture.config.template.mask_outer_radius,
-            )
-        });
-        print_perf_ms("ai", "prepare_local_template", local_elapsed);
-        print_perf_ms("ai", "prepare_global_template", global_elapsed);
-        print_perf_ms("ai", "prepare_coarse_template", coarse_elapsed);
-
-        assert_eq!(
-            local.width(),
-            scaled_dimension(fixture.config.view_size, fixture.pyramid.local.scale)
-        );
-        assert_eq!(
-            global.width(),
-            scaled_dimension(fixture.config.view_size, fixture.pyramid.global.scale)
-        );
-        assert_eq!(
-            coarse.width(),
-            scaled_dimension(fixture.config.view_size, fixture.pyramid.coarse.scale)
-        );
-        assert_eq!(local.width(), fixture.masks.local.width());
-        assert_eq!(global.width(), fixture.masks.global.width());
-        assert_eq!(coarse.width(), fixture.masks.coarse.width());
-    }
-
-    #[cfg(burn_cuda_backend)]
-    #[test]
-    fn synthetic_captures_locate_many_positions_on_burn_cuda() -> Result<()> {
-        let fixture = fixture();
-        let (matcher, init_elapsed) = match std::panic::catch_unwind(|| {
-            timed(|| matcher_for_device(fixture, AiDevicePreference::Cuda))
-        }) {
-            Ok(result) => result,
-            Err(_) => return Ok(()),
-        };
-        print_perf_ms("ai/cuda", "matcher_init", init_elapsed);
-
-        let points = sample_positions(&fixture.map, fixture.config.view_size);
-        if let Some(point) = points.first().copied() {
-            let capture = synthetic_capture(fixture, point);
-            let (candidate, locate_elapsed) =
-                benchmark_repeated(0, 1, || locate_fixture_burn(fixture, &matcher, &capture));
-            print_perf_per_op("ai/cuda", "reference_locate", 1, locate_elapsed);
-            let candidate = candidate?;
-            assert_world_close(candidate.world, point, 4.0);
-        }
-        for point in points.into_iter().skip(1) {
-            let capture = synthetic_capture(fixture, point);
-            let candidate = locate_fixture_burn(fixture, &matcher, &capture)?;
-            assert_world_close(candidate.world, point, 4.0);
-        }
-        Ok(())
-    }
-
-    #[cfg(burn_vulkan_backend)]
-    #[test]
-    fn synthetic_captures_locate_many_positions_on_burn_vulkan() -> Result<()> {
-        let fixture = fixture();
-        let (matcher, init_elapsed) = match std::panic::catch_unwind(|| {
-            timed(|| matcher_for_device(fixture, AiDevicePreference::Vulkan))
-        }) {
-            Ok(result) => result,
-            Err(_) => return Ok(()),
-        };
-        print_perf_ms("ai/vulkan", "matcher_init", init_elapsed);
-
-        let points = sample_positions(&fixture.map, fixture.config.view_size);
-        if let Some(point) = points.first().copied() {
-            let capture = synthetic_capture(fixture, point);
-            let (candidate, locate_elapsed) =
-                benchmark_repeated(0, 1, || locate_fixture_burn(fixture, &matcher, &capture));
-            print_perf_per_op("ai/vulkan", "reference_locate", 1, locate_elapsed);
-            let candidate = candidate?;
-            assert_world_close(candidate.world, point, 4.0);
-        }
-        for point in points.into_iter().skip(1) {
-            let capture = synthetic_capture(fixture, point);
-            let candidate = locate_fixture_burn(fixture, &matcher, &capture)?;
-            assert_world_close(candidate.world, point, 4.0);
-        }
-        Ok(())
-    }
-
-    #[cfg(burn_metal_backend)]
-    #[test]
-    fn synthetic_captures_locate_many_positions_on_burn_metal() -> Result<()> {
-        let fixture = fixture();
-        let (matcher, init_elapsed) = match std::panic::catch_unwind(|| {
-            timed(|| matcher_for_device(fixture, AiDevicePreference::Metal))
-        }) {
-            Ok(result) => result,
-            Err(_) => return Ok(()),
-        };
-        print_perf_ms("ai/metal", "matcher_init", init_elapsed);
-
-        let points = sample_positions(&fixture.map, fixture.config.view_size);
-        if let Some(point) = points.first().copied() {
-            let capture = synthetic_capture(fixture, point);
-            let (candidate, locate_elapsed) =
-                benchmark_repeated(0, 1, || locate_fixture_burn(fixture, &matcher, &capture));
-            print_perf_per_op("ai/metal", "reference_locate", 1, locate_elapsed);
-            let candidate = candidate?;
-            assert_world_close(candidate.world, point, 4.0);
-        }
-        for point in points.into_iter().skip(1) {
-            let capture = synthetic_capture(fixture, point);
-            let candidate = locate_fixture_burn(fixture, &matcher, &capture)?;
-            assert_world_close(candidate.world, point, 4.0);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn synthetic_captures_locate_many_positions_on_burn_cpu() -> Result<()> {
-        let fixture = fixture();
-        let (matcher, init_elapsed) =
-            timed(|| matcher_for_device(fixture, AiDevicePreference::Cpu));
-        print_perf_ms("ai/cpu", "matcher_init", init_elapsed);
-
-        let points = stress_positions(&fixture.map, fixture.config.view_size);
-        if let Some(point) = points.first().copied() {
-            let capture = synthetic_capture(fixture, point);
-            let (candidate, locate_elapsed) =
-                benchmark_repeated(0, 1, || locate_fixture_burn(fixture, &matcher, &capture));
-            print_perf_per_op("ai/cpu", "reference_locate", 1, locate_elapsed);
-            let candidate = candidate?;
-            assert_world_close(candidate.world, point, 10.0);
-        }
-        for point in points.into_iter().skip(1) {
-            let capture = synthetic_capture(fixture, point);
-            let candidate = locate_fixture_burn(fixture, &matcher, &capture)?;
-            assert_world_close(candidate.world, point, 10.0);
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn local_track_sequence_stays_locked_on_burn_cpu() -> Result<()> {
-        let fixture = fixture();
-        let matcher = matcher_for_device(fixture, AiDevicePreference::Cpu);
-        for path in stress_paths(fixture) {
-            let first_capture = synthetic_capture(fixture, path[0]);
-            let first = locate_fixture_burn(fixture, &matcher, &first_capture)?;
-            assert_world_close(first.world, path[0], 10.0);
-
-            for window in path.windows(2) {
-                let previous = WorldPoint::new(window[0].0 as f32, window[0].1 as f32);
-                let capture = synthetic_capture(fixture, window[1]);
-                let templates = matcher.prepare_capture_templates(
-                    &capture,
-                    &fixture.config,
-                    &fixture.pyramid,
-                )?;
+        if fixture.config.local_search.enabled && matches!(state.stage, SearchStage::LocalTrack) {
+            if let Some(last_world) = state.last_world {
                 let region = search_region_around_center(
                     fixture.pyramid.local.image.width(),
                     fixture.pyramid.local.image.height(),
-                    center_to_scaled(previous, fixture.pyramid.local.scale),
+                    center_to_scaled(last_world, fixture.pyramid.local.scale),
                     fixture.config.local_search.radius_px / fixture.pyramid.local.scale.max(1),
                     templates.local.width(),
                     templates.local.height(),
                 )?;
                 let crop = crop_search_region(&fixture.pyramid.local.image, region)?;
-                let locate = matcher.locate_dynamic_prepared(
+                let result = matcher.locate_dynamic_prepared(
                     &crop.image,
                     &templates.local,
                     fixture.config.template.local_match_threshold,
@@ -2615,11 +2405,200 @@ mod tests {
                     crop.origin_y,
                     fixture.pyramid.local.scale,
                 )?;
-                let candidate = locate.accepted.expect("local track should accept");
-                assert_world_close(candidate.world, window[1], 12.0);
+                best_score = Some(result.best_score);
+                if let Some(candidate) = result.accepted.clone() {
+                    match local_candidate_decision(
+                        last_world,
+                        candidate.world,
+                        fixture.config.local_search.max_accepted_jump_px,
+                        state.reacquire_anchor,
+                        fixture.config.local_search.reacquire_jump_threshold_px,
+                    ) {
+                        LocalCandidateDecision::Accept => {
+                            state.mark_success(candidate.world);
+                            return Ok(FrameResult {
+                                world: Some(candidate.world),
+                                score: Some(candidate.score),
+                                source: Some(TrackingSource::FeatureEmbedding),
+                                note: "local_accept".to_owned(),
+                            });
+                        }
+                        LocalCandidateDecision::ForceGlobalRelocate { jump, .. } => {
+                            state.force_global_relocate();
+                            note = format!("forced_global_jump={jump:.1}");
+                        }
+                        LocalCandidateDecision::Reject => {}
+                    }
+                }
+                if note.is_empty() {
+                    let switched =
+                        state.increment_local_fail(fixture.config.local_search.lock_fail_threshold);
+                    note = if switched {
+                        "local_fail_switched_to_global".to_owned()
+                    } else {
+                        format!("local_fail_streak={}", state.local_fail_streak)
+                    };
+                }
             }
         }
 
-        Ok(())
+        let global = locate_global_runtime(fixture, matcher, &templates)?;
+        best_score = Some(global.best_score);
+        if let Some(coarse) = global.accepted {
+            let region = search_region_around_center(
+                fixture.pyramid.local.image.width(),
+                fixture.pyramid.local.image.height(),
+                center_to_scaled(coarse.world, fixture.pyramid.local.scale),
+                fixture.config.template.global_refine_radius_px
+                    / fixture.pyramid.local.scale.max(1),
+                templates.local.width(),
+                templates.local.height(),
+            )?;
+            let crop = crop_search_region(&fixture.pyramid.local.image, region)?;
+            let refine = matcher.locate_dynamic_prepared(
+                &crop.image,
+                &templates.local,
+                fixture.config.template.global_match_threshold,
+                crop.origin_x,
+                crop.origin_y,
+                fixture.pyramid.local.scale,
+            )?;
+            best_score = Some(refine.best_score);
+            if let Some(candidate) = refine.accepted.or(Some(coarse)) {
+                state.mark_success(candidate.world);
+                return Ok(FrameResult {
+                    world: Some(candidate.world),
+                    score: Some(candidate.score),
+                    source: Some(TrackingSource::FeatureEmbedding),
+                    note: "global_accept".to_owned(),
+                });
+            }
+        }
+
+        let inertial = state.next_inertial_position(fixture.config.max_lost_frames);
+        if note.is_empty() {
+            note = "global_fail".to_owned();
+        }
+        Ok(FrameResult {
+            world: inertial,
+            score: best_score,
+            source: inertial.map(|_| TrackingSource::InertialHold),
+            note,
+        })
+    }
+
+    fn run_round(
+        fixture: &TestFixture,
+        matcher: &BurnFeatureMatcher,
+        seed: u64,
+    ) -> Result<StressRoundStats> {
+        let cases = random_stress_paths(
+            &fixture.map,
+            fixture.config.view_size,
+            global_cases_per_round(),
+            local_steps_per_case(),
+            local_step_min(),
+            local_step_max(),
+            seed,
+        );
+
+        let mut stats = StressRoundStats::default();
+        for (case_index, case) in cases.iter().enumerate() {
+            let mut state = TrackerState::default();
+
+            let capture = synthetic_capture_from_map(&fixture.map, &fixture.config, case.start);
+            let frame = simulate_runtime_frame(fixture, matcher, &capture, &mut state)?;
+            stats.global_total += 1;
+            if within_tolerance(frame.world, case.start, GLOBAL_TOLERANCE) {
+                stats.global_success += 1;
+            } else {
+                stats.failures.push(StressFailure {
+                    case_index,
+                    step_index: 0,
+                    stage: "global",
+                    expected: case.start,
+                    actual: frame.world.map(|world| (world.x, world.y)),
+                    score: frame.score,
+                    source: frame.source.map(|source| source.to_string()),
+                    note: frame.note,
+                });
+            }
+
+            for (step_index, target) in case.locals.iter().copied().enumerate() {
+                let capture = synthetic_capture_from_map(&fixture.map, &fixture.config, target);
+                let frame = simulate_runtime_frame(fixture, matcher, &capture, &mut state)?;
+                stats.local_total += 1;
+                if within_tolerance(frame.world, target, LOCAL_TOLERANCE) {
+                    stats.local_success += 1;
+                } else {
+                    stats.failures.push(StressFailure {
+                        case_index,
+                        step_index: step_index + 1,
+                        stage: "local",
+                        expected: target,
+                        actual: frame.world.map(|world| (world.x, world.y)),
+                        score: frame.score,
+                        source: frame.source.map(|source| source.to_string()),
+                        note: frame.note,
+                    });
+                }
+            }
+        }
+
+        Ok(stats)
+    }
+
+    #[test]
+    fn vulkan_discrete_randomized_runtime_regression() -> Result<()> {
+        let fixture = fixture();
+        let (ordinal, device_name) = require_vulkan_discrete_ordinal();
+        let (matcher, init_elapsed) = timed(|| matcher_for_vulkan(fixture, ordinal));
+        print_perf_ms("ai/vulkan", "matcher_init", init_elapsed);
+
+        let mut best_global = 0.0f32;
+        let mut best_local = 0.0f32;
+        let mut best_overall = 0.0f32;
+
+        let max_rounds = max_rounds();
+        for round in 0..max_rounds {
+            let seed = 0x4149_5655_4c4b_414eu64.wrapping_add(round as u64 * 0x9e37_79b9);
+            let (stats, elapsed) = timed(|| run_round(fixture, &matcher, seed));
+            let stats = stats?;
+            let report_path = write_stress_report(
+                "ai-vulkan",
+                round + 1,
+                &stats,
+                &format!("seed={seed} device={} ({device_name})", ordinal),
+            );
+            let global_accuracy = stats.global_accuracy();
+            let local_accuracy = stats.local_accuracy();
+            let overall_accuracy = stats.overall_accuracy();
+            best_global = best_global.max(global_accuracy);
+            best_local = best_local.max(local_accuracy);
+            best_overall = best_overall.max(overall_accuracy);
+
+            println!(
+                "[ai/vulkan][round={}] global={:.2}% local={:.2}% overall={:.2}% elapsed_ms={:.0} failures={} report={}",
+                round + 1,
+                global_accuracy * 100.0,
+                local_accuracy * 100.0,
+                overall_accuracy * 100.0,
+                elapsed.as_secs_f64() * 1000.0,
+                stats.failures.len(),
+                report_path.display()
+            );
+
+            if global_accuracy >= TARGET_ACCURACY && local_accuracy >= TARGET_ACCURACY {
+                return Ok(());
+            }
+        }
+
+        bail!(
+            "AI Vulkan stress accuracy stayed below target after {} rounds; best global {:.2}%, best local {:.2}%, best overall {:.2}%",
+            max_rounds,
+            best_global * 100.0,
+            best_local * 100.0,
+            best_overall * 100.0
+        )
     }
 }

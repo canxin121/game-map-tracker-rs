@@ -141,6 +141,13 @@ pub struct SearchRegion {
     pub height: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ScorePeak {
+    pub left: u32,
+    pub top: u32,
+    pub score: f32,
+}
+
 #[derive(Debug, Clone)]
 pub enum DebugOverlay {
     Crosshair {
@@ -226,7 +233,7 @@ pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyram
 pub fn coarse_global_downscale(config: &crate::config::AppConfig) -> u32 {
     let local_scale = config.template.local_downscale.max(1);
     let global_scale = config.template.global_downscale.max(local_scale);
-    global_scale.saturating_mul(2).max(global_scale)
+    global_scale
 }
 
 pub fn downscale_gray(image: &GrayImage, scale: u32) -> GrayImage {
@@ -533,6 +540,61 @@ pub fn search_region_around_center(
         width,
         height,
     })
+}
+
+pub fn top_score_peaks(
+    score_map: &[f32],
+    score_width: u32,
+    score_height: u32,
+    threshold: f32,
+    suppression_radius: u32,
+    limit: usize,
+) -> Vec<ScorePeak> {
+    if score_map.is_empty() || score_width == 0 || score_height == 0 || limit == 0 {
+        return Vec::new();
+    }
+
+    let expected_len = score_width as usize * score_height as usize;
+    if score_map.len() < expected_len {
+        return Vec::new();
+    }
+
+    let mut ranked = score_map
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, score)| *score >= threshold)
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    let suppression_radius = suppression_radius.max(1) as i64;
+    let suppression_distance_sq = suppression_radius * suppression_radius;
+    let mut peaks = Vec::with_capacity(limit.min(ranked.len()));
+
+    for (index, score) in ranked {
+        let left = index as u32 % score_width;
+        let top = index as u32 / score_width;
+        let suppressed = peaks.iter().any(|peak: &ScorePeak| {
+            let dx = i64::from(left) - i64::from(peak.left);
+            let dy = i64::from(top) - i64::from(peak.top);
+            dx * dx + dy * dy <= suppression_distance_sq
+        });
+        if suppressed {
+            continue;
+        }
+
+        peaks.push(ScorePeak { left, top, score });
+        if peaks.len() >= limit {
+            break;
+        }
+    }
+
+    peaks
 }
 
 pub fn crop_search_region(image: &GrayImage, region: SearchRegion) -> Result<SearchCrop> {

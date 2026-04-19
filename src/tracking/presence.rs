@@ -154,7 +154,14 @@ struct CandidateCircle {
 
 impl MinimapPresenceDetector {
     pub fn new(workspace: &WorkspaceSnapshot) -> Result<Option<Self>> {
-        let region = workspace.config.minimap.clone();
+        let probe = &workspace.config.minimap_presence_probe;
+        if !probe.enabled {
+            return Ok(None);
+        }
+
+        let region = probe
+            .capture_region()
+            .unwrap_or_else(|| workspace.config.minimap.clone());
         if region.width < 48 || region.height < 48 {
             anyhow::bail!(
                 "小地图圆形区域过小，当前配置为 top {} / left {} / {}x{}",
@@ -165,7 +172,6 @@ impl MinimapPresenceDetector {
             );
         }
 
-        let probe = &workspace.config.minimap_presence_probe;
         let capture = DesktopCapture::from_absolute_region(&region)?;
         let arrow_hole_ratio = normalized_hole_ratio(
             workspace.config.template.mask_inner_radius,
