@@ -15,7 +15,10 @@ use strum::Display;
 
 use crate::{
     domain::{geometry::WorldPoint, tracker::TrackerEngineKind},
-    resources::{WorkspaceSnapshot, load_logic_map_with_tracking_poi_scaled_image},
+    resources::{
+        WorkspaceSnapshot, load_logic_map_with_tracking_poi_scaled_image,
+        load_logic_map_with_tracking_poi_scaled_rgba_image,
+    },
     tracking::debug::{DebugField, DebugImage, DebugImageKind, TrackingDebugSnapshot},
 };
 
@@ -107,10 +110,36 @@ pub struct MapPyramid {
 }
 
 #[derive(Debug, Clone)]
+pub struct ScaledColorMap {
+    pub scale: u32,
+    pub image: RgbaImage,
+}
+
+#[derive(Debug, Clone)]
+pub struct ColorMapPyramid {
+    pub local: ScaledColorMap,
+    pub global: ScaledColorMap,
+    pub coarse: ScaledColorMap,
+}
+
+#[derive(Debug, Clone)]
 pub struct MaskSet {
     pub local: GrayImage,
     pub global: GrayImage,
     pub coarse: GrayImage,
+}
+
+#[derive(Debug, Clone)]
+pub struct ColorCaptureTemplates {
+    pub local: RgbaImage,
+    pub global: RgbaImage,
+    pub coarse: RgbaImage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorTemplateShape {
+    Annulus,
+    InnerSquare,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +158,13 @@ pub enum LocalCandidateDecision {
 #[derive(Debug, Clone)]
 pub struct SearchCrop {
     pub image: GrayImage,
+    pub origin_x: u32,
+    pub origin_y: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ColorSearchCrop {
+    pub image: RgbaImage,
     pub origin_x: u32,
     pub origin_y: u32,
 }
@@ -230,6 +266,50 @@ pub fn load_logic_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<(MapPyram
     Ok((pyramid, masks))
 }
 
+pub fn load_logic_color_map_pyramid(workspace: &WorkspaceSnapshot) -> Result<ColorMapPyramid> {
+    let config = &workspace.config;
+    let local_scale = config.template.local_downscale.max(1);
+    let global_scale = config.template.global_downscale.max(local_scale);
+    let coarse_scale = coarse_global_downscale(config);
+    let base_map = load_logic_map_with_tracking_poi_scaled_rgba_image(
+        &workspace.assets.bwiki_cache_dir,
+        1,
+        config.view_size,
+    )
+    .with_context(|| {
+        format!(
+            "failed to load augmented color BWiki logic tiles from {}",
+            workspace.assets.bwiki_cache_dir.display()
+        )
+    })?;
+    let local_map = downscale_rgba(&base_map, local_scale);
+    let global_map = if global_scale == local_scale {
+        local_map.clone()
+    } else {
+        downscale_rgba(&base_map, global_scale)
+    };
+    let coarse_map = if coarse_scale == global_scale {
+        global_map.clone()
+    } else {
+        downscale_rgba(&base_map, coarse_scale)
+    };
+
+    Ok(ColorMapPyramid {
+        local: ScaledColorMap {
+            scale: local_scale,
+            image: local_map,
+        },
+        global: ScaledColorMap {
+            scale: global_scale,
+            image: global_map,
+        },
+        coarse: ScaledColorMap {
+            scale: coarse_scale,
+            image: coarse_map,
+        },
+    })
+}
+
 pub fn coarse_global_downscale(config: &crate::config::AppConfig) -> u32 {
     let local_scale = config.template.local_downscale.max(1);
     let global_scale = config.template.global_downscale.max(local_scale);
@@ -237,6 +317,19 @@ pub fn coarse_global_downscale(config: &crate::config::AppConfig) -> u32 {
 }
 
 pub fn downscale_gray(image: &GrayImage, scale: u32) -> GrayImage {
+    if scale <= 1 {
+        return image.clone();
+    }
+
+    resize(
+        image,
+        scaled_dimension(image.width(), scale),
+        scaled_dimension(image.height(), scale),
+        FilterType::Triangle,
+    )
+}
+
+pub fn downscale_rgba(image: &RgbaImage, scale: u32) -> RgbaImage {
     if scale <= 1 {
         return image.clone();
     }
@@ -321,6 +414,36 @@ pub fn capture_template_inner_square(
     let offset_y = captured.height().saturating_sub(square_side) / 2;
     let square = crop_imm(captured, offset_x, offset_y, square_side, square_side).to_image();
     soften_capture_center_hole(&square, normalized_inner_radius(inner_radius, outer_radius))
+}
+
+pub fn capture_template_annulus_rgba(
+    captured: &RgbaImage,
+    inner_radius: f32,
+    outer_radius: f32,
+) -> RgbaImage {
+    let diameter_px = ((captured.width().min(captured.height()) as f32) * outer_radius)
+        .round()
+        .max(1.0) as u32;
+    let offset_x = captured.width().saturating_sub(diameter_px) / 2;
+    let offset_y = captured.height().saturating_sub(diameter_px) / 2;
+    let square = crop_imm(captured, offset_x, offset_y, diameter_px, diameter_px).to_image();
+    soften_capture_to_annulus_rgba(&square, inner_radius, outer_radius)
+}
+
+pub fn capture_template_inner_square_rgba(
+    captured: &RgbaImage,
+    inner_radius: f32,
+    outer_radius: f32,
+) -> RgbaImage {
+    let diameter_px = ((captured.width().min(captured.height()) as f32) * outer_radius)
+        .round()
+        .max(1.0) as u32;
+    let square_side =
+        inscribed_square_dimension(diameter_px).min(captured.width().min(captured.height()).max(1));
+    let offset_x = captured.width().saturating_sub(square_side) / 2;
+    let offset_y = captured.height().saturating_sub(square_side) / 2;
+    let square = crop_imm(captured, offset_x, offset_y, square_side, square_side).to_image();
+    soften_capture_center_hole_rgba(&square, normalized_inner_radius(inner_radius, outer_radius))
 }
 
 fn soften_capture_to_annulus(image: &GrayImage, inner_radius: f32, outer_radius: f32) -> GrayImage {
@@ -411,6 +534,166 @@ fn soften_capture_center_hole(image: &GrayImage, inner_radius: f32) -> GrayImage
             .clamp(0.0, 255.0) as u8;
         Luma([value])
     })
+}
+
+fn soften_capture_to_annulus_rgba(
+    image: &RgbaImage,
+    inner_radius: f32,
+    outer_radius: f32,
+) -> RgbaImage {
+    let feather = annulus_feather(image.width(), image.height());
+    let valid_inner = (inner_radius + feather).clamp(0.0, 1.5);
+    let valid_outer = (outer_radius - feather).clamp(valid_inner, 1.5);
+    let mut ring_sum = [0u64; 3];
+    let mut ring_count = 0u64;
+    let mut weighted_sum = [0.0f32; 3];
+    let mut weighted_count = 0.0f32;
+    let mut fallback_sum = [0u64; 3];
+
+    for (x, y, pixel) in image.enumerate_pixels() {
+        let distance = annulus_distance(image.width(), image.height(), x, y);
+        let alpha = annulus_alpha(distance, inner_radius, outer_radius, feather);
+        if distance >= valid_inner && distance <= valid_outer {
+            ring_sum[0] += u64::from(pixel.0[0]);
+            ring_sum[1] += u64::from(pixel.0[1]);
+            ring_sum[2] += u64::from(pixel.0[2]);
+            ring_count += 1;
+        }
+        weighted_sum[0] += f32::from(pixel.0[0]) * alpha;
+        weighted_sum[1] += f32::from(pixel.0[1]) * alpha;
+        weighted_sum[2] += f32::from(pixel.0[2]) * alpha;
+        weighted_count += alpha;
+        fallback_sum[0] += u64::from(pixel.0[0]);
+        fallback_sum[1] += u64::from(pixel.0[1]);
+        fallback_sum[2] += u64::from(pixel.0[2]);
+    }
+
+    let neutral = rgba_neutral_fill(
+        image.width(),
+        image.height(),
+        ring_sum,
+        ring_count,
+        weighted_sum,
+        weighted_count,
+        fallback_sum,
+    );
+
+    ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
+        let source = image.get_pixel(x, y).0;
+        let alpha = annulus_alpha(
+            annulus_distance(image.width(), image.height(), x, y),
+            inner_radius,
+            outer_radius,
+            feather,
+        );
+        image::Rgba([
+            blend_channel(neutral[0], source[0], alpha),
+            blend_channel(neutral[1], source[1], alpha),
+            blend_channel(neutral[2], source[2], alpha),
+            255,
+        ])
+    })
+}
+
+fn soften_capture_center_hole_rgba(image: &RgbaImage, inner_radius: f32) -> RgbaImage {
+    let feather = annulus_feather(image.width(), image.height());
+    let valid_inner = (inner_radius + feather).clamp(0.0, 1.0);
+    let mut ring_sum = [0u64; 3];
+    let mut ring_count = 0u64;
+    let mut weighted_sum = [0.0f32; 3];
+    let mut weighted_count = 0.0f32;
+    let mut fallback_sum = [0u64; 3];
+
+    for (x, y, pixel) in image.enumerate_pixels() {
+        let distance = inscribed_square_circle_ratio(image.width(), image.height(), x, y);
+        let alpha = if distance >= inner_radius + feather {
+            1.0
+        } else if distance <= inner_radius {
+            0.0
+        } else {
+            (distance - inner_radius) / feather.max(1e-6)
+        };
+        if distance >= valid_inner {
+            ring_sum[0] += u64::from(pixel.0[0]);
+            ring_sum[1] += u64::from(pixel.0[1]);
+            ring_sum[2] += u64::from(pixel.0[2]);
+            ring_count += 1;
+        }
+        weighted_sum[0] += f32::from(pixel.0[0]) * alpha;
+        weighted_sum[1] += f32::from(pixel.0[1]) * alpha;
+        weighted_sum[2] += f32::from(pixel.0[2]) * alpha;
+        weighted_count += alpha;
+        fallback_sum[0] += u64::from(pixel.0[0]);
+        fallback_sum[1] += u64::from(pixel.0[1]);
+        fallback_sum[2] += u64::from(pixel.0[2]);
+    }
+
+    let neutral = rgba_neutral_fill(
+        image.width(),
+        image.height(),
+        ring_sum,
+        ring_count,
+        weighted_sum,
+        weighted_count,
+        fallback_sum,
+    );
+
+    ImageBuffer::from_fn(image.width(), image.height(), |x, y| {
+        let distance = inscribed_square_circle_ratio(image.width(), image.height(), x, y);
+        let alpha = if distance >= inner_radius + feather {
+            1.0
+        } else if distance <= inner_radius {
+            0.0
+        } else {
+            (distance - inner_radius) / feather.max(1e-6)
+        };
+        let source = image.get_pixel(x, y).0;
+        image::Rgba([
+            blend_channel(neutral[0], source[0], alpha),
+            blend_channel(neutral[1], source[1], alpha),
+            blend_channel(neutral[2], source[2], alpha),
+            255,
+        ])
+    })
+}
+
+fn blend_channel(neutral: u8, source: u8, alpha: f32) -> u8 {
+    (f32::from(neutral) * (1.0 - alpha) + f32::from(source) * alpha)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+fn rgba_neutral_fill(
+    width: u32,
+    height: u32,
+    ring_sum: [u64; 3],
+    ring_count: u64,
+    weighted_sum: [f32; 3],
+    weighted_count: f32,
+    fallback_sum: [u64; 3],
+) -> [u8; 3] {
+    if ring_count > 0 {
+        return [
+            (ring_sum[0] / ring_count) as u8,
+            (ring_sum[1] / ring_count) as u8,
+            (ring_sum[2] / ring_count) as u8,
+        ];
+    }
+
+    if weighted_count > 1e-3 {
+        return [
+            (weighted_sum[0] / weighted_count).round().clamp(0.0, 255.0) as u8,
+            (weighted_sum[1] / weighted_count).round().clamp(0.0, 255.0) as u8,
+            (weighted_sum[2] / weighted_count).round().clamp(0.0, 255.0) as u8,
+        ];
+    }
+
+    let pixel_count = u64::from(width.max(1)) * u64::from(height.max(1));
+    [
+        (fallback_sum[0] / pixel_count.max(1)) as u8,
+        (fallback_sum[1] / pixel_count.max(1)) as u8,
+        (fallback_sum[2] / pixel_count.max(1)) as u8,
+    ]
 }
 
 fn annulus_alpha(distance: f32, inner_radius: f32, outer_radius: f32, feather: f32) -> f32 {
@@ -619,6 +902,28 @@ pub fn crop_search_region(image: &GrayImage, region: SearchRegion) -> Result<Sea
     })
 }
 
+pub fn crop_search_region_rgba(image: &RgbaImage, region: SearchRegion) -> Result<ColorSearchCrop> {
+    if image.width() < region.origin_x.saturating_add(region.width)
+        || image.height() < region.origin_y.saturating_add(region.height)
+    {
+        bail!("search region is outside image bounds");
+    }
+
+    let image = crop_imm(
+        image,
+        region.origin_x,
+        region.origin_y,
+        region.width,
+        region.height,
+    )
+    .to_image();
+    Ok(ColorSearchCrop {
+        image,
+        origin_x: region.origin_x,
+        origin_y: region.origin_y,
+    })
+}
+
 pub fn crop_around_center(
     image: &GrayImage,
     center: (u32, u32),
@@ -635,6 +940,187 @@ pub fn crop_around_center(
         template_height,
     )?;
     crop_search_region(image, region)
+}
+
+pub fn crop_around_center_rgba(
+    image: &RgbaImage,
+    center: (u32, u32),
+    radius: u32,
+    template_width: u32,
+    template_height: u32,
+) -> Result<ColorSearchCrop> {
+    let region = search_region_around_center(
+        image.width(),
+        image.height(),
+        center,
+        radius,
+        template_width,
+        template_height,
+    )?;
+    crop_search_region_rgba(image, region)
+}
+
+pub fn prepare_color_capture_template(
+    captured: &RgbaImage,
+    view_size: u32,
+    scale: u32,
+    inner_radius: f32,
+    outer_radius: f32,
+    shape: ColorTemplateShape,
+) -> RgbaImage {
+    let square = match shape {
+        ColorTemplateShape::Annulus => {
+            capture_template_annulus_rgba(captured, inner_radius, outer_radius)
+        }
+        ColorTemplateShape::InnerSquare => {
+            capture_template_inner_square_rgba(captured, inner_radius, outer_radius)
+        }
+    };
+    let template_size = scaled_dimension(view_size.max(1), scale.max(1));
+    if square.width() == template_size && square.height() == template_size {
+        square
+    } else {
+        resize(&square, template_size, template_size, FilterType::Triangle)
+    }
+}
+
+pub fn scaled_color_score(
+    map: &ScaledColorMap,
+    world: WorldPoint,
+    template: &RgbaImage,
+    mask: &GrayImage,
+) -> Option<f32> {
+    let patch = crop_centered_rgba(
+        &map.image,
+        center_to_scaled(world, map.scale),
+        template.width(),
+        template.height(),
+    )
+    .ok()?;
+    Some(masked_chroma_similarity(&patch, template, mask))
+}
+
+pub fn masked_chroma_similarity(search: &RgbaImage, template: &RgbaImage, mask: &GrayImage) -> f32 {
+    if search.dimensions() != template.dimensions() || search.dimensions() != mask.dimensions() {
+        return 0.0;
+    }
+
+    let mut rgb_dot = 0.0f32;
+    let mut rgb_search_norm = 0.0f32;
+    let mut rgb_template_norm = 0.0f32;
+    let mut chroma_dot = 0.0f32;
+    let mut chroma_search_norm = 0.0f32;
+    let mut chroma_template_norm = 0.0f32;
+    for y in 0..search.height() {
+        for x in 0..search.width() {
+            let mask_weight = f32::from(mask.get_pixel(x, y).0[0]) / 255.0;
+            if mask_weight <= 0.0 {
+                continue;
+            }
+
+            let search_pixel = search.get_pixel(x, y).0;
+            let template_pixel = template.get_pixel(x, y).0;
+            let search_rgb = normalized_rgb_linear(search_pixel);
+            let template_rgb = normalized_rgb_linear(template_pixel);
+            let search_chroma = normalized_rgb(search_pixel);
+            let template_chroma = normalized_rgb(template_pixel);
+            let chroma_weight = 0.1
+                + 0.9
+                    * ((pixel_chroma(search_pixel) + pixel_chroma(template_pixel)) * 0.5)
+                        .clamp(0.0, 1.0);
+            rgb_dot += mask_weight
+                * (search_rgb[0] * template_rgb[0]
+                    + search_rgb[1] * template_rgb[1]
+                    + search_rgb[2] * template_rgb[2]);
+            rgb_search_norm += mask_weight
+                * (search_rgb[0] * search_rgb[0]
+                    + search_rgb[1] * search_rgb[1]
+                    + search_rgb[2] * search_rgb[2]);
+            rgb_template_norm += mask_weight
+                * (template_rgb[0] * template_rgb[0]
+                    + template_rgb[1] * template_rgb[1]
+                    + template_rgb[2] * template_rgb[2]);
+
+            let weight = mask_weight * chroma_weight;
+            chroma_dot += weight
+                * (search_chroma[0] * template_chroma[0]
+                    + search_chroma[1] * template_chroma[1]
+                    + search_chroma[2] * template_chroma[2]);
+            chroma_search_norm += weight
+                * (search_chroma[0] * search_chroma[0]
+                    + search_chroma[1] * search_chroma[1]
+                    + search_chroma[2] * search_chroma[2]);
+            chroma_template_norm += weight
+                * (template_chroma[0] * template_chroma[0]
+                    + template_chroma[1] * template_chroma[1]
+                    + template_chroma[2] * template_chroma[2]);
+        }
+    }
+
+    let rgb_score = cosine_score(rgb_dot, rgb_search_norm, rgb_template_norm);
+    let chroma_score = cosine_score(chroma_dot, chroma_search_norm, chroma_template_norm);
+    if rgb_score <= 1e-6 {
+        chroma_score
+    } else if chroma_score <= 1e-6 {
+        rgb_score
+    } else {
+        (rgb_score * 0.65 + chroma_score * 0.35).clamp(0.0, 1.0)
+    }
+}
+
+fn crop_centered_rgba(
+    image: &RgbaImage,
+    center: (u32, u32),
+    width: u32,
+    height: u32,
+) -> Result<RgbaImage> {
+    if image.width() < width || image.height() < height {
+        bail!("color image is smaller than requested crop");
+    }
+
+    let left = center
+        .0
+        .saturating_sub(width / 2)
+        .min(image.width() - width);
+    let top = center
+        .1
+        .saturating_sub(height / 2)
+        .min(image.height() - height);
+    Ok(crop_imm(image, left, top, width, height).to_image())
+}
+
+fn normalized_rgb(pixel: [u8; 4]) -> [f32; 3] {
+    let r = f32::from(pixel[0]) / 255.0;
+    let g = f32::from(pixel[1]) / 255.0;
+    let b = f32::from(pixel[2]) / 255.0;
+    let sum = r + g + b;
+    if sum <= 1e-6 {
+        [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]
+    } else {
+        [r / sum, g / sum, b / sum]
+    }
+}
+
+fn normalized_rgb_linear(pixel: [u8; 4]) -> [f32; 3] {
+    [
+        f32::from(pixel[0]) / 255.0,
+        f32::from(pixel[1]) / 255.0,
+        f32::from(pixel[2]) / 255.0,
+    ]
+}
+
+fn pixel_chroma(pixel: [u8; 4]) -> f32 {
+    let max = pixel[0].max(pixel[1]).max(pixel[2]) as f32;
+    let min = pixel[0].min(pixel[1]).min(pixel[2]) as f32;
+    (max - min) / 255.0
+}
+
+fn cosine_score(dot: f32, left_norm: f32, right_norm: f32) -> f32 {
+    if left_norm <= 1e-6 || right_norm <= 1e-6 {
+        0.0
+    } else {
+        (dot / (left_norm * right_norm).sqrt()).clamp(0.0, 1.0)
+    }
 }
 
 #[must_use]
@@ -814,6 +1300,19 @@ pub fn gray_image_as_unit_vec(image: &GrayImage) -> Vec<f32> {
         .pixels()
         .map(|pixel| f32::from(pixel.0[0]) / 255.0)
         .collect()
+}
+
+#[must_use]
+pub fn rgba_image_as_unit_vec(image: &RgbaImage) -> Vec<f32> {
+    let plane_len = image.width() as usize * image.height() as usize;
+    let mut values = Vec::with_capacity(plane_len * 3);
+    for channel in 0..3 {
+        values.extend(
+            image.pixels()
+                .map(|pixel| f32::from(pixel.0[channel]) / 255.0),
+        );
+    }
+    values
 }
 
 fn world_jump_distance(lhs: WorldPoint, rhs: WorldPoint) -> f32 {

@@ -153,6 +153,19 @@ pub fn load_or_build_match_pyramid(workspace: &WorkspaceSnapshot) -> Result<Prep
     })
 }
 
+pub fn tracker_map_cache_key(workspace: &WorkspaceSnapshot) -> Result<String> {
+    let local_scale = workspace.config.template.local_downscale.max(1);
+    let global_scale = workspace.config.template.global_downscale.max(local_scale);
+    let coarse_scale = coarse_global_downscale(&workspace.config);
+    match_pyramid_cache_key(
+        &workspace.assets.bwiki_cache_dir,
+        workspace.config.view_size,
+        local_scale,
+        global_scale,
+        coarse_scale,
+    )
+}
+
 pub fn tracker_tensor_cache_path(
     workspace: &WorkspaceSnapshot,
     prefix: &str,

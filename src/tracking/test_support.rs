@@ -7,7 +7,7 @@ use std::{
 
 use directories::ProjectDirs;
 use image::{
-    GrayImage, Luma,
+    GrayImage, Luma, Rgba, RgbaImage,
     imageops::{FilterType, crop_imm, replace, resize},
 };
 
@@ -200,6 +200,7 @@ pub(crate) struct StressFailure {
     pub expected: (u32, u32),
     pub actual: Option<(f32, f32)>,
     pub score: Option<f32>,
+    pub color_score: Option<f32>,
     pub source: Option<String>,
     pub note: String,
 }
@@ -244,6 +245,30 @@ pub(crate) fn synthetic_capture_from_map(
     let diameter_px = ((diameter_px as f32) * config.template.mask_outer_radius).round() as u32;
     let minimap = resize(&crop, diameter_px, diameter_px, FilterType::Triangle);
     let mut canvas = GrayImage::from_pixel(config.minimap.width, config.minimap.height, Luma([0]));
+    let offset_x = i64::from((config.minimap.width - diameter_px) / 2);
+    let offset_y = i64::from((config.minimap.height - diameter_px) / 2);
+    replace(&mut canvas, &minimap, offset_x, offset_y);
+    canvas
+}
+
+pub(crate) fn synthetic_capture_rgba_from_map(
+    map: &RgbaImage,
+    config: &AppConfig,
+    center: (u32, u32),
+) -> RgbaImage {
+    let half = config.view_size / 2;
+    let left = center.0.saturating_sub(half);
+    let top = center.1.saturating_sub(half);
+    let crop = crop_imm(map, left, top, config.view_size, config.view_size).to_image();
+
+    let diameter_px = config.minimap.width.min(config.minimap.height).max(1);
+    let diameter_px = ((diameter_px as f32) * config.template.mask_outer_radius).round() as u32;
+    let minimap = resize(&crop, diameter_px, diameter_px, FilterType::Triangle);
+    let mut canvas = RgbaImage::from_pixel(
+        config.minimap.width,
+        config.minimap.height,
+        Rgba([0, 0, 0, 255]),
+    );
     let offset_x = i64::from((config.minimap.width - diameter_px) / 2);
     let offset_y = i64::from((config.minimap.height - diameter_px) / 2);
     replace(&mut canvas, &minimap, offset_x, offset_y);
@@ -358,9 +383,13 @@ pub(crate) fn write_stress_report(
             .score
             .map(|value| format!("{value:.3}"))
             .unwrap_or_else(|| "--".to_owned());
+        let color_score = failure
+            .color_score
+            .map(|value| format!("{value:.3}"))
+            .unwrap_or_else(|| "--".to_owned());
         let source = failure.source.clone().unwrap_or_else(|| "--".to_owned());
         report.push_str(&format!(
-            "case={} step={} stage={} expected={},{} actual={} score={} source={} note={}\n",
+            "case={} step={} stage={} expected={},{} actual={} score={} color={} source={} note={}\n",
             failure.case_index,
             failure.step_index,
             failure.stage,
@@ -368,6 +397,7 @@ pub(crate) fn write_stress_report(
             failure.expected.1,
             actual,
             score,
+            color_score,
             source,
             failure.note
         ));

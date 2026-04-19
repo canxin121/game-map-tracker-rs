@@ -612,6 +612,14 @@ pub fn load_logic_map_scaled_image(cache_root: &Path, scale: u32) -> Result<Gray
     assemble_gray_map(&cache, range, output_tile_size)
 }
 
+pub fn load_logic_map_scaled_rgba_image(cache_root: &Path, scale: u32) -> Result<RgbaImage> {
+    let cache = BwikiCachePaths::new(cache_root.to_path_buf());
+    cache.ensure_directories()?;
+    let range = preferred_logic_zoom(scale);
+    let output_tile_size = (range.world_tile_size() / scale.max(1)).max(1);
+    assemble_rgba_map(&cache, range, output_tile_size)
+}
+
 pub fn load_logic_map_with_tracking_poi_scaled_image(
     cache_root: &Path,
     scale: u32,
@@ -619,6 +627,16 @@ pub fn load_logic_map_with_tracking_poi_scaled_image(
 ) -> Result<GrayImage> {
     let mut image = load_logic_map_scaled_image(cache_root, scale)?;
     overlay_tracking_poi_icons(cache_root, scale, view_size, &mut image)?;
+    Ok(image)
+}
+
+pub fn load_logic_map_with_tracking_poi_scaled_rgba_image(
+    cache_root: &Path,
+    scale: u32,
+    view_size: u32,
+) -> Result<RgbaImage> {
+    let mut image = load_logic_map_scaled_rgba_image(cache_root, scale)?;
+    overlay_tracking_poi_icons_rgba(cache_root, scale, view_size, &mut image)?;
     Ok(image)
 }
 
@@ -663,6 +681,53 @@ fn overlay_tracking_poi_icons(
 
         for point in points {
             overlay_tracking_icon(image, icon, point.world, scale, icon_diameter);
+        }
+    }
+
+    Ok(())
+}
+
+fn overlay_tracking_poi_icons_rgba(
+    cache_root: &Path,
+    scale: u32,
+    view_size: u32,
+    image: &mut RgbaImage,
+) -> Result<()> {
+    if view_size == 0 {
+        return Ok(());
+    }
+
+    let manager = BwikiResourceManager::new(cache_root.to_path_buf())
+        .context("failed to create BWiki resource manager for tracking POI overlays")?;
+    let dataset = wait_for_tracking_dataset(&manager)?;
+    let icon_diameter = (((view_size as f32) / 7.0) / scale.max(1) as f32)
+        .round()
+        .max(6.0) as u32;
+    let mut icons = HashMap::<u32, RgbaImage>::new();
+
+    for mark_type in TRACKING_POI_MARK_TYPES {
+        let Some(definition) = dataset.type_by_mark_type(mark_type).cloned() else {
+            bail!("missing BWiki tracking POI definition for mark type {mark_type}");
+        };
+        let Some(points) = dataset.points_by_type.get(&mark_type) else {
+            continue;
+        };
+        if points.is_empty() {
+            continue;
+        }
+
+        let path = wait_for_tracking_icon_path(&manager, &definition)?;
+        let icon = if let Some(icon) = icons.get(&mark_type) {
+            icon
+        } else {
+            let loaded = image::open(&path)
+                .with_context(|| format!("failed to open cached BWiki icon {}", path.display()))?
+                .to_rgba8();
+            icons.entry(mark_type).or_insert(loaded)
+        };
+
+        for point in points {
+            overlay_tracking_icon_rgba(image, icon, point.world, scale, icon_diameter);
         }
     }
 
@@ -752,6 +817,53 @@ fn overlay_tracking_icon(
             .round()
             .clamp(0.0, 255.0) as u8;
         image.put_pixel(dst_x as u32, dst_y as u32, Luma([blended]));
+    }
+}
+
+fn overlay_tracking_icon_rgba(
+    image: &mut RgbaImage,
+    icon: &RgbaImage,
+    world: WorldPoint,
+    scale: u32,
+    diameter: u32,
+) {
+    if diameter == 0 {
+        return;
+    }
+
+    let resized = resize(icon, diameter, diameter, FilterType::CatmullRom);
+    let center_x = (world.x / scale.max(1) as f32).round() as i32;
+    let center_y = (world.y / scale.max(1) as f32).round() as i32;
+    let left = center_x - diameter as i32 / 2;
+    let top = center_y - diameter as i32 / 2;
+
+    for (x, y, pixel) in resized.enumerate_pixels() {
+        let dst_x = left + x as i32;
+        let dst_y = top + y as i32;
+        if dst_x < 0 || dst_y < 0 || dst_x >= image.width() as i32 || dst_y >= image.height() as i32
+        {
+            continue;
+        }
+
+        let alpha = f32::from(pixel.0[3]) / 255.0;
+        if alpha <= 0.0 {
+            continue;
+        }
+
+        let base = image.get_pixel(dst_x as u32, dst_y as u32).0;
+        let blended = [
+            (f32::from(base[0]) * (1.0 - alpha) + f32::from(pixel.0[0]) * alpha)
+                .round()
+                .clamp(0.0, 255.0) as u8,
+            (f32::from(base[1]) * (1.0 - alpha) + f32::from(pixel.0[1]) * alpha)
+                .round()
+                .clamp(0.0, 255.0) as u8,
+            (f32::from(base[2]) * (1.0 - alpha) + f32::from(pixel.0[2]) * alpha)
+                .round()
+                .clamp(0.0, 255.0) as u8,
+            255,
+        ];
+        image.put_pixel(dst_x as u32, dst_y as u32, image::Rgba(blended));
     }
 }
 
@@ -1104,6 +1216,40 @@ fn assemble_gray_map(
             let tile = image::open(&tile_path)
                 .with_context(|| format!("failed to open BWiki tile {}", tile_path.display()))?
                 .into_luma8();
+            let tile = if output_tile_size == TILE_SIZE {
+                tile
+            } else {
+                resize(
+                    &tile,
+                    output_tile_size.max(1),
+                    output_tile_size.max(1),
+                    FilterType::Triangle,
+                )
+            };
+            let dx = (tile_x - range.min_x) as i64 * output_tile_size as i64;
+            let dy = (tile_y - range.min_y) as i64 * output_tile_size as i64;
+            replace(&mut canvas, &tile, dx, dy);
+        }
+    }
+
+    Ok(canvas)
+}
+
+fn assemble_rgba_map(
+    cache: &BwikiCachePaths,
+    range: BwikiTileZoom,
+    output_tile_size: u32,
+) -> Result<RgbaImage> {
+    let width = range.width_tiles() * output_tile_size.max(1);
+    let height = range.height_tiles() * output_tile_size.max(1);
+    let mut canvas = RgbaImage::new(width, height);
+
+    for tile_y in range.min_y..=range.max_y {
+        for tile_x in range.min_x..=range.max_x {
+            let tile_path = download_tile(cache, range.zoom, tile_x, tile_y)?;
+            let tile = image::open(&tile_path)
+                .with_context(|| format!("failed to open BWiki tile {}", tile_path.display()))?
+                .to_rgba8();
             let tile = if output_tile_size == TILE_SIZE {
                 tile
             } else {
