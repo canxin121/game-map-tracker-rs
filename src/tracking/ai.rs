@@ -1,17 +1,36 @@
-use std::{fs, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    env,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 #[cfg(feature = "ai-burn")]
 use burn::{
-    backend::ndarray::NdArrayDevice,
+    backend::{Autodiff, ndarray::NdArrayDevice},
     tensor::{
-        Tensor, TensorData, backend::Backend, cast::ToElement, module::conv2d, ops::ConvOptions,
+        Tensor, TensorData,
+        activation::relu,
+        backend::{AutodiffBackend, Backend},
+        cast::ToElement,
+        module::conv2d,
+        ops::ConvOptions,
     },
 };
 #[cfg(feature = "ai-burn")]
-use image::{GrayImage, RgbaImage};
+use directories::ProjectDirs;
 #[cfg(feature = "ai-burn")]
-use safetensors::SafeTensors;
+use image::{
+    GrayImage, Rgba, RgbaImage,
+    imageops::{FilterType, crop_imm, replace, resize},
+};
+#[cfg(feature = "ai-burn")]
+use safetensors::{Dtype, SafeTensors, serialize_to_file, tensor::TensorView};
+#[cfg(feature = "ai-burn")]
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::{
@@ -26,6 +45,10 @@ use crate::{
     domain::{
         geometry::WorldPoint,
         tracker::{PositionEstimate, TrackingSource},
+    },
+    resources::{
+        WorkspaceBootstrap, load_logic_map_with_tracking_poi_scaled_image,
+        load_logic_map_with_tracking_poi_scaled_rgba_image,
     },
     tracking::{
         burn_support::{
@@ -43,11 +66,11 @@ use crate::{
         vision::{
             ColorCaptureTemplates, ColorMapPyramid, ColorTemplateShape, LocalCandidateDecision,
             MaskSet, MatchCandidate, SearchCrop, SearchStage, TrackerState, build_debug_snapshot,
-            build_mask, capture_template_inner_square, center_to_scaled,
-            coarse_global_downscale, crop_search_region_rgba, load_logic_color_map_pyramid,
-            local_candidate_decision, mask_as_unit_vec, prepare_color_capture_template,
-            preview_image, rgba_image_as_unit_vec, scaled_dimension, search_region_around_center,
-            top_score_peaks,
+            build_mask, capture_template_inner_square, center_to_scaled, coarse_global_downscale,
+            crop_search_region_rgba, load_logic_color_map_pyramid, local_candidate_decision,
+            mask_as_unit_vec, prepare_color_capture_template, preview_image,
+            rgba_image_as_unit_vec, scaled_color_score, scaled_dimension,
+            search_region_around_center, top_score_peaks,
         },
     },
 };
@@ -483,9 +506,10 @@ fn encoder_weight_candidates(workspace: &WorkspaceSnapshot) -> Vec<PathBuf> {
         .filter(|path| !path.trim().is_empty())
     {
         let candidate = PathBuf::from(path);
-        if !candidate.is_absolute() {
-            candidates.push(workspace.project_root.join(candidate));
-        }
+        candidates.push(resolve_workspace_relative_path(
+            &workspace.project_root,
+            &candidate,
+        ));
     }
 
     candidates.extend([
@@ -498,7 +522,51 @@ fn encoder_weight_candidates(workspace: &WorkspaceSnapshot) -> Vec<PathBuf> {
             .join("models")
             .join("tracker_encoder.safetensors"),
     ]);
+    if let Some(runtime_root) = default_runtime_workspace_root() {
+        candidates.extend([
+            runtime_root
+                .join("models")
+                .join("tracker_encoder.safetensors"),
+            runtime_root
+                .join("models")
+                .join("candle_edge_bank.safetensors"),
+        ]);
+    }
+    dedupe_paths(&mut candidates);
     candidates
+}
+
+#[cfg(feature = "ai-burn")]
+fn resolve_workspace_relative_path(workspace_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace_root.join(path)
+    }
+}
+
+#[cfg(feature = "ai-burn")]
+fn default_runtime_workspace_root() -> Option<PathBuf> {
+    const DATA_DIR_ENV: &str = "GAME_MAP_TRACKER_RS_DATA_DIR";
+    const APP_QUALIFIER: &str = "io";
+    const APP_ORGANIZATION: &str = "rocom";
+    const APP_NAME: &str = "game-map-tracker-rs";
+
+    if let Ok(path) = env::var(DATA_DIR_ENV) {
+        let path = PathBuf::from(path);
+        if !path.as_os_str().is_empty() {
+            return Some(path);
+        }
+    }
+
+    ProjectDirs::from(APP_QUALIFIER, APP_ORGANIZATION, APP_NAME)
+        .map(|dirs| dirs.data_local_dir().to_path_buf())
+}
+
+#[cfg(feature = "ai-burn")]
+fn dedupe_paths(paths: &mut Vec<PathBuf>) {
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
 }
 
 #[cfg(feature = "ai-burn")]
@@ -530,6 +598,1150 @@ fn safetensor_view_f32_vec(view: &safetensors::tensor::TensorView<'_>) -> Result
         .collect())
 }
 
+#[cfg(feature = "ai-burn")]
+type TrainingBackend = Autodiff<burn::backend::NdArray>;
+
+#[cfg(feature = "ai-burn")]
+const TRAINING_LOCAL_STEP_MIN: u32 = 28;
+#[cfg(feature = "ai-burn")]
+const TRAINING_LOCAL_STEP_MAX: u32 = 112;
+#[cfg(feature = "ai-burn")]
+const TRAINING_GLOBAL_NEGATIVE_DISTANCE: u32 = 640;
+#[cfg(feature = "ai-burn")]
+const TRAINING_LOCAL_NEGATIVE_MIN_DISTANCE: u32 = 56;
+#[cfg(feature = "ai-burn")]
+const TRAINING_POINT_ATTEMPTS: usize = 24;
+
+#[cfg(feature = "ai-burn")]
+#[derive(Debug, Clone)]
+struct EncoderTrainingConfig {
+    workspace_root: Option<PathBuf>,
+    output_path: Option<PathBuf>,
+    checkpoint_dir: Option<PathBuf>,
+    epochs: usize,
+    steps_per_epoch: usize,
+    samples_per_step: usize,
+    checkpoint_every: usize,
+    learning_rate: f32,
+    margin: f32,
+    weight_decay: f32,
+    hard_negative_candidates: usize,
+    seed: u64,
+    resume: bool,
+}
+
+#[cfg(feature = "ai-burn")]
+impl Default for EncoderTrainingConfig {
+    fn default() -> Self {
+        Self {
+            workspace_root: None,
+            output_path: None,
+            checkpoint_dir: None,
+            epochs: 6,
+            steps_per_epoch: 120,
+            samples_per_step: 6,
+            checkpoint_every: 12,
+            learning_rate: 0.008,
+            margin: 0.12,
+            weight_decay: 0.0001,
+            hard_negative_candidates: 12,
+            seed: 0x434f_4e56_5452_4149,
+            resume: true,
+        }
+    }
+}
+
+#[cfg(feature = "ai-burn")]
+#[derive(Debug, Clone)]
+struct EncoderTrainingPaths {
+    workspace_root: PathBuf,
+    output_weights: PathBuf,
+    checkpoint_dir: PathBuf,
+    checkpoint_weights: PathBuf,
+    checkpoint_state: PathBuf,
+}
+
+#[cfg(feature = "ai-burn")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncoderTrainingState {
+    epoch: usize,
+    step_in_epoch: usize,
+    global_step: usize,
+    seed: u64,
+    last_loss: Option<f32>,
+    best_loss: Option<f32>,
+}
+
+#[cfg(feature = "ai-burn")]
+impl EncoderTrainingState {
+    fn fresh(seed: u64) -> Self {
+        Self {
+            epoch: 0,
+            step_in_epoch: 0,
+            global_step: 0,
+            seed,
+            last_loss: None,
+            best_loss: None,
+        }
+    }
+}
+
+#[cfg(feature = "ai-burn")]
+#[derive(Debug)]
+struct EncoderTrainingFixture {
+    workspace: WorkspaceSnapshot,
+    config: AppConfig,
+    map: GrayImage,
+    color_map: RgbaImage,
+    color_pyramid: ColorMapPyramid,
+    masks: MaskSet,
+    min_center: u32,
+    max_x: u32,
+    max_y: u32,
+}
+
+#[cfg(feature = "ai-burn")]
+#[derive(Debug)]
+struct PreparedTrainingTemplate<B>
+where
+    B: AutodiffBackend<FloatElem = f32>,
+    B::InnerBackend: Backend<FloatElem = f32>,
+{
+    mask: Tensor<B, 4>,
+    weighted_template: Tensor<B, 4>,
+    template_energy: Tensor<B, 1>,
+}
+
+#[cfg(feature = "ai-burn")]
+#[derive(Debug, Clone, Default)]
+struct TrainingSampleStats {
+    global_positive: f32,
+    global_negative: f32,
+    coarse_positive: f32,
+    coarse_negative: f32,
+    local_positive: f32,
+    local_negative: f32,
+}
+
+#[cfg(feature = "ai-burn")]
+#[derive(Debug, Clone, Default)]
+struct TrainingStepAverages {
+    samples: usize,
+    global_positive: f32,
+    global_negative: f32,
+    coarse_positive: f32,
+    coarse_negative: f32,
+    local_positive: f32,
+    local_negative: f32,
+}
+
+#[cfg(feature = "ai-burn")]
+impl TrainingStepAverages {
+    fn push(&mut self, sample: &TrainingSampleStats) {
+        self.samples += 1;
+        self.global_positive += sample.global_positive;
+        self.global_negative += sample.global_negative;
+        self.coarse_positive += sample.coarse_positive;
+        self.coarse_negative += sample.coarse_negative;
+        self.local_positive += sample.local_positive;
+        self.local_negative += sample.local_negative;
+    }
+
+    fn scale(&self, value: f32) -> f32 {
+        if self.samples == 0 {
+            0.0
+        } else {
+            value / self.samples as f32
+        }
+    }
+}
+
+#[cfg(feature = "ai-burn")]
+#[derive(Debug, Clone)]
+struct TrainingRng {
+    state: u64,
+}
+
+#[cfg(feature = "ai-burn")]
+impl TrainingRng {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: seed.wrapping_add(0x9e37_79b9_7f4a_7c15),
+        }
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.state >> 32) as u32
+    }
+
+    fn range_u32(&mut self, start: u32, end: u32) -> u32 {
+        if end <= start {
+            return start;
+        }
+        start + self.next_u32() % (end - start + 1)
+    }
+
+    fn range_i32(&mut self, start: i32, end: i32) -> i32 {
+        if end <= start {
+            return start;
+        }
+        start + (self.next_u32() % (end - start + 1) as u32) as i32
+    }
+}
+
+pub fn run_encoder_training_cli(args: Vec<OsString>) -> Result<()> {
+    #[cfg(not(feature = "ai-burn"))]
+    {
+        let _ = args;
+        anyhow::bail!("当前二进制未启用 `ai-burn`，无法训练卷积特征编码器")
+    }
+
+    #[cfg(feature = "ai-burn")]
+    {
+        if args
+            .iter()
+            .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--help" | "-h"))
+        {
+            print_encoder_training_usage();
+            return Ok(());
+        }
+
+        let config = parse_encoder_training_args(args)?;
+        train_convolution_encoder(config)
+    }
+}
+
+#[cfg(feature = "ai-burn")]
+fn print_encoder_training_usage() {
+    println!(
+        "用法: game-map-tracker-rs train-encoder [workspace_root] [选项]\n\
+         选项:\n\
+         \t--workspace <path>                指定工作区根目录，默认使用 app 运行目录\n\
+         \t--output <path>                   最终/持续导出的 safetensors，默认 models/tracker_encoder.safetensors\n\
+         \t--checkpoint-dir <path>           checkpoint 目录，默认 cache/training/tracker-encoder\n\
+         \t--epochs <n>                      训练轮数，默认 6\n\
+         \t--steps-per-epoch <n>             每轮步数，默认 120\n\
+         \t--samples-per-step <n>            每步样本数，默认 6\n\
+         \t--checkpoint-every <n>            每多少步持续落盘一次，默认 12\n\
+         \t--learning-rate <f32>             学习率，默认 0.008\n\
+         \t--margin <f32>                    排序间隔损失边距，默认 0.12\n\
+         \t--weight-decay <f32>              L2 正则权重，默认 0.0001\n\
+         \t--hard-negative-candidates <n>    每次挑选的硬负样本候选数，默认 12\n\
+         \t--seed <u64>                      随机种子\n\
+         \t--fresh                           忽略现有 checkpoint，从当前编码器起点重新训练"
+    );
+}
+
+#[cfg(feature = "ai-burn")]
+fn parse_encoder_training_args(args: Vec<OsString>) -> Result<EncoderTrainingConfig> {
+    let mut config = EncoderTrainingConfig::default();
+    let mut index = 0usize;
+
+    while index < args.len() {
+        let arg = args[index].to_string_lossy().into_owned();
+        let mut next_value = |name: &str| -> Result<String> {
+            let value = args
+                .get(index + 1)
+                .map(|value| value.to_string_lossy().into_owned())
+                .with_context(|| format!("missing value for {name}"))?;
+            index += 1;
+            Ok(value)
+        };
+
+        match arg.as_str() {
+            "--workspace" => {
+                config.workspace_root = Some(PathBuf::from(next_value("--workspace")?))
+            }
+            "--output" => config.output_path = Some(PathBuf::from(next_value("--output")?)),
+            "--checkpoint-dir" => {
+                config.checkpoint_dir = Some(PathBuf::from(next_value("--checkpoint-dir")?))
+            }
+            "--epochs" => config.epochs = next_value("--epochs")?.parse()?,
+            "--steps-per-epoch" => {
+                config.steps_per_epoch = next_value("--steps-per-epoch")?.parse()?
+            }
+            "--samples-per-step" => {
+                config.samples_per_step = next_value("--samples-per-step")?.parse()?
+            }
+            "--checkpoint-every" => {
+                config.checkpoint_every = next_value("--checkpoint-every")?.parse()?
+            }
+            "--learning-rate" => config.learning_rate = next_value("--learning-rate")?.parse()?,
+            "--margin" => config.margin = next_value("--margin")?.parse()?,
+            "--weight-decay" => config.weight_decay = next_value("--weight-decay")?.parse()?,
+            "--hard-negative-candidates" => {
+                config.hard_negative_candidates =
+                    next_value("--hard-negative-candidates")?.parse()?
+            }
+            "--seed" => config.seed = next_value("--seed")?.parse()?,
+            "--fresh" => config.resume = false,
+            value if value.starts_with("--") => {
+                anyhow::bail!("unknown train-encoder option: {value}")
+            }
+            value => {
+                if config.workspace_root.is_some() {
+                    anyhow::bail!("unexpected positional argument: {value}");
+                }
+                config.workspace_root = Some(PathBuf::from(value));
+            }
+        }
+
+        index += 1;
+    }
+
+    if config.epochs == 0
+        || config.steps_per_epoch == 0
+        || config.samples_per_step == 0
+        || config.checkpoint_every == 0
+        || config.hard_negative_candidates == 0
+    {
+        anyhow::bail!("train-encoder numeric options must be > 0");
+    }
+    if !config.learning_rate.is_finite() || config.learning_rate <= 0.0 {
+        anyhow::bail!("--learning-rate must be a finite positive number");
+    }
+    if !config.margin.is_finite() || config.margin <= 0.0 {
+        anyhow::bail!("--margin must be a finite positive number");
+    }
+    if !config.weight_decay.is_finite() || config.weight_decay < 0.0 {
+        anyhow::bail!("--weight-decay must be a finite non-negative number");
+    }
+
+    Ok(config)
+}
+
+#[cfg(feature = "ai-burn")]
+fn resolve_encoder_training_paths(config: &EncoderTrainingConfig) -> Result<EncoderTrainingPaths> {
+    let workspace_root = match config.workspace_root.clone() {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => std::env::current_dir()?.join(path),
+        None => WorkspaceBootstrap::prepare()?.workspace_root,
+    };
+    let output_weights = config
+        .output_path
+        .clone()
+        .map(|path| normalize_training_path(&workspace_root, path))
+        .unwrap_or_else(|| {
+            workspace_root
+                .join("models")
+                .join("tracker_encoder.safetensors")
+        });
+    let checkpoint_dir = config
+        .checkpoint_dir
+        .clone()
+        .map(|path| normalize_training_path(&workspace_root, path))
+        .unwrap_or_else(|| {
+            workspace_root
+                .join("cache")
+                .join("training")
+                .join("tracker-encoder")
+        });
+
+    Ok(EncoderTrainingPaths {
+        workspace_root,
+        checkpoint_weights: checkpoint_dir.join("checkpoint-latest.safetensors"),
+        checkpoint_state: checkpoint_dir.join("checkpoint-state.json"),
+        checkpoint_dir,
+        output_weights,
+    })
+}
+
+#[cfg(feature = "ai-burn")]
+fn normalize_training_path(workspace_root: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        workspace_root.join(path)
+    }
+}
+
+#[cfg(feature = "ai-burn")]
+fn build_encoder_training_fixture(workspace_root: &Path) -> Result<EncoderTrainingFixture> {
+    let workspace = WorkspaceSnapshot::load(workspace_root.to_path_buf())?;
+    let config = workspace.config.clone();
+    let raw_map = load_logic_map_with_tracking_poi_scaled_image(
+        &workspace.assets.bwiki_cache_dir,
+        1,
+        config.view_size,
+    )?;
+    let color_map = load_logic_map_with_tracking_poi_scaled_rgba_image(
+        &workspace.assets.bwiki_cache_dir,
+        1,
+        config.view_size,
+    )?;
+    let color_pyramid = load_logic_color_map_pyramid(&workspace)?;
+    let map = imageproc::contrast::equalize_histogram(&raw_map);
+    let min_center = align_training_point(config.view_size / 2 + 32, 4);
+    let max_x = align_training_point(map.width().saturating_sub(config.view_size / 2 + 32), 4);
+    let max_y = align_training_point(map.height().saturating_sub(config.view_size / 2 + 32), 4);
+    let masks = build_template_masks(&config);
+
+    Ok(EncoderTrainingFixture {
+        workspace,
+        config,
+        map,
+        color_map,
+        color_pyramid,
+        masks,
+        min_center,
+        max_x,
+        max_y,
+    })
+}
+
+#[cfg(feature = "ai-burn")]
+fn align_training_point(value: u32, step: u32) -> u32 {
+    value / step.max(1) * step.max(1)
+}
+
+#[cfg(feature = "ai-burn")]
+fn local_texture_radius(view_size: u32) -> u32 {
+    (view_size / 2).clamp(96, 180)
+}
+
+#[cfg(feature = "ai-burn")]
+fn local_texture_score(image: &GrayImage, center_x: u32, center_y: u32, radius: u32) -> u64 {
+    let left = center_x.saturating_sub(radius);
+    let top = center_y.saturating_sub(radius);
+    let right = (center_x + radius).min(image.width().saturating_sub(1));
+    let bottom = (center_y + radius).min(image.height().saturating_sub(1));
+    let mut total = 0u64;
+
+    for y in top..=bottom {
+        for x in left..=right {
+            let center = i32::from(image.get_pixel(x, y).0[0]);
+            let right_value = i32::from(image.get_pixel((x + 1).min(right), y).0[0]);
+            let down_value = i32::from(image.get_pixel(x, (y + 1).min(bottom)).0[0]);
+            total += (center - right_value).unsigned_abs() as u64;
+            total += (center - down_value).unsigned_abs() as u64;
+        }
+    }
+
+    total
+}
+
+#[cfg(feature = "ai-burn")]
+fn sample_textured_world_point(
+    fixture: &EncoderTrainingFixture,
+    rng: &mut TrainingRng,
+) -> (u32, u32) {
+    let radius = local_texture_radius(fixture.config.view_size);
+    let mut best = (fixture.min_center, fixture.min_center);
+    let mut best_score = 0u64;
+    for _ in 0..TRAINING_POINT_ATTEMPTS {
+        let candidate = (
+            align_training_point(rng.range_u32(fixture.min_center, fixture.max_x), 4),
+            align_training_point(rng.range_u32(fixture.min_center, fixture.max_y), 4),
+        );
+        let score = local_texture_score(&fixture.map, candidate.0, candidate.1, radius);
+        if score >= best_score {
+            best = candidate;
+            best_score = score;
+        }
+    }
+    best
+}
+
+#[cfg(feature = "ai-burn")]
+fn clamp_world_point(fixture: &EncoderTrainingFixture, point: (i32, i32)) -> (u32, u32) {
+    (
+        align_training_point(
+            point
+                .0
+                .clamp(fixture.min_center as i32, fixture.max_x as i32) as u32,
+            4,
+        ),
+        align_training_point(
+            point
+                .1
+                .clamp(fixture.min_center as i32, fixture.max_y as i32) as u32,
+            4,
+        ),
+    )
+}
+
+#[cfg(feature = "ai-burn")]
+fn sample_local_world_point(
+    fixture: &EncoderTrainingFixture,
+    rng: &mut TrainingRng,
+    anchor: (u32, u32),
+) -> (u32, u32) {
+    let radius = local_texture_radius(fixture.config.view_size);
+    let mut best = anchor;
+    let mut best_score = local_texture_score(&fixture.map, anchor.0, anchor.1, radius);
+    for _ in 0..TRAINING_POINT_ATTEMPTS {
+        let dx = rng.range_i32(
+            -(TRAINING_LOCAL_STEP_MAX as i32),
+            TRAINING_LOCAL_STEP_MAX as i32,
+        );
+        let dy = rng.range_i32(
+            -(TRAINING_LOCAL_STEP_MAX as i32),
+            TRAINING_LOCAL_STEP_MAX as i32,
+        );
+        if dx.unsigned_abs().max(dy.unsigned_abs()) < TRAINING_LOCAL_STEP_MIN {
+            continue;
+        }
+        let candidate = clamp_world_point(fixture, (anchor.0 as i32 + dx, anchor.1 as i32 + dy));
+        let score = local_texture_score(&fixture.map, candidate.0, candidate.1, radius);
+        if score >= best_score {
+            best = candidate;
+            best_score = score;
+        }
+    }
+    best
+}
+
+#[cfg(feature = "ai-burn")]
+fn synthetic_capture_rgba_from_map(
+    map: &RgbaImage,
+    config: &AppConfig,
+    center: (u32, u32),
+) -> RgbaImage {
+    let half = config.view_size / 2;
+    let left = center.0.saturating_sub(half);
+    let top = center.1.saturating_sub(half);
+    let crop = crop_imm(map, left, top, config.view_size, config.view_size).to_image();
+
+    let diameter_px = config.minimap.width.min(config.minimap.height).max(1);
+    let diameter_px = ((diameter_px as f32) * config.template.mask_outer_radius).round() as u32;
+    let minimap = resize(&crop, diameter_px, diameter_px, FilterType::Triangle);
+    let mut canvas = RgbaImage::from_pixel(
+        config.minimap.width,
+        config.minimap.height,
+        Rgba([0, 0, 0, 255]),
+    );
+    let offset_x = i64::from((config.minimap.width - diameter_px) / 2);
+    let offset_y = i64::from((config.minimap.height - diameter_px) / 2);
+    replace(&mut canvas, &minimap, offset_x, offset_y);
+    canvas
+}
+
+#[cfg(feature = "ai-burn")]
+fn crop_centered_training_patch(
+    image: &RgbaImage,
+    center: (u32, u32),
+    width: u32,
+    height: u32,
+) -> Result<RgbaImage> {
+    if image.width() < width || image.height() < height {
+        anyhow::bail!("search image is smaller than the requested patch");
+    }
+
+    let left = center
+        .0
+        .saturating_sub(width / 2)
+        .min(image.width() - width);
+    let top = center
+        .1
+        .saturating_sub(height / 2)
+        .min(image.height() - height);
+    Ok(crop_imm(image, left, top, width, height).to_image())
+}
+
+#[cfg(feature = "ai-burn")]
+fn crop_map_patch_at_world(
+    map: &crate::tracking::vision::ScaledColorMap,
+    world: (u32, u32),
+    width: u32,
+    height: u32,
+) -> Result<RgbaImage> {
+    let center = center_to_scaled(WorldPoint::new(world.0 as f32, world.1 as f32), map.scale);
+    crop_centered_training_patch(&map.image, center, width, height)
+}
+
+#[cfg(feature = "ai-burn")]
+fn world_distance(a: (u32, u32), b: (u32, u32)) -> u32 {
+    a.0.abs_diff(b.0) + a.1.abs_diff(b.1)
+}
+
+#[cfg(feature = "ai-burn")]
+fn random_far_world_point(
+    fixture: &EncoderTrainingFixture,
+    rng: &mut TrainingRng,
+    avoid: (u32, u32),
+    min_distance: u32,
+) -> (u32, u32) {
+    for _ in 0..TRAINING_POINT_ATTEMPTS.saturating_mul(4) {
+        let candidate = sample_textured_world_point(fixture, rng);
+        if world_distance(candidate, avoid) >= min_distance {
+            return candidate;
+        }
+    }
+    sample_textured_world_point(fixture, rng)
+}
+
+#[cfg(feature = "ai-burn")]
+fn global_negative_candidates(
+    fixture: &EncoderTrainingFixture,
+    rng: &mut TrainingRng,
+    positive: (u32, u32),
+    count: usize,
+) -> Vec<(u32, u32)> {
+    let mut candidates = Vec::with_capacity(count);
+    while candidates.len() < count {
+        let candidate = match candidates.len() % 3 {
+            0 => (
+                align_training_point(rng.range_u32(fixture.min_center, fixture.max_x), 4),
+                positive.1,
+            ),
+            1 => (
+                positive.0,
+                align_training_point(rng.range_u32(fixture.min_center, fixture.max_y), 4),
+            ),
+            _ => random_far_world_point(fixture, rng, positive, TRAINING_GLOBAL_NEGATIVE_DISTANCE),
+        };
+        if world_distance(candidate, positive) < TRAINING_GLOBAL_NEGATIVE_DISTANCE {
+            continue;
+        }
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+#[cfg(feature = "ai-burn")]
+fn local_negative_candidates(
+    fixture: &EncoderTrainingFixture,
+    rng: &mut TrainingRng,
+    positive: (u32, u32),
+    count: usize,
+) -> Vec<(u32, u32)> {
+    let mut candidates = Vec::with_capacity(count);
+    let radius = fixture
+        .config
+        .local_search
+        .radius_px
+        .max(TRAINING_LOCAL_STEP_MAX);
+    while candidates.len() < count {
+        let candidate = if candidates.len() % 4 == 3 {
+            random_far_world_point(
+                fixture,
+                rng,
+                positive,
+                radius + TRAINING_GLOBAL_NEGATIVE_DISTANCE,
+            )
+        } else {
+            let dx = rng.range_i32(-(radius as i32), radius as i32);
+            let dy = rng.range_i32(-(radius as i32), radius as i32);
+            clamp_world_point(fixture, (positive.0 as i32 + dx, positive.1 as i32 + dy))
+        };
+        let distance = world_distance(candidate, positive);
+        if distance < TRAINING_LOCAL_NEGATIVE_MIN_DISTANCE {
+            continue;
+        }
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+#[cfg(feature = "ai-burn")]
+fn select_hard_negative_world(
+    map: &crate::tracking::vision::ScaledColorMap,
+    template: &RgbaImage,
+    mask: &GrayImage,
+    candidates: &[(u32, u32)],
+) -> Option<(u32, u32)> {
+    candidates
+        .iter()
+        .copied()
+        .filter_map(|world| {
+            let score = scaled_color_score(
+                map,
+                WorldPoint::new(world.0 as f32, world.1 as f32),
+                template,
+                mask,
+            )?;
+            Some((score, world))
+        })
+        .max_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then_with(|| left.1.0.cmp(&right.1.0))
+                .then_with(|| left.1.1.cmp(&right.1.1))
+        })
+        .map(|(_, world)| world)
+}
+
+#[cfg(feature = "ai-burn")]
+fn prepare_training_template<B>(
+    encoder: &FixedFeatureEncoder<B>,
+    image: &RgbaImage,
+    mask: &GrayImage,
+) -> Result<PreparedTrainingTemplate<B>>
+where
+    B: AutodiffBackend<FloatElem = f32>,
+    B::InnerBackend: Backend<FloatElem = f32>,
+    B::Device: Clone + Send + Sync + 'static,
+{
+    let mask = mask_tensor::<B>(mask, encoder.output_channels(), &encoder.device);
+    let template_features = encoder.encode(image)?;
+    let weighted_template = template_features * mask.clone();
+    let template_energy = weighted_template.clone().powi_scalar(2).sum();
+    Ok(PreparedTrainingTemplate {
+        mask,
+        weighted_template,
+        template_energy,
+    })
+}
+
+#[cfg(feature = "ai-burn")]
+fn score_patch_against_template<B>(
+    encoder: &FixedFeatureEncoder<B>,
+    prepared: &PreparedTrainingTemplate<B>,
+    patch: &RgbaImage,
+) -> Result<Tensor<B, 1>>
+where
+    B: AutodiffBackend<FloatElem = f32>,
+    B::InnerBackend: Backend<FloatElem = f32>,
+    B::Device: Clone + Send + Sync + 'static,
+{
+    let patch_features = encoder.encode(patch)?;
+    let numerator = (patch_features.clone() * prepared.weighted_template.clone()).sum();
+    let patch_energy = (patch_features.powi_scalar(2) * prepared.mask.clone()).sum();
+    Ok(numerator / (patch_energy * prepared.template_energy.clone() + 1e-6).sqrt())
+}
+
+#[cfg(feature = "ai-burn")]
+fn tensor_scalar_f32<B>(tensor: Tensor<B, 1>) -> Result<f32>
+where
+    B: Backend<FloatElem = f32>,
+{
+    let values = tensor
+        .into_data()
+        .to_vec::<f32>()
+        .map_err(|error| anyhow::anyhow!("failed to convert tensor into f32 scalar: {error}"))?;
+    values
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("tensor scalar conversion returned an empty buffer"))
+}
+
+#[cfg(feature = "ai-burn")]
+fn ranking_loss<B>(
+    device: &B::Device,
+    positive: Tensor<B, 1>,
+    negative: Tensor<B, 1>,
+    margin: f32,
+) -> Tensor<B, 1>
+where
+    B: AutodiffBackend<FloatElem = f32>,
+    B::InnerBackend: Backend<FloatElem = f32>,
+{
+    relu(Tensor::<B, 1>::from_data([margin], device) + negative - positive)
+}
+
+#[cfg(feature = "ai-burn")]
+fn positive_pull_loss<B>(device: &B::Device, positive: Tensor<B, 1>) -> Tensor<B, 1>
+where
+    B: AutodiffBackend<FloatElem = f32>,
+    B::InnerBackend: Backend<FloatElem = f32>,
+{
+    relu(Tensor::<B, 1>::ones([1], device) - positive)
+}
+
+#[cfg(feature = "ai-burn")]
+fn compute_training_sample_loss(
+    fixture: &EncoderTrainingFixture,
+    encoder: &FixedFeatureEncoder<TrainingBackend>,
+    rng: &mut TrainingRng,
+    margin: f32,
+    hard_negative_candidates: usize,
+) -> Result<(Tensor<TrainingBackend, 1>, TrainingSampleStats)> {
+    let global_world = sample_textured_world_point(fixture, rng);
+    let local_world = sample_local_world_point(fixture, rng, global_world);
+
+    let global_capture =
+        synthetic_capture_rgba_from_map(&fixture.color_map, &fixture.config, global_world);
+    let global_templates =
+        prepare_color_capture_templates(&global_capture, &fixture.config, &fixture.color_pyramid);
+    let local_capture =
+        synthetic_capture_rgba_from_map(&fixture.color_map, &fixture.config, local_world);
+    let local_templates =
+        prepare_color_capture_templates(&local_capture, &fixture.config, &fixture.color_pyramid);
+
+    let global_negatives =
+        global_negative_candidates(fixture, rng, global_world, hard_negative_candidates);
+    let local_negatives =
+        local_negative_candidates(fixture, rng, local_world, hard_negative_candidates);
+    let global_negative = select_hard_negative_world(
+        &fixture.color_pyramid.global,
+        &global_templates.global,
+        &fixture.masks.global,
+        &global_negatives,
+    )
+    .unwrap_or_else(|| {
+        random_far_world_point(
+            fixture,
+            rng,
+            global_world,
+            TRAINING_GLOBAL_NEGATIVE_DISTANCE,
+        )
+    });
+    let coarse_negative = select_hard_negative_world(
+        &fixture.color_pyramid.coarse,
+        &global_templates.coarse,
+        &fixture.masks.coarse,
+        &global_negatives,
+    )
+    .unwrap_or(global_negative);
+    let local_negative = select_hard_negative_world(
+        &fixture.color_pyramid.local,
+        &local_templates.local,
+        &fixture.masks.local,
+        &local_negatives,
+    )
+    .unwrap_or_else(|| {
+        random_far_world_point(fixture, rng, local_world, TRAINING_GLOBAL_NEGATIVE_DISTANCE)
+    });
+
+    let prepared_global =
+        prepare_training_template(encoder, &global_templates.global, &fixture.masks.global)?;
+    let prepared_coarse =
+        prepare_training_template(encoder, &global_templates.coarse, &fixture.masks.coarse)?;
+    let prepared_local =
+        prepare_training_template(encoder, &local_templates.local, &fixture.masks.local)?;
+
+    let positive_global_patch = crop_map_patch_at_world(
+        &fixture.color_pyramid.global,
+        global_world,
+        global_templates.global.width(),
+        global_templates.global.height(),
+    )?;
+    let negative_global_patch = crop_map_patch_at_world(
+        &fixture.color_pyramid.global,
+        global_negative,
+        global_templates.global.width(),
+        global_templates.global.height(),
+    )?;
+    let positive_coarse_patch = crop_map_patch_at_world(
+        &fixture.color_pyramid.coarse,
+        global_world,
+        global_templates.coarse.width(),
+        global_templates.coarse.height(),
+    )?;
+    let negative_coarse_patch = crop_map_patch_at_world(
+        &fixture.color_pyramid.coarse,
+        coarse_negative,
+        global_templates.coarse.width(),
+        global_templates.coarse.height(),
+    )?;
+    let positive_local_patch = crop_map_patch_at_world(
+        &fixture.color_pyramid.local,
+        local_world,
+        local_templates.local.width(),
+        local_templates.local.height(),
+    )?;
+    let negative_local_patch = crop_map_patch_at_world(
+        &fixture.color_pyramid.local,
+        local_negative,
+        local_templates.local.width(),
+        local_templates.local.height(),
+    )?;
+
+    let positive_global_score =
+        score_patch_against_template(encoder, &prepared_global, &positive_global_patch)?;
+    let negative_global_score =
+        score_patch_against_template(encoder, &prepared_global, &negative_global_patch)?;
+    let positive_coarse_score =
+        score_patch_against_template(encoder, &prepared_coarse, &positive_coarse_patch)?;
+    let negative_coarse_score =
+        score_patch_against_template(encoder, &prepared_coarse, &negative_coarse_patch)?;
+    let positive_local_score =
+        score_patch_against_template(encoder, &prepared_local, &positive_local_patch)?;
+    let negative_local_score =
+        score_patch_against_template(encoder, &prepared_local, &negative_local_patch)?;
+
+    let global_loss = ranking_loss(
+        &encoder.device,
+        positive_global_score.clone(),
+        negative_global_score.clone(),
+        margin,
+    ) + positive_pull_loss(&encoder.device, positive_global_score.clone()) * 0.20;
+    let coarse_loss = ranking_loss(
+        &encoder.device,
+        positive_coarse_score.clone(),
+        negative_coarse_score.clone(),
+        margin,
+    ) + positive_pull_loss(&encoder.device, positive_coarse_score.clone()) * 0.15;
+    let local_loss = ranking_loss(
+        &encoder.device,
+        positive_local_score.clone(),
+        negative_local_score.clone(),
+        margin,
+    ) + positive_pull_loss(&encoder.device, positive_local_score.clone()) * 0.25;
+    let loss = global_loss * 0.35 + coarse_loss * 0.20 + local_loss * 0.45;
+
+    let stats = TrainingSampleStats {
+        global_positive: tensor_scalar_f32(positive_global_score.inner())?,
+        global_negative: tensor_scalar_f32(negative_global_score.inner())?,
+        coarse_positive: tensor_scalar_f32(positive_coarse_score.inner())?,
+        coarse_negative: tensor_scalar_f32(negative_coarse_score.inner())?,
+        local_positive: tensor_scalar_f32(positive_local_score.inner())?,
+        local_negative: tensor_scalar_f32(negative_local_score.inner())?,
+    };
+
+    Ok((loss, stats))
+}
+
+#[cfg(feature = "ai-burn")]
+fn apply_training_step(
+    encoder: &mut FixedFeatureEncoder<TrainingBackend>,
+    grads: &<TrainingBackend as AutodiffBackend>::Gradients,
+    learning_rate: f32,
+) -> Result<()> {
+    let kernel_grad = encoder
+        .edge_kernels
+        .grad(grads)
+        .ok_or_else(|| anyhow::anyhow!("failed to read encoder kernel gradients"))?;
+    let updated_kernel = encoder.edge_kernels.clone().inner() - kernel_grad * learning_rate;
+    encoder.edge_kernels = Tensor::<TrainingBackend, 4>::from_inner(updated_kernel).require_grad();
+
+    if let Some(bias) = encoder.edge_bias.take() {
+        let updated_bias = if let Some(grad) = bias.grad(grads) {
+            bias.clone().inner() - grad * learning_rate
+        } else {
+            bias.inner()
+        };
+        encoder.edge_bias =
+            Some(Tensor::<TrainingBackend, 1>::from_inner(updated_bias).require_grad());
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "ai-burn")]
+fn load_or_initialize_training_state(
+    fixture: &EncoderTrainingFixture,
+    paths: &EncoderTrainingPaths,
+    config: &EncoderTrainingConfig,
+) -> Result<(EncoderTrainingState, FixedFeatureEncoder<TrainingBackend>)> {
+    let device = NdArrayDevice::default();
+    let device_label = "NdArray Autodiff".to_owned();
+    let (state, mut encoder) = if config.resume
+        && paths.checkpoint_weights.is_file()
+        && paths.checkpoint_state.is_file()
+    {
+        let state = serde_json::from_str::<EncoderTrainingState>(&fs::read_to_string(
+            &paths.checkpoint_state,
+        )?)
+        .with_context(|| {
+            format!(
+                "failed to parse encoder checkpoint state {}",
+                paths.checkpoint_state.display()
+            )
+        })?;
+        let encoder = FixedFeatureEncoder::<TrainingBackend>::load_single_safetensors(
+            &paths.checkpoint_weights,
+            device,
+            device_label,
+        )?;
+        (state, encoder)
+    } else {
+        (
+            EncoderTrainingState::fresh(config.seed),
+            FixedFeatureEncoder::<TrainingBackend>::new(&fixture.workspace, device, device_label)?,
+        )
+    };
+
+    encoder.edge_kernels = encoder.edge_kernels.require_grad();
+    if let Some(bias) = encoder.edge_bias.take() {
+        encoder.edge_bias = Some(bias.require_grad());
+    }
+
+    Ok((state, encoder))
+}
+
+#[cfg(feature = "ai-burn")]
+fn serialize_f32(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+#[cfg(feature = "ai-burn")]
+fn save_encoder_weights<B>(encoder: &FixedFeatureEncoder<B>, path: &Path) -> Result<()>
+where
+    B: Backend<FloatElem = f32>,
+    B::Device: Clone + Send + Sync + 'static,
+{
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("invalid encoder weight path {}", path.display());
+    };
+    fs::create_dir_all(parent)?;
+
+    let weight_shape: [usize; 4] = encoder.edge_kernels.shape().dims();
+    let weight_values = encoder
+        .edge_kernels
+        .to_data()
+        .to_vec::<f32>()
+        .map_err(|error| anyhow::anyhow!("failed to serialize encoder kernels: {error}"))?;
+    let weight_bytes = serialize_f32(&weight_values);
+    let weight_view = TensorView::new(Dtype::F32, weight_shape.to_vec(), &weight_bytes)?;
+
+    if let Some(bias) = encoder.edge_bias.as_ref() {
+        let bias_shape: [usize; 1] = bias.shape().dims();
+        let bias_values = bias
+            .to_data()
+            .to_vec::<f32>()
+            .map_err(|error| anyhow::anyhow!("failed to serialize encoder bias: {error}"))?;
+        let bias_bytes = serialize_f32(&bias_values);
+        let bias_view = TensorView::new(Dtype::F32, bias_shape.to_vec(), &bias_bytes)?;
+        serialize_to_file(
+            vec![
+                ("edge_bank.bias", bias_view),
+                ("edge_bank.weight", weight_view),
+            ],
+            &None,
+            path,
+        )?;
+        return Ok(());
+    }
+
+    serialize_to_file(vec![("edge_bank.weight", weight_view)], &None, path)?;
+    Ok(())
+}
+
+#[cfg(feature = "ai-burn")]
+fn save_training_checkpoint(
+    paths: &EncoderTrainingPaths,
+    state: &EncoderTrainingState,
+    encoder: &FixedFeatureEncoder<TrainingBackend>,
+) -> Result<()> {
+    fs::create_dir_all(&paths.checkpoint_dir)?;
+    save_encoder_weights(encoder, &paths.checkpoint_weights)?;
+    save_encoder_weights(encoder, &paths.output_weights)?;
+    fs::write(
+        &paths.checkpoint_state,
+        serde_json::to_string_pretty(state)?,
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "ai-burn")]
+fn train_convolution_encoder(config: EncoderTrainingConfig) -> Result<()> {
+    let paths = resolve_encoder_training_paths(&config)?;
+    let fixture = build_encoder_training_fixture(&paths.workspace_root)?;
+    let (mut state, mut encoder) = load_or_initialize_training_state(&fixture, &paths, &config)?;
+
+    info!(
+        workspace_root = %paths.workspace_root.display(),
+        checkpoint = %paths.checkpoint_weights.display(),
+        output = %paths.output_weights.display(),
+        epochs = config.epochs,
+        steps_per_epoch = config.steps_per_epoch,
+        samples_per_step = config.samples_per_step,
+        learning_rate = config.learning_rate,
+        margin = config.margin,
+        weight_decay = config.weight_decay,
+        source = %encoder.source_label(),
+        "starting convolution encoder training"
+    );
+
+    if state.epoch >= config.epochs {
+        save_training_checkpoint(&paths, &state, &encoder)?;
+        info!("encoder training already reached the requested epoch budget");
+        return Ok(());
+    }
+
+    let mut rng = TrainingRng::new(
+        state.seed ^ (state.global_step as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
+    );
+    for epoch in state.epoch..config.epochs {
+        let start_step = if epoch == state.epoch {
+            state.step_in_epoch.min(config.steps_per_epoch)
+        } else {
+            0
+        };
+
+        for step in start_step..config.steps_per_epoch {
+            let mut average = TrainingStepAverages::default();
+            let mut total_loss = None;
+            for _ in 0..config.samples_per_step {
+                let (sample_loss, sample_stats) = compute_training_sample_loss(
+                    &fixture,
+                    &encoder,
+                    &mut rng,
+                    config.margin,
+                    config.hard_negative_candidates,
+                )?;
+                average.push(&sample_stats);
+                total_loss = Some(match total_loss {
+                    Some(loss) => loss + sample_loss,
+                    None => sample_loss,
+                });
+            }
+
+            let mut loss =
+                total_loss.expect("samples_per_step must be > 0") / config.samples_per_step as f32;
+            if config.weight_decay > 0.0 {
+                loss =
+                    loss + encoder.edge_kernels.clone().powi_scalar(2).mean() * config.weight_decay;
+                if let Some(bias) = encoder.edge_bias.as_ref() {
+                    loss = loss + bias.clone().powi_scalar(2).mean() * config.weight_decay;
+                }
+            }
+
+            let loss_scalar = tensor_scalar_f32(loss.clone().inner())?;
+            let grads = loss.backward();
+            apply_training_step(&mut encoder, &grads, config.learning_rate)?;
+
+            state.epoch = epoch;
+            state.step_in_epoch = step + 1;
+            state.global_step += 1;
+            state.last_loss = Some(loss_scalar);
+            state.best_loss = Some(
+                state
+                    .best_loss
+                    .map_or(loss_scalar, |best| best.min(loss_scalar)),
+            );
+
+            if state.global_step % config.checkpoint_every == 0 {
+                save_training_checkpoint(&paths, &state, &encoder)?;
+                info!(
+                    epoch = epoch + 1,
+                    step = step + 1,
+                    global_step = state.global_step,
+                    loss = loss_scalar,
+                    global_pos = average.scale(average.global_positive),
+                    global_neg = average.scale(average.global_negative),
+                    coarse_pos = average.scale(average.coarse_positive),
+                    coarse_neg = average.scale(average.coarse_negative),
+                    local_pos = average.scale(average.local_positive),
+                    local_neg = average.scale(average.local_negative),
+                    checkpoint = %paths.checkpoint_weights.display(),
+                    "encoder training checkpoint saved"
+                );
+            }
+        }
+
+        state.epoch = epoch + 1;
+        state.step_in_epoch = 0;
+        save_training_checkpoint(&paths, &state, &encoder)?;
+        info!(
+            epoch = epoch + 1,
+            loss = state.last_loss.unwrap_or_default(),
+            best_loss = state.best_loss.unwrap_or_default(),
+            output = %paths.output_weights.display(),
+            "encoder training epoch completed"
+        );
+    }
+
+    info!(
+        output = %paths.output_weights.display(),
+        best_loss = state.best_loss.unwrap_or_default(),
+        "convolution encoder training finished"
+    );
+    Ok(())
+}
 #[cfg(feature = "ai-burn")]
 fn prepare_color_capture_templates(
     captured: &RgbaImage,
@@ -1698,8 +2910,9 @@ impl BurnTrackerInner {
                                 candidate.score, candidate.world.x, candidate.world.y
                             );
                             locate_summary = Self::locate_success_summary("局部", &candidate);
-                            estimate =
-                                Some(self.commit_success(candidate, TrackingSource::FeatureEmbedding));
+                            estimate = Some(
+                                self.commit_success(candidate, TrackingSource::FeatureEmbedding),
+                            );
                         }
                         LocalCandidateDecision::ForceGlobalRelocate { jump, .. } => {
                             self.state.force_global_relocate();

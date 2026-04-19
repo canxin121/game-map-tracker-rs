@@ -83,7 +83,7 @@ fn configure_windows_capture_compatibility() {
     }
 }
 
-fn init_tracing() {
+pub fn init_tracing() {
     let debug_log_store = install_debug_log_store(2_000);
     let fmt_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,gpui_component=warn"));

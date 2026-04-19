@@ -1308,7 +1308,8 @@ pub fn rgba_image_as_unit_vec(image: &RgbaImage) -> Vec<f32> {
     let mut values = Vec::with_capacity(plane_len * 3);
     for channel in 0..3 {
         values.extend(
-            image.pixels()
+            image
+                .pixels()
                 .map(|pixel| f32::from(pixel.0[channel]) / 255.0),
         );
     }

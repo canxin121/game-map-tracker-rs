@@ -11,7 +11,7 @@ ai-burn = ["dep:burn", "dep:safetensors"]
 
 [dependencies]
 anyhow = "1.0"
-burn = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std", "ndarray"] }
+burn = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std", "ndarray", "autodiff"] }
 cubecl-runtime = "0.10.0-pre.3"
 cubecl-wgpu = "0.10.0-pre.3"
 crossbeam-channel = "0.5"
@@ -41,15 +41,15 @@ ureq = "2.12"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-burn = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std", "ndarray", "cuda", "vulkan"] }
+burn = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std", "ndarray", "autodiff", "cuda", "vulkan"] }
 cubecl-cuda = "0.10.0-pre.3"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-burn = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std", "ndarray", "metal"] }
+burn = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std", "ndarray", "autodiff", "metal"] }
 
 [target.'cfg(not(any(target_os = "windows", target_os = "macos")))'.dependencies]
-burn = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std", "ndarray", "vulkan"] }
+burn = { version = "0.21.0-pre.3", optional = true, default-features = false, features = ["std", "ndarray", "autodiff", "vulkan"] }
 
 [patch.crates-io]
 cubecl-wgpu = { path = "vendor/cubecl-wgpu-0.10.0-pre.3" }

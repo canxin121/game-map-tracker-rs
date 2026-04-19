@@ -135,7 +135,7 @@ impl Default for AiTrackingConfig {
             track_radius: 500,
             device: AiDevicePreference::default(),
             device_index: 0,
-            weights_path: None,
+            weights_path: Some("models/tracker_encoder.safetensors".to_owned()),
         }
     }
 }
