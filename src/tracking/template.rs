@@ -2,11 +2,22 @@ use std::{sync::Arc, time::Duration};
 
 use tracing::{info, warn};
 
+#[cfg(feature = "ai-burn")]
+use std::cmp::Ordering;
+
 use crate::config::TemplateTrackingConfig;
 #[cfg(not(feature = "ai-burn"))]
 use crate::tracking::vision::crop_around_center;
 #[cfg(feature = "ai-burn")]
 use crate::tracking::vision::{mask_as_unit_vec, rgba_image_as_unit_vec};
+#[cfg(not(feature = "ai-burn"))]
+use crate::tracking::{
+    precompute::load_or_build_match_pyramid,
+    vision::{
+        MapPyramid, build_match_representation, capture_template_annulus, crop_search_region,
+        load_logic_map_pyramid,
+    },
+};
 use crate::{
     config::AppConfig,
     domain::{
@@ -22,22 +33,13 @@ use crate::{
         runtime::{TrackingStatus, TrackingTick, TrackingWorker},
         vision::{
             ColorCaptureTemplates, ColorMapPyramid, ColorTemplateShape, LocalCandidateDecision,
-            MaskSet, MatchCandidate, SearchCrop, SearchStage, TrackerState,
-            build_debug_snapshot, build_inner_square_mask, build_mask,
-            capture_template_inner_square,
+            MaskSet, MatchCandidate, SearchCrop, SearchStage, TrackerState, build_debug_snapshot,
+            build_inner_square_mask, build_mask, capture_template_inner_square,
             capture_template_inner_square_rgba, center_to_scaled, coarse_global_downscale,
             crop_search_region_rgba, load_logic_color_map_pyramid, local_candidate_decision,
-            prepare_color_capture_template, preview_image, scaled_dimension,
+            prepare_color_capture_template, preview_image, scaled_color_score, scaled_dimension,
             scaled_template_dimension, search_region_around_center, top_score_peaks,
         },
-    },
-};
-#[cfg(not(feature = "ai-burn"))]
-use crate::tracking::{
-    precompute::load_or_build_match_pyramid,
-    vision::{
-        MapPyramid, build_match_representation, capture_template_annulus, crop_search_region,
-        load_logic_map_pyramid,
     },
 };
 use anyhow::Result;
@@ -76,6 +78,34 @@ struct LocateResult {
 
 #[cfg(feature = "ai-burn")]
 const MAX_GLOBAL_COARSE_CANDIDATES: usize = 12;
+
+#[cfg(feature = "ai-burn")]
+const TEMPLATE_COARSE_THRESHOLD_RELAX_MARGIN: f32 = 0.12;
+#[cfg(feature = "ai-burn")]
+const TEMPLATE_COARSE_PEAK_MARGIN: f32 = 0.03;
+#[cfg(feature = "ai-burn")]
+const TEMPLATE_MIN_COARSE_CANDIDATE_THRESHOLD: f32 = 0.18;
+#[cfg(feature = "ai-burn")]
+const TEMPLATE_RERANK_FINAL_SCORE_WEIGHT: f32 = 0.35;
+#[cfg(feature = "ai-burn")]
+const TEMPLATE_RERANK_GLOBAL_SCORE_WEIGHT: f32 = 0.10;
+#[cfg(feature = "ai-burn")]
+const TEMPLATE_RERANK_GLOBAL_COLOR_WEIGHT: f32 = 0.20;
+#[cfg(feature = "ai-burn")]
+const TEMPLATE_RERANK_LOCAL_COLOR_WEIGHT: f32 = 0.30;
+#[cfg(feature = "ai-burn")]
+const TEMPLATE_RERANK_COARSE_WEIGHT: f32 = 0.05;
+
+#[cfg(feature = "ai-burn")]
+#[derive(Debug, Clone)]
+struct TemplateRefinedCandidate {
+    result: LocateResult,
+    coarse_score: f32,
+    global_score: f32,
+    global_color_score: f32,
+    local_color_score: f32,
+    rerank_score: f32,
+}
 
 pub struct TemplateTrackerWorker {
     config: AppConfig,
@@ -366,7 +396,11 @@ impl TemplateTrackerWorker {
         }
 
         if estimate.is_none() {
-            let result = self.locate_global_template(&templates.coarse, &templates.global)?;
+            let result = self.locate_global_template(
+                &templates.coarse,
+                &templates.global,
+                &templates.local,
+            )?;
             global_result = Some(result.clone());
 
             if let Some(coarse) = result.accepted {
@@ -579,7 +613,8 @@ impl TemplateTrackerWorker {
         }
 
         if estimate.is_none() {
-            let result = self.locate_global_template(&coarse_template, &global_template)?;
+            let result =
+                self.locate_global_template(&coarse_template, &global_template, &local_template)?;
             global_result = Some(result.clone());
 
             if let Some(coarse) = result.accepted {
@@ -656,6 +691,7 @@ impl TemplateTrackerWorker {
         &self,
         coarse_template: &PreparedTemplate,
         global_template: &PreparedTemplate,
+        local_template: &PreparedTemplate,
     ) -> Result<LocateResult> {
         locate_global_template_runtime(
             &self.matcher,
@@ -663,6 +699,7 @@ impl TemplateTrackerWorker {
             &self.config.template,
             coarse_template,
             global_template,
+            local_template,
         )
     }
 
@@ -671,8 +708,9 @@ impl TemplateTrackerWorker {
         &self,
         coarse_template: &GrayImage,
         global_template: &GrayImage,
+        local_template: &GrayImage,
     ) -> Result<LocateResult> {
-        let _ = (coarse_template, global_template);
+        let _ = (coarse_template, global_template, local_template);
         anyhow::bail!("模板匹配引擎当前二进制未启用 `ai-burn` 特性")
     }
 
@@ -975,6 +1013,32 @@ fn coarse_peak_suppression_radius(
 }
 
 #[cfg(feature = "ai-burn")]
+fn coarse_peak_threshold(result: &LocateResult, config: &TemplateTrackingConfig) -> f32 {
+    let relaxed_floor = (config.global_match_threshold - TEMPLATE_COARSE_THRESHOLD_RELAX_MARGIN)
+        .max(TEMPLATE_MIN_COARSE_CANDIDATE_THRESHOLD);
+    (result.best_score - TEMPLATE_COARSE_PEAK_MARGIN)
+        .clamp(relaxed_floor, config.global_match_threshold)
+}
+
+#[cfg(feature = "ai-burn")]
+fn match_candidate_from_result(
+    result: &LocateResult,
+    origin_x: u32,
+    origin_y: u32,
+    scale: u32,
+    template_width: u32,
+    template_height: u32,
+) -> Option<MatchCandidate> {
+    (result.score_width > 0 && result.score_height > 0).then(|| MatchCandidate {
+        world: WorldPoint::new(
+            (origin_x + result.best_left + template_width / 2) as f32 * scale as f32,
+            (origin_y + result.best_top + template_height / 2) as f32 * scale as f32,
+        ),
+        score: result.best_score,
+    })
+}
+
+#[cfg(feature = "ai-burn")]
 fn coarse_peak_candidates(
     result: &LocateResult,
     config: &TemplateTrackingConfig,
@@ -990,7 +1054,7 @@ fn coarse_peak_candidates(
             score_map,
             result.score_width,
             result.score_height,
-            config.global_match_threshold,
+            coarse_peak_threshold(result, config),
             coarse_peak_suppression_radius(config, scale, template_width, template_height),
             MAX_GLOBAL_COARSE_CANDIDATES,
         );
@@ -1003,12 +1067,36 @@ fn coarse_peak_candidates(
         }));
     }
 
-    if candidates.is_empty() {
-        if let Some(candidate) = result.accepted.clone() {
+    for candidate in [
+        result.accepted.clone(),
+        match_candidate_from_result(
+            result,
+            origin_x,
+            origin_y,
+            scale,
+            template_width,
+            template_height,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let already_present = candidates.iter().any(|existing| {
+            existing.world.x == candidate.world.x && existing.world.y == candidate.world.y
+        });
+        if !already_present {
             candidates.push(candidate);
         }
     }
 
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.world.x.total_cmp(&right.world.x))
+            .then_with(|| left.world.y.total_cmp(&right.world.y))
+    });
+    candidates.truncate(MAX_GLOBAL_COARSE_CANDIDATES);
     candidates
 }
 
@@ -1019,6 +1107,7 @@ fn locate_global_template_runtime(
     config: &TemplateTrackingConfig,
     coarse_template: &PreparedTemplate,
     global_template: &PreparedTemplate,
+    local_template: &PreparedTemplate,
 ) -> Result<LocateResult> {
     let coarse = matcher.locate_coarse_prepared(
         coarse_template,
@@ -1027,13 +1116,8 @@ fn locate_global_template_runtime(
         0,
         color_pyramid.coarse.scale,
     )?;
-    if coarse.accepted.is_none() {
-        return Ok(coarse);
-    }
 
-    let mut best_refined = None;
-    let mut best_score = f32::MIN;
-    for candidate in coarse_peak_candidates(
+    let coarse_candidates = coarse_peak_candidates(
         &coarse,
         config,
         coarse_template.width(),
@@ -1041,7 +1125,27 @@ fn locate_global_template_runtime(
         0,
         0,
         color_pyramid.coarse.scale,
-    ) {
+    );
+    if coarse_candidates.is_empty() {
+        return Ok(coarse);
+    }
+
+    let global_color_mask = build_mask(
+        global_template.width(),
+        global_template.height(),
+        config.mask_inner_radius,
+        config.mask_outer_radius,
+    );
+    let local_color_mask = build_inner_square_mask(
+        local_template.width(),
+        local_template.height(),
+        config.mask_inner_radius,
+        config.mask_outer_radius,
+    );
+    let mut best_refined = None;
+    let mut best_refined_score = f32::MIN;
+    let mut refined_candidates = Vec::new();
+    for candidate in coarse_candidates {
         let region = search_region_around_center(
             color_pyramid.global.image.width(),
             color_pyramid.global.image.height(),
@@ -1059,13 +1163,97 @@ fn locate_global_template_runtime(
             crop.origin_y,
             color_pyramid.global.scale,
         )?;
-        if refined.accepted.is_some() && refined.best_score > best_score {
-            best_score = refined.best_score;
-            best_refined = Some(refined);
+        if refined.best_score > best_refined_score {
+            best_refined_score = refined.best_score;
+            best_refined = Some(refined.clone());
+        }
+
+        let Some(accepted) = refined.accepted.as_ref() else {
+            continue;
+        };
+
+        let local_region = search_region_around_center(
+            color_pyramid.local.image.width(),
+            color_pyramid.local.image.height(),
+            center_to_scaled(accepted.world, color_pyramid.local.scale),
+            config.global_refine_radius_px / color_pyramid.local.scale.max(1),
+            local_template.width(),
+            local_template.height(),
+        )?;
+        let local_crop = crop_search_region_rgba(&color_pyramid.local.image, local_region)?;
+        let local_refined = matcher.locate_local_prepared(
+            &local_crop.image,
+            local_template,
+            config.global_match_threshold,
+            local_crop.origin_x,
+            local_crop.origin_y,
+            color_pyramid.local.scale,
+        )?;
+        let final_result = if local_refined.accepted.is_some() {
+            local_refined
+        } else {
+            refined.clone()
+        };
+        if final_result.best_score > best_refined_score {
+            best_refined_score = final_result.best_score;
+            best_refined = Some(final_result.clone());
+        }
+        let final_world = final_result
+            .accepted
+            .as_ref()
+            .map(|candidate| candidate.world)
+            .unwrap_or(accepted.world);
+
+        let global_color_score = scaled_color_score(
+            &color_pyramid.global,
+            final_world,
+            global_template.image(),
+            &global_color_mask,
+        )
+        .unwrap_or(final_result.best_score);
+        let local_color_score = scaled_color_score(
+            &color_pyramid.local,
+            final_world,
+            local_template.image(),
+            &local_color_mask,
+        )
+        .unwrap_or(final_result.best_score);
+        let rerank_score = (final_result.best_score * TEMPLATE_RERANK_FINAL_SCORE_WEIGHT
+            + refined.best_score * TEMPLATE_RERANK_GLOBAL_SCORE_WEIGHT
+            + global_color_score * TEMPLATE_RERANK_GLOBAL_COLOR_WEIGHT
+            + local_color_score * TEMPLATE_RERANK_LOCAL_COLOR_WEIGHT
+            + candidate.score * TEMPLATE_RERANK_COARSE_WEIGHT)
+            .clamp(0.0, 1.0);
+        refined_candidates.push(TemplateRefinedCandidate {
+            result: final_result,
+            coarse_score: candidate.score,
+            global_score: refined.best_score,
+            global_color_score,
+            local_color_score,
+            rerank_score,
+        });
+    }
+
+    if let Some(best) = refined_candidates.into_iter().max_by(|left, right| {
+        left.rerank_score
+            .total_cmp(&right.rerank_score)
+            .then_with(|| left.local_color_score.total_cmp(&right.local_color_score))
+            .then_with(|| left.global_color_score.total_cmp(&right.global_color_score))
+            .then_with(|| left.result.best_score.total_cmp(&right.result.best_score))
+            .then_with(|| left.global_score.total_cmp(&right.global_score))
+            .then_with(|| left.coarse_score.total_cmp(&right.coarse_score))
+            .then(Ordering::Equal)
+    }) {
+        return Ok(best.result);
+    }
+
+    if let Some(best_refined) = best_refined {
+        if best_refined.best_score > coarse.best_score {
+            return Ok(best_refined);
         }
     }
 
-    Ok(best_refined.unwrap_or(coarse))
+    Ok(coarse)
 }
 
 pub fn rebuild_template_engine_cache(workspace: &WorkspaceSnapshot) -> Result<()> {
@@ -2517,6 +2705,7 @@ mod tests {
             &fixture.config.template,
             &templates.coarse,
             &templates.global,
+            &templates.local,
         )
     }
 
