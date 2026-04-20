@@ -1009,14 +1009,16 @@ pub fn scaled_color_score(
     template: &RgbaImage,
     mask: &GrayImage,
 ) -> Option<f32> {
-    let patch = crop_centered_rgba(
+    let (left, top) = centered_crop_origin(
         &map.image,
         center_to_scaled(world, map.scale),
         template.width(),
         template.height(),
     )
     .ok()?;
-    Some(masked_chroma_similarity(&patch, template, mask))
+    Some(masked_chroma_similarity_region(
+        &map.image, left, top, template, mask,
+    ))
 }
 
 pub fn scaled_luma_score(
@@ -1025,31 +1027,42 @@ pub fn scaled_luma_score(
     template: &RgbaImage,
     mask: &GrayImage,
 ) -> Option<f32> {
-    let patch = crop_centered_rgba(
+    let (left, top) = centered_crop_origin(
         &map.image,
         center_to_scaled(world, map.scale),
         template.width(),
         template.height(),
     )
     .ok()?;
-    Some(masked_luma_similarity(&patch, template, mask))
+    Some(masked_luma_similarity_region(
+        &map.image, left, top, template, mask,
+    ))
 }
 
 pub fn masked_chroma_similarity(search: &RgbaImage, template: &RgbaImage, mask: &GrayImage) -> f32 {
     if search.dimensions() != template.dimensions() || search.dimensions() != mask.dimensions() {
         return 0.0;
     }
+    masked_chroma_similarity_region(search, 0, 0, template, mask)
+}
 
+fn masked_chroma_similarity_region(
+    search: &RgbaImage,
+    left: u32,
+    top: u32,
+    template: &RgbaImage,
+    mask: &GrayImage,
+) -> f32 {
     let mut rgb_dot = 0.0f32;
     let mut rgb_search_norm = 0.0f32;
     let mut rgb_template_norm = 0.0f32;
     let mut chroma_dot = 0.0f32;
     let mut chroma_search_norm = 0.0f32;
     let mut chroma_template_norm = 0.0f32;
-    for y in 0..search.height() {
-        for x in 0..search.width() {
+    for y in 0..template.height() {
+        for x in 0..template.width() {
             let mask_weight = f32::from(mask.get_pixel(x, y).0[0]) / 255.0;
-            let search_pixel = search.get_pixel(x, y).0;
+            let search_pixel = search.get_pixel(left + x, top + y).0;
             let template_pixel = template.get_pixel(x, y).0;
             let alpha_weight =
                 (f32::from(search_pixel[3]) / 255.0) * (f32::from(template_pixel[3]) / 255.0);
@@ -1110,14 +1123,23 @@ pub fn masked_luma_similarity(search: &RgbaImage, template: &RgbaImage, mask: &G
     if search.dimensions() != template.dimensions() || search.dimensions() != mask.dimensions() {
         return 0.0;
     }
+    masked_luma_similarity_region(search, 0, 0, template, mask)
+}
 
+fn masked_luma_similarity_region(
+    search: &RgbaImage,
+    left: u32,
+    top: u32,
+    template: &RgbaImage,
+    mask: &GrayImage,
+) -> f32 {
     let mut total_weight = 0.0f32;
     let mut search_sum = 0.0f32;
     let mut template_sum = 0.0f32;
-    for y in 0..search.height() {
-        for x in 0..search.width() {
+    for y in 0..template.height() {
+        for x in 0..template.width() {
             let mask_weight = f32::from(mask.get_pixel(x, y).0[0]) / 255.0;
-            let search_pixel = search.get_pixel(x, y).0;
+            let search_pixel = search.get_pixel(left + x, top + y).0;
             let template_pixel = template.get_pixel(x, y).0;
             let alpha_weight =
                 (f32::from(search_pixel[3]) / 255.0) * (f32::from(template_pixel[3]) / 255.0);
@@ -1141,10 +1163,10 @@ pub fn masked_luma_similarity(search: &RgbaImage, template: &RgbaImage, mask: &G
     let mut dot = 0.0f32;
     let mut search_norm = 0.0f32;
     let mut template_norm = 0.0f32;
-    for y in 0..search.height() {
-        for x in 0..search.width() {
+    for y in 0..template.height() {
+        for x in 0..template.width() {
             let mask_weight = f32::from(mask.get_pixel(x, y).0[0]) / 255.0;
-            let search_pixel = search.get_pixel(x, y).0;
+            let search_pixel = search.get_pixel(left + x, top + y).0;
             let template_pixel = template.get_pixel(x, y).0;
             let alpha_weight =
                 (f32::from(search_pixel[3]) / 255.0) * (f32::from(template_pixel[3]) / 255.0);
@@ -1164,12 +1186,12 @@ pub fn masked_luma_similarity(search: &RgbaImage, template: &RgbaImage, mask: &G
     cosine_score(dot, search_norm, template_norm)
 }
 
-fn crop_centered_rgba(
+fn centered_crop_origin(
     image: &RgbaImage,
     center: (u32, u32),
     width: u32,
     height: u32,
-) -> Result<RgbaImage> {
+) -> Result<(u32, u32)> {
     if image.width() < width || image.height() < height {
         bail!("color image is smaller than requested crop");
     }
@@ -1182,7 +1204,7 @@ fn crop_centered_rgba(
         .1
         .saturating_sub(height / 2)
         .min(image.height() - height);
-    Ok(crop_imm(image, left, top, width, height).to_image())
+    Ok((left, top))
 }
 
 fn normalized_rgb(pixel: [u8; 4]) -> [f32; 3] {

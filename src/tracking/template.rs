@@ -1012,6 +1012,53 @@ fn locate_global_template_runtime(
     Ok(coarse)
 }
 
+pub(crate) struct TemplateGlobalLocator {
+    matcher: TemplateMatcher,
+}
+
+impl TemplateGlobalLocator {
+    pub(crate) fn new_cached(
+        workspace: &WorkspaceSnapshot,
+        config: &AppConfig,
+        color_pyramid: &ColorMapPyramid,
+        map_cache_key: &str,
+    ) -> Result<Self> {
+        let masks = build_template_masks(config);
+        let matcher = TemplateMatcher::new_cached(
+            workspace,
+            &config.template,
+            color_pyramid,
+            &masks,
+            map_cache_key,
+        )?;
+        Ok(Self { matcher })
+    }
+
+    pub(crate) fn locate_capture(
+        &self,
+        capture: &RgbaImage,
+        config: &AppConfig,
+        color_pyramid: &ColorMapPyramid,
+    ) -> Result<Option<MatchCandidate>> {
+        let templates = self
+            .matcher
+            .prepare_capture_templates(capture, config, color_pyramid)?;
+        let result = locate_global_template_runtime(
+            &self.matcher,
+            color_pyramid,
+            &config.template,
+            &templates.coarse,
+            &templates.global,
+            &templates.local,
+        )?;
+        Ok(result.accepted)
+    }
+
+    pub(crate) fn device_label(&self) -> String {
+        self.matcher.device_label()
+    }
+}
+
 pub fn rebuild_template_engine_cache(workspace: &WorkspaceSnapshot) -> Result<()> {
     info!(
         cache_root = %workspace.assets.bwiki_cache_dir.display(),
