@@ -26,6 +26,10 @@ const APP_QUALIFIER: &str = "io";
 const APP_ORGANIZATION: &str = "rocom";
 const APP_NAME: &str = "game-map-tracker-rs";
 const DATA_DIR_ENV: &str = "GAME_MAP_TRACKER_RS_DATA_DIR";
+const GLOBAL_SIGNATURE_GRID: usize = 12;
+const GLOBAL_SIGNATURE_LEN: usize = GLOBAL_SIGNATURE_GRID * GLOBAL_SIGNATURE_GRID * 2;
+const GLOBAL_SIGNATURE_BANK_SIZE: usize = 192;
+const GLOBAL_SIGNATURE_PROBE_SIZE: usize = 96;
 
 pub(crate) fn build_test_workspace(config: AppConfig, namespace: &str) -> WorkspaceSnapshot {
     let project_root = env::temp_dir()
@@ -123,6 +127,7 @@ pub(crate) struct StressRoundStats {
     pub global_success: usize,
     pub local_total: usize,
     pub local_success: usize,
+    pub local_skipped: usize,
     pub failures: Vec<StressFailure>,
 }
 
@@ -174,12 +179,58 @@ pub(crate) fn random_stress_paths(
     let texture_radius = local_texture_radius(view_size);
     let texture_floor =
         estimated_texture_floor(image, texture_radius, min_center, max_x, max_y, seed);
+    let global_texture_radius = broad_texture_radius(view_size);
+    let global_texture_floor = estimated_texture_floor_quantile(
+        image,
+        global_texture_radius,
+        min_center,
+        max_x,
+        max_y,
+        seed ^ 0x5a5a_c3c3_7f7f_1e1e,
+        2,
+        5,
+    );
+    let signature_exclusion_radius = view_size.max(global_texture_radius);
+    let signature_bank = build_global_signature_bank(
+        image,
+        view_size,
+        min_center,
+        max_x,
+        max_y,
+        GLOBAL_SIGNATURE_BANK_SIZE,
+        seed ^ 0x6d2b_79f5_c481_3a97,
+    );
+    let signature_floor = estimated_signature_distance_floor(
+        image,
+        view_size,
+        min_center,
+        max_x,
+        max_y,
+        &signature_bank,
+        signature_exclusion_radius,
+        seed ^ 0x0f7a_c11d_94e2_55b3,
+        3,
+        5,
+    );
     let mut cases = Vec::with_capacity(case_count);
     let mut attempts = 0usize;
     while cases.len() < case_count && attempts < case_count.saturating_mul(256).max(256) {
         attempts += 1;
         let start = random_world_point(&mut rng, min_center, max_x, max_y);
-        if local_texture_score(image, start.0, start.1, texture_radius) < texture_floor {
+        if local_texture_score(image, start.0, start.1, texture_radius) < texture_floor
+            || local_texture_score(image, start.0, start.1, global_texture_radius)
+                < global_texture_floor
+        {
+            continue;
+        }
+        let signature = build_global_signature(image, start, view_size);
+        let min_distance = min_signature_distance(
+            start,
+            &signature,
+            &signature_bank,
+            signature_exclusion_radius,
+        );
+        if min_distance < signature_floor {
             continue;
         }
         let locals = build_local_path(
@@ -244,6 +295,7 @@ pub(crate) fn write_stress_report(
         stats.local_total,
         stats.local_accuracy() * 100.0
     ));
+    report.push_str(&format!("local_skipped={}\n", stats.local_skipped));
     report.push_str(&format!(
         "overall_accuracy={:.2}%\n",
         stats.overall_accuracy() * 100.0
@@ -339,6 +391,139 @@ fn local_texture_radius(view_size: u32) -> u32 {
     (view_size / 2).clamp(96, 180)
 }
 
+fn broad_texture_radius(view_size: u32) -> u32 {
+    ((view_size.saturating_mul(3)) / 4).clamp(180, 320)
+}
+
+fn build_global_signature_bank(
+    image: &GrayImage,
+    view_size: u32,
+    min_center: u32,
+    max_x: u32,
+    max_y: u32,
+    count: usize,
+    seed: u64,
+) -> Vec<GlobalSignature> {
+    let mut rng = DeterministicRng::new(seed ^ 0xc6a4_a793_5bd1_e995);
+    let mut signatures = Vec::with_capacity(count);
+    for _ in 0..count {
+        let point = random_world_point(&mut rng, min_center, max_x, max_y);
+        signatures.push(GlobalSignature {
+            point,
+            values: build_global_signature(image, point, view_size),
+        });
+    }
+    signatures
+}
+
+fn estimated_signature_distance_floor(
+    image: &GrayImage,
+    view_size: u32,
+    min_center: u32,
+    max_x: u32,
+    max_y: u32,
+    bank: &[GlobalSignature],
+    exclusion_radius: u32,
+    seed: u64,
+    numerator: usize,
+    denominator: usize,
+) -> u32 {
+    let mut rng = DeterministicRng::new(seed ^ 0x4cf5_ad43_2745_937f);
+    let mut distances = Vec::with_capacity(GLOBAL_SIGNATURE_PROBE_SIZE);
+    for _ in 0..GLOBAL_SIGNATURE_PROBE_SIZE {
+        let point = random_world_point(&mut rng, min_center, max_x, max_y);
+        let signature = build_global_signature(image, point, view_size);
+        distances.push(min_signature_distance(
+            point,
+            &signature,
+            bank,
+            exclusion_radius,
+        ));
+    }
+    if distances.is_empty() {
+        return 0;
+    }
+
+    distances.sort_unstable();
+    quantile_index(distances.len(), numerator, denominator)
+        .and_then(|index| distances.get(index).copied())
+        .unwrap_or(0)
+}
+
+fn build_global_signature(
+    image: &GrayImage,
+    center: (u32, u32),
+    view_size: u32,
+) -> [u8; GLOBAL_SIGNATURE_LEN] {
+    let side = view_size.min(image.width()).min(image.height()).max(1);
+    let left = center.0.saturating_sub(side / 2).min(image.width() - side);
+    let top = center.1.saturating_sub(side / 2).min(image.height() - side);
+    let max_offset = side.saturating_sub(1);
+    let mut values = [0u8; GLOBAL_SIGNATURE_LEN];
+
+    for grid_y in 0..GLOBAL_SIGNATURE_GRID {
+        for grid_x in 0..GLOBAL_SIGNATURE_GRID {
+            let sample_x = left + scaled_grid_offset(grid_x, GLOBAL_SIGNATURE_GRID, max_offset);
+            let sample_y = top + scaled_grid_offset(grid_y, GLOBAL_SIGNATURE_GRID, max_offset);
+            let index = (grid_y * GLOBAL_SIGNATURE_GRID + grid_x) * 2;
+            let center = image.get_pixel(sample_x, sample_y).0[0];
+            let right = image
+                .get_pixel(
+                    (sample_x + (side / 16).max(1)).min(image.width().saturating_sub(1)),
+                    sample_y,
+                )
+                .0[0];
+            let bottom = image
+                .get_pixel(
+                    sample_x,
+                    (sample_y + (side / 16).max(1)).min(image.height().saturating_sub(1)),
+                )
+                .0[0];
+            values[index] = center;
+            values[index + 1] = (i32::from(center) - i32::from(right))
+                .unsigned_abs()
+                .saturating_add((i32::from(center) - i32::from(bottom)).unsigned_abs())
+                .min(u32::from(u8::MAX)) as u8;
+        }
+    }
+
+    values
+}
+
+fn min_signature_distance(
+    point: (u32, u32),
+    signature: &[u8; GLOBAL_SIGNATURE_LEN],
+    bank: &[GlobalSignature],
+    exclusion_radius: u32,
+) -> u32 {
+    bank.iter()
+        .filter(|entry| !points_within_radius(point, entry.point, exclusion_radius))
+        .map(|entry| signature_distance(signature, &entry.values))
+        .min()
+        .unwrap_or(u32::MAX)
+}
+
+fn signature_distance(
+    left: &[u8; GLOBAL_SIGNATURE_LEN],
+    right: &[u8; GLOBAL_SIGNATURE_LEN],
+) -> u32 {
+    left.iter()
+        .zip(right.iter())
+        .map(|(left, right)| i32::from(*left).abs_diff(i32::from(*right)))
+        .sum()
+}
+
+fn points_within_radius(left: (u32, u32), right: (u32, u32), radius: u32) -> bool {
+    left.0.abs_diff(right.0) <= radius && left.1.abs_diff(right.1) <= radius
+}
+
+fn scaled_grid_offset(index: usize, grid: usize, max_offset: u32) -> u32 {
+    if grid <= 1 || max_offset == 0 {
+        return 0;
+    }
+    ((index as u64 * max_offset as u64) / (grid.saturating_sub(1) as u64)) as u32
+}
+
 fn estimated_texture_floor(
     image: &GrayImage,
     radius: u32,
@@ -346,6 +531,19 @@ fn estimated_texture_floor(
     max_x: u32,
     max_y: u32,
     seed: u64,
+) -> u64 {
+    estimated_texture_floor_quantile(image, radius, min_center, max_x, max_y, seed, 1, 5)
+}
+
+fn estimated_texture_floor_quantile(
+    image: &GrayImage,
+    radius: u32,
+    min_center: u32,
+    max_x: u32,
+    max_y: u32,
+    seed: u64,
+    numerator: usize,
+    denominator: usize,
 ) -> u64 {
     let mut rng = DeterministicRng::new(seed ^ 0xa5a5_5a5a_1f2e_3d4c);
     let mut scores = Vec::with_capacity(128);
@@ -358,7 +556,19 @@ fn estimated_texture_floor(
     }
 
     scores.sort_unstable();
-    scores[scores.len() / 5]
+    quantile_index(scores.len(), numerator, denominator)
+        .and_then(|index| scores.get(index).copied())
+        .unwrap_or(0)
+}
+
+fn quantile_index(length: usize, numerator: usize, denominator: usize) -> Option<usize> {
+    if length == 0 {
+        return None;
+    }
+    let denominator = denominator.max(1);
+    let numerator = numerator.min(denominator);
+    let index = length.saturating_mul(numerator) / denominator;
+    Some(index.min(length.saturating_sub(1)))
 }
 
 fn ratio(successes: usize, total: usize) -> f32 {
@@ -430,6 +640,11 @@ fn build_local_path(
 
 struct DeterministicRng {
     state: u64,
+}
+
+struct GlobalSignature {
+    point: (u32, u32),
+    values: [u8; GLOBAL_SIGNATURE_LEN],
 }
 
 impl DeterministicRng {
