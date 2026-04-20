@@ -2372,7 +2372,7 @@ fn settings_template_page(
 ) -> impl IntoElement {
     settings_page_shell(
         "多尺度模板匹配",
-        "多尺度模板匹配现在同样走 Burn 设备抽象。设备下拉只显示当前后端真实可见的设备；CUDA 只列 NVIDIA CUDA 设备，Vulkan 可以覆盖 Intel / AMD / NVIDIA 的核显或独显。",
+        "多尺度模板匹配统一走 Burn 设备抽象。你可以在这里切换模板输入模式为彩色或灰度；设备下拉只显示当前后端真实可见的设备。",
         Some(settings_editor_toolbar(cx, tokens).into_any_element()),
         vec![
             tracker_cache_rebuild_section(
@@ -2385,32 +2385,48 @@ fn settings_template_page(
             ),
             editable_config_section(
                 "执行设备",
-                vec![config_row(vec![
-                    labeled_select(
-                        tokens,
-                        "执行设备",
-                        Select::new(&this.template_device_picker)
-                            .icon(Icon::new(IconName::ChevronsUpDown))
-                            .w_full()
-                            .menu_width(px(420.0))
-                            .placeholder("选择执行设备")
-                            .search_placeholder("搜索 CPU / CUDA / Vulkan / Metal")
-                            .empty_message("当前没有可用设备。"),
-                    )
-                    .into_any_element(),
-                    labeled_select(
-                        tokens,
-                        "设备序号",
-                        Select::new(&this.template_device_index_picker)
-                            .icon(Icon::new(IconName::ChevronsUpDown))
-                            .w_full()
-                            .menu_width(px(420.0))
-                            .placeholder("选择设备序号")
-                            .search_placeholder("搜索设备序号")
-                            .empty_message("当前后端没有可用设备。"),
-                    )
-                    .into_any_element(),
-                ])],
+                vec![
+                    config_row(vec![
+                        labeled_select(
+                            tokens,
+                            "输入模式",
+                            Select::new(&this.template_input_mode_picker)
+                                .icon(Icon::new(IconName::ChevronsUpDown))
+                                .w_full()
+                                .menu_width(px(420.0))
+                                .placeholder("选择彩色或灰度")
+                                .search_placeholder("搜索彩色 / 灰度")
+                                .empty_message("当前没有可选输入模式。"),
+                        )
+                        .into_any_element(),
+                    ]),
+                    config_row(vec![
+                        labeled_select(
+                            tokens,
+                            "执行设备",
+                            Select::new(&this.template_device_picker)
+                                .icon(Icon::new(IconName::ChevronsUpDown))
+                                .w_full()
+                                .menu_width(px(420.0))
+                                .placeholder("选择执行设备")
+                                .search_placeholder("搜索 CPU / CUDA / Vulkan / Metal")
+                                .empty_message("当前没有可用设备。"),
+                        )
+                        .into_any_element(),
+                        labeled_select(
+                            tokens,
+                            "设备序号",
+                            Select::new(&this.template_device_index_picker)
+                                .icon(Icon::new(IconName::ChevronsUpDown))
+                                .w_full()
+                                .menu_width(px(420.0))
+                                .placeholder("选择设备序号")
+                                .search_placeholder("搜索设备序号")
+                                .empty_message("当前后端没有可用设备。"),
+                        )
+                        .into_any_element(),
+                    ]),
+                ],
                 tokens,
             )
             .into_any_element(),

@@ -12,8 +12,6 @@ fn main() {
         .join("models")
         .join("tracker_encoder.safetensors");
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let ai_burn_enabled = env::var_os("CARGO_FEATURE_AI_BURN").is_some();
-
     for root in [&icon_assets_root] {
         println!("cargo:rerun-if-changed={}", root.display());
     }
@@ -23,14 +21,14 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(burn_vulkan_backend)");
     println!("cargo:rustc-check-cfg=cfg(burn_metal_backend)");
 
-    if ai_burn_enabled && target_os == "windows" {
+    if target_os == "windows" {
         println!("cargo:rustc-cfg=burn_cuda_backend");
         println!("cargo:rustc-cfg=burn_vulkan_backend");
     }
-    if ai_burn_enabled && target_os == "macos" {
+    if target_os == "macos" {
         println!("cargo:rustc-cfg=burn_metal_backend");
     }
-    if ai_burn_enabled && !matches!(target_os.as_str(), "windows" | "macos") {
+    if !matches!(target_os.as_str(), "windows" | "macos") {
         println!("cargo:rustc-cfg=burn_vulkan_backend");
     }
 

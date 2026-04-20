@@ -1,23 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
-use tracing::info;
-
-#[cfg(feature = "ai-burn")]
 use std::cmp::Ordering;
 
-use crate::config::TemplateTrackingConfig;
-#[cfg(not(feature = "ai-burn"))]
-use crate::tracking::vision::crop_around_center;
-#[cfg(feature = "ai-burn")]
-use crate::tracking::vision::{mask_as_unit_vec, rgba_image_as_unit_vec};
-#[cfg(not(feature = "ai-burn"))]
-use crate::tracking::{
-    precompute::load_or_build_match_pyramid,
-    vision::{
-        MapPyramid, build_match_representation, capture_template_annulus, crop_search_region,
-        load_logic_map_pyramid,
-    },
-};
+use tracing::info;
+
+use crate::config::{TemplateInputMode, TemplateTrackingConfig};
 use crate::{
     config::AppConfig,
     domain::{
@@ -28,41 +15,40 @@ use crate::{
     tracking::{
         capture::{DesktopCapture, preprocess_capture},
         debug::{DebugField, TrackingDebugSnapshot},
-        precompute::{clear_match_pyramid_caches, tracker_map_cache_key},
+        precompute::{
+            PersistedTensorCache, clear_match_pyramid_caches, clear_tensor_caches_by_prefix,
+            load_tensor_cache, save_tensor_cache, tracker_map_cache_key, tracker_tensor_cache_path,
+        },
         presence::{MinimapPresenceDetector, MinimapPresenceSample},
         runtime::{TrackingStatus, TrackingTick, TrackingWorker},
         vision::{
             ColorCaptureTemplates, ColorMapPyramid, ColorTemplateShape, LocalCandidateDecision,
-            MaskSet, MatchCandidate, SearchCrop, SearchStage, TrackerState, build_debug_snapshot,
-            build_mask, capture_template_inner_square, capture_template_inner_square_rgba,
-            center_to_scaled, coarse_global_downscale, crop_search_region_rgba,
-            load_logic_color_map_pyramid, local_candidate_decision, normalized_inner_radius,
-            prepare_color_capture_template, preview_image, scaled_color_score, scaled_dimension,
-            search_region_around_center, top_score_peaks,
+            MaskSet, MatchCandidate, ScaledColorMap, SearchRegion, SearchStage, TrackerState,
+            build_debug_snapshot, build_mask, capture_template_inner_square,
+            capture_template_inner_square_rgba, center_to_scaled, coarse_global_downscale,
+            load_logic_color_map_pyramid, local_candidate_decision, mask_as_unit_vec,
+            prepare_color_capture_template, preview_image, rgba_image_as_unit_vec,
+            scaled_color_score, scaled_dimension, search_region_around_center, top_score_peaks,
         },
     },
 };
 use anyhow::Result;
-#[cfg(feature = "ai-burn")]
 use burn::{
     backend::ndarray::NdArrayDevice,
     tensor::{
         Tensor, TensorData, backend::Backend, cast::ToElement, module::conv2d, ops::ConvOptions,
     },
 };
-use image::{GrayImage, RgbaImage};
+use image::{GrayImage, Rgba, RgbaImage};
 
-#[cfg(feature = "ai-burn")]
-use crate::tracking::precompute::{
-    PersistedTensorCache, clear_tensor_caches_by_prefix, load_tensor_cache, save_tensor_cache,
-    tracker_tensor_cache_path,
-};
-
-#[cfg(feature = "ai-burn")]
+#[cfg(any(burn_cuda_backend, burn_vulkan_backend, burn_metal_backend))]
+use crate::tracking::burn_support::burn_device_label;
 use crate::tracking::burn_support::{
-    BurnDeviceSelection, available_burn_backends, burn_device_label,
-    burn_score_map_capture_enabled, select_burn_device,
+    BurnDeviceSelection, available_burn_backends, burn_score_map_capture_enabled,
+    select_burn_device,
 };
+#[cfg(test)]
+use crate::tracking::vision::crop_search_region_rgba;
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
@@ -76,27 +62,20 @@ struct LocateResult {
     accepted: Option<MatchCandidate>,
 }
 
-#[cfg(feature = "ai-burn")]
 const MAX_GLOBAL_COARSE_CANDIDATES: usize = 12;
 
-#[cfg(feature = "ai-burn")]
 const TEMPLATE_COARSE_THRESHOLD_RELAX_MARGIN: f32 = 0.12;
-#[cfg(feature = "ai-burn")]
 const TEMPLATE_COARSE_PEAK_MARGIN: f32 = 0.03;
-#[cfg(feature = "ai-burn")]
 const TEMPLATE_MIN_COARSE_CANDIDATE_THRESHOLD: f32 = 0.18;
-#[cfg(feature = "ai-burn")]
-const TEMPLATE_RERANK_FINAL_SCORE_WEIGHT: f32 = 0.35;
-#[cfg(feature = "ai-burn")]
+const TEMPLATE_RERANK_FINAL_SCORE_WEIGHT: f32 = 0.30;
 const TEMPLATE_RERANK_GLOBAL_SCORE_WEIGHT: f32 = 0.10;
-#[cfg(feature = "ai-burn")]
-const TEMPLATE_RERANK_GLOBAL_COLOR_WEIGHT: f32 = 0.20;
-#[cfg(feature = "ai-burn")]
-const TEMPLATE_RERANK_LOCAL_COLOR_WEIGHT: f32 = 0.30;
-#[cfg(feature = "ai-burn")]
+const TEMPLATE_RERANK_GLOBAL_COLOR_WEIGHT: f32 = 0.15;
+const TEMPLATE_RERANK_LOCAL_COLOR_WEIGHT: f32 = 0.20;
 const TEMPLATE_RERANK_COARSE_WEIGHT: f32 = 0.05;
+const TEMPLATE_LOCAL_RERANK_MAX_CANDIDATES: usize = 4;
+const TEMPLATE_LOCAL_RERANK_GLOBAL_MARGIN: f32 = 0.05;
+const TEMPLATE_MATCH_MAP_OUTER_RADIUS: f32 = 0.84;
 
-#[cfg(feature = "ai-burn")]
 #[derive(Debug, Clone)]
 struct TemplateRefinedCandidate {
     result: LocateResult,
@@ -111,17 +90,12 @@ pub struct TemplateTrackerWorker {
     config: AppConfig,
     capture: DesktopCapture,
     presence_detector: Option<MinimapPresenceDetector>,
-    #[cfg(not(feature = "ai-burn"))]
-    pyramid: MapPyramid,
-    #[cfg(feature = "ai-burn")]
     color_pyramid: ColorMapPyramid,
     state: TrackerState,
     debug_enabled: bool,
-    #[cfg(feature = "ai-burn")]
     matcher: TemplateMatcher,
 }
 
-#[cfg(feature = "ai-burn")]
 enum TemplateMatcher {
     NdArray(BurnTemplateMatcher<burn::backend::NdArray>),
     #[cfg(burn_cuda_backend)]
@@ -132,7 +106,6 @@ enum TemplateMatcher {
     Metal(BurnTemplateMatcher<burn::backend::Metal>),
 }
 
-#[cfg(feature = "ai-burn")]
 struct BurnTemplateMatcher<B>
 where
     B: Backend<FloatElem = f32>,
@@ -140,7 +113,11 @@ where
 {
     device: B::Device,
     device_label: String,
+    local_search: SearchTensorCache<B>,
+    global_search: SearchTensorCache<B>,
     coarse_search: SearchTensorCache<B>,
+    local_search_patch_energy: Tensor<B, 4>,
+    global_search_patch_energy: Tensor<B, 4>,
     global_mask_squared: Tensor<B, 4>,
     coarse_mask_squared: Tensor<B, 4>,
     coarse_search_patch_energy: Tensor<B, 4>,
@@ -148,7 +125,6 @@ where
     chunk_budget_bytes: Option<usize>,
 }
 
-#[cfg(feature = "ai-burn")]
 struct SearchTensorCache<B>
 where
     B: Backend<FloatElem = f32>,
@@ -159,14 +135,12 @@ where
     height: u32,
 }
 
-#[cfg(feature = "ai-burn")]
 struct PreparedCaptureTemplates {
     local: PreparedTemplate,
     global: PreparedTemplate,
     coarse: PreparedTemplate,
 }
 
-#[cfg(feature = "ai-burn")]
 enum PreparedTemplate {
     NdArray(BurnPreparedTemplate<burn::backend::NdArray>),
     #[cfg(burn_cuda_backend)]
@@ -177,7 +151,6 @@ enum PreparedTemplate {
     Metal(BurnPreparedTemplate<burn::backend::Metal>),
 }
 
-#[cfg(feature = "ai-burn")]
 struct BurnPreparedTemplate<B>
 where
     B: Backend<FloatElem = f32>,
@@ -188,7 +161,6 @@ where
     template_energy: f32,
 }
 
-#[cfg(feature = "ai-burn")]
 impl<B> BurnPreparedTemplate<B>
 where
     B: Backend<FloatElem = f32>,
@@ -202,10 +174,10 @@ where
     }
 }
 
-#[cfg(feature = "ai-burn")]
+#[cfg(burn_cuda_backend)]
 const CUDA_CONV_IM2COL_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 
-#[cfg(feature = "ai-burn")]
+#[cfg(any(burn_vulkan_backend, burn_metal_backend))]
 const WGPU_CONV_IM2COL_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
 impl TemplateTrackerWorker {
@@ -223,39 +195,32 @@ impl TemplateTrackerWorker {
         }
         let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
         let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
-        #[cfg(feature = "ai-burn")]
-        let cache_key = tracker_map_cache_key(workspace.as_ref())?;
-        #[cfg(not(feature = "ai-burn"))]
-        let pyramid = load_logic_map_pyramid(workspace.as_ref())?.0;
-        #[cfg(feature = "ai-burn")]
-        let color_pyramid = load_logic_color_map_pyramid(workspace.as_ref())?;
+        let cache_key = template_mode_cache_key(
+            &tracker_map_cache_key(workspace.as_ref())?,
+            config.template.input_mode,
+        );
+        let color_pyramid =
+            prepare_template_color_map_pyramid(workspace.as_ref(), config.template.input_mode)?;
         let masks = build_template_masks(&config);
-
-        #[cfg(feature = "ai-burn")]
         let matcher = TemplateMatcher::new_cached(
             workspace.as_ref(),
             &config.template,
             &color_pyramid,
             &masks,
-            &cache_key,
+            cache_key.as_str(),
         )?;
 
         Ok(Self {
             config,
             capture,
             presence_detector,
-            #[cfg(not(feature = "ai-burn"))]
-            pyramid,
-            #[cfg(feature = "ai-burn")]
             color_pyramid,
             state: TrackerState::default(),
             debug_enabled: false,
-            #[cfg(feature = "ai-burn")]
             matcher,
         })
     }
 
-    #[cfg(feature = "ai-burn")]
     fn run_frame(&mut self) -> Result<TrackingTick> {
         self.state.begin_frame();
         let probe_sample = self
@@ -287,12 +252,14 @@ impl TemplateTrackerWorker {
         }
 
         let captured_rgba = self.capture.capture_rgba()?;
-        let captured = preprocess_capture(captured_rgba.clone());
+        let captured_input =
+            prepare_template_capture_input(&captured_rgba, self.config.template.input_mode);
         let templates = self.matcher.prepare_capture_templates(
-            &captured_rgba,
+            &captured_input,
             &self.config,
             &self.color_pyramid,
         )?;
+        let captured = preprocess_capture(captured_input);
 
         let mut status = self.base_status();
         status.probe_summary = self.probe_summary(probe_sample.as_ref());
@@ -313,13 +280,10 @@ impl TemplateTrackerWorker {
                     templates.local.width(),
                     templates.local.height(),
                 )?;
-                let crop = crop_search_region_rgba(&self.color_pyramid.local.image, region)?;
-                let result = self.matcher.locate_local_prepared(
-                    &crop.image,
+                let result = self.matcher.locate_local_region_prepared(
+                    region,
                     &templates.local,
                     self.config.template.local_match_threshold,
-                    crop.origin_x,
-                    crop.origin_y,
                     self.color_pyramid.local.scale,
                 )?;
                 local_result = Some(result.clone());
@@ -337,8 +301,11 @@ impl TemplateTrackerWorker {
                             status.source = Some(TrackingSource::LocalTrack);
                             status.match_score = Some(candidate.score);
                             status.message = format!(
-                                "局部模板锁定成功，RGB 得分 {:.3}，坐标 {:.0}, {:.0}。",
-                                candidate.score, candidate.world.x, candidate.world.y
+                                "局部模板锁定成功，{}得分 {:.3}，坐标 {:.0}, {:.0}。",
+                                self.score_label(),
+                                candidate.score,
+                                candidate.world.x,
+                                candidate.world.y
                             );
                             locate_summary = Self::locate_success_summary("局部", &candidate);
                             estimate =
@@ -375,11 +342,7 @@ impl TemplateTrackerWorker {
         }
 
         if estimate.is_none() {
-            let result = self.locate_global_template(
-                &templates.coarse,
-                &templates.global,
-                &templates.local,
-            )?;
+            let result = self.locate_global_template(&templates)?;
             global_result = Some(result.clone());
 
             if let Some(coarse) = result.accepted {
@@ -392,13 +355,10 @@ impl TemplateTrackerWorker {
                     templates.local.width(),
                     templates.local.height(),
                 )?;
-                let crop = crop_search_region_rgba(&self.color_pyramid.local.image, region)?;
-                let refine = self.matcher.locate_local_prepared(
-                    &crop.image,
+                let refine = self.matcher.locate_local_region_prepared(
+                    region,
                     &templates.local,
                     self.config.template.global_match_threshold,
-                    crop.origin_x,
-                    crop.origin_y,
                     self.color_pyramid.local.scale,
                 )?;
                 refine_result = Some(refine.clone());
@@ -406,8 +366,11 @@ impl TemplateTrackerWorker {
                     status.source = Some(TrackingSource::GlobalRelocate);
                     status.match_score = Some(candidate.score);
                     status.message = format!(
-                        "全局重定位成功，RGB 得分 {:.3}，坐标 {:.0}, {:.0}。",
-                        candidate.score, candidate.world.x, candidate.world.y
+                        "全局重定位成功，{}得分 {:.3}，坐标 {:.0}, {:.0}。",
+                        self.score_label(),
+                        candidate.score,
+                        candidate.world.x,
+                        candidate.world.y
                     );
                     locate_summary = Self::locate_success_summary("全局", &candidate);
                     estimate = Some(self.commit_success(candidate, TrackingSource::GlobalRelocate));
@@ -436,9 +399,7 @@ impl TemplateTrackerWorker {
         let debug = self.debug_enabled.then(|| {
             self.build_debug_snapshot(
                 &captured,
-                &captured,
                 global_result.as_ref(),
-                None,
                 refine_result.as_ref().or(local_result.as_ref()),
                 estimate.as_ref(),
                 probe_sample.as_ref(),
@@ -452,235 +413,19 @@ impl TemplateTrackerWorker {
         })
     }
 
-    #[cfg(not(feature = "ai-burn"))]
-    fn run_frame(&mut self) -> Result<TrackingTick> {
-        self.state.begin_frame();
-        let probe_sample = self
-            .presence_detector
-            .as_ref()
-            .map(MinimapPresenceDetector::sample)
-            .transpose()?;
-        if let Some(sample) = probe_sample.as_ref().filter(|sample| !sample.present) {
-            let mut status = self.base_status();
-            status.probe_summary = self.probe_summary(Some(sample));
-            let estimate = self.apply_probe_absent_fallback(&mut status);
-            status.locate_summary = estimate.as_ref().map_or_else(
-                || "F1-P 标签探针未命中，已阻止定位".to_owned(),
-                |estimate| {
-                    format!(
-                        "F1-P 标签探针未命中，已阻止定位，惯性保位 @ {:.0}, {:.0}",
-                        estimate.world.x, estimate.world.y
-                    )
-                },
-            );
-            let debug = self
-                .debug_enabled
-                .then(|| self.build_probe_miss_debug_snapshot(sample, estimate.as_ref()));
-            return Ok(TrackingTick {
-                status,
-                estimate,
-                debug,
-            });
-        }
-
-        let captured = self.capture.capture_gray()?;
-        let (local_template, global_template, coarse_template) =
-            prepare_capture_templates(&captured, &self.config, &self.pyramid);
-
-        let mut status = self.base_status();
-        status.probe_summary = self.probe_summary(probe_sample.as_ref());
-        let mut estimate = None;
-        let mut global_result = None;
-        let mut refine_crop = None;
-        let mut refine_result = None;
-        let mut local_result = None;
-        let mut locate_summary = "等待定位".to_owned();
-
-        if self.config.local_search.enabled && matches!(self.state.stage, SearchStage::LocalTrack) {
-            if let Some(last_world) = self.state.last_world {
-                let crop = crop_around_center(
-                    &self.pyramid.local.image,
-                    center_to_scaled(last_world, self.pyramid.local.scale),
-                    self.config.local_search.radius_px / self.pyramid.local.scale.max(1),
-                    local_template.width(),
-                    local_template.height(),
-                )?;
-                let result = self.locate_local_template(
-                    &crop.image,
-                    &local_template,
-                    self.config.template.local_match_threshold,
-                    crop.origin_x,
-                    crop.origin_y,
-                    self.pyramid.local.scale,
-                )?;
-
-                refine_crop = Some(crop.clone());
-                local_result = Some(result.clone());
-                if let (Some(candidate), Some(last_world)) =
-                    (result.accepted.clone(), self.state.last_world)
-                {
-                    match local_candidate_decision(
-                        last_world,
-                        candidate.world,
-                        self.config.local_search.max_accepted_jump_px,
-                        self.state.reacquire_anchor,
-                        self.config.local_search.reacquire_jump_threshold_px,
-                    ) {
-                        LocalCandidateDecision::Accept => {
-                            status.source = Some(TrackingSource::LocalTrack);
-                            status.match_score = Some(candidate.score);
-                            status.message = format!(
-                                "局部模板锁定成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
-                                candidate.score, candidate.world.x, candidate.world.y
-                            );
-                            locate_summary = Self::locate_success_summary("局部", &candidate);
-                            estimate =
-                                Some(self.commit_success(candidate, TrackingSource::LocalTrack));
-                        }
-                        LocalCandidateDecision::ForceGlobalRelocate { jump, .. } => {
-                            self.state.force_global_relocate();
-                            forced_global_jump = Some(jump);
-                        }
-                        LocalCandidateDecision::Reject => {}
-                    }
-                }
-
-                if estimate.is_none() {
-                    if let Some(jump) = forced_global_jump {
-                        status.message = format!(
-                            "小地图恢复后局部模板候选跳变 {:.0}，超过阈值 {}，切回全局重定位。",
-                            jump, self.config.local_search.reacquire_jump_threshold_px
-                        );
-                    } else {
-                        let switched = self
-                            .state
-                            .increment_local_fail(self.config.local_search.lock_fail_threshold);
-                        status.message = format!(
-                            "局部模板锁定失败，第 {} 次重试。",
-                            self.state.local_fail_streak
-                        );
-                        if switched {
-                            status.message = "局部锁定连续失败，切回全局重定位。".to_owned();
-                        }
-                    }
-                }
-            }
-        }
-
-        if estimate.is_none() {
-            let result =
-                self.locate_global_template(&coarse_template, &global_template, &local_template)?;
-            global_result = Some(result.clone());
-
-            if let Some(coarse) = result.accepted {
-                let crop = crop_around_center(
-                    &self.pyramid.local.image,
-                    center_to_scaled(coarse.world, self.pyramid.local.scale),
-                    self.config.template.global_refine_radius_px / self.pyramid.local.scale.max(1),
-                    local_template.width(),
-                    local_template.height(),
-                )?;
-                let refine = self.locate_local_template(
-                    &crop.image,
-                    &local_template,
-                    self.config.template.global_match_threshold,
-                    crop.origin_x,
-                    crop.origin_y,
-                    self.pyramid.local.scale,
-                )?;
-
-                refine_crop = Some(crop.clone());
-                refine_result = Some(refine.clone());
-                if let Some(candidate) = refine.accepted.or(Some(coarse)) {
-                    status.source = Some(TrackingSource::GlobalRelocate);
-                    status.match_score = Some(candidate.score);
-                    status.message = format!(
-                        "全局重定位成功，得分 {:.3}，坐标 {:.0}, {:.0}。",
-                        candidate.score, candidate.world.x, candidate.world.y
-                    );
-                    locate_summary = Self::locate_success_summary("全局", &candidate);
-                    estimate = Some(self.commit_success(candidate, TrackingSource::GlobalRelocate));
-                }
-            }
-        }
-
-        if estimate.is_none() {
-            locate_summary = Self::locate_failure_summary(
-                "全局",
-                refine_result.as_ref().or(global_result.as_ref()),
-            );
-            estimate = self.apply_inertial_fallback(&mut status);
-            if let Some(position) = estimate.as_ref() {
-                locate_summary = Self::with_inertial_suffix(&locate_summary, position);
-            }
-        }
-
-        if estimate.is_none() {
-            status.source = None;
-            status.match_score = None;
-            status.message = "当前帧未找到可靠匹配，等待下一帧。".to_owned();
-        }
-        status.locate_summary = locate_summary;
-
-        let debug = self.debug_enabled.then(|| {
-            self.build_debug_snapshot(
-                &captured,
-                &global_template,
-                global_result.as_ref(),
-                refine_crop.as_ref(),
-                refine_result.as_ref().or(local_result.as_ref()),
-                estimate.as_ref(),
-                probe_sample.as_ref(),
-            )
-        });
-
-        Ok(TrackingTick {
-            status,
-            estimate,
-            debug,
-        })
-    }
-
-    #[cfg(feature = "ai-burn")]
-    fn locate_global_template(
-        &self,
-        coarse_template: &PreparedTemplate,
-        global_template: &PreparedTemplate,
-        local_template: &PreparedTemplate,
-    ) -> Result<LocateResult> {
+    fn locate_global_template(&self, templates: &PreparedCaptureTemplates) -> Result<LocateResult> {
         locate_global_template_runtime(
             &self.matcher,
             &self.color_pyramid,
             &self.config.template,
-            coarse_template,
-            global_template,
-            local_template,
+            &templates.coarse,
+            &templates.global,
+            &templates.local,
         )
     }
 
-    #[cfg(not(feature = "ai-burn"))]
-    fn locate_global_template(
-        &self,
-        coarse_template: &GrayImage,
-        global_template: &GrayImage,
-        local_template: &GrayImage,
-    ) -> Result<LocateResult> {
-        let _ = (coarse_template, global_template, local_template);
-        anyhow::bail!("模板匹配引擎当前二进制未启用 `ai-burn` 特性")
-    }
-
-    #[cfg(not(feature = "ai-burn"))]
-    fn locate_local_template(
-        &self,
-        image: &GrayImage,
-        template: &GrayImage,
-        threshold: f32,
-        origin_x: u32,
-        origin_y: u32,
-        scale: u32,
-    ) -> Result<LocateResult> {
-        let _ = (image, template, threshold, origin_x, origin_y, scale);
-        anyhow::bail!("模板匹配引擎当前二进制未启用 `ai-burn` 特性")
+    fn score_label(&self) -> &'static str {
+        template_mode_score_label(self.config.template.input_mode)
     }
 
     fn base_status(&self) -> TrackingStatus {
@@ -781,9 +526,7 @@ impl TemplateTrackerWorker {
     fn build_debug_snapshot(
         &self,
         captured: &GrayImage,
-        _global_template: &GrayImage,
         global_result: Option<&LocateResult>,
-        _refine_crop: Option<&SearchCrop>,
         refine_result: Option<&LocateResult>,
         estimate: Option<&PositionEstimate>,
         probe_sample: Option<&MinimapPresenceSample>,
@@ -817,10 +560,12 @@ impl TemplateTrackerWorker {
                     |world| format!("{:.0}, {:.0}", world.x, world.y),
                 ),
             ),
+            DebugField::new("设备", self.matcher.device_label()),
+            DebugField::new(
+                "输入模式",
+                template_mode_label(self.config.template.input_mode),
+            ),
         ];
-
-        #[cfg(feature = "ai-burn")]
-        fields.push(DebugField::new("设备", self.matcher.device_label()));
 
         if let Some(result) = global_result {
             fields.push(DebugField::new(
@@ -874,10 +619,12 @@ impl TemplateTrackerWorker {
                     |world| format!("{:.0}, {:.0}", world.x, world.y),
                 ),
             ),
+            DebugField::new("设备", self.matcher.device_label()),
+            DebugField::new(
+                "输入模式",
+                template_mode_label(self.config.template.input_mode),
+            ),
         ];
-
-        #[cfg(feature = "ai-burn")]
-        fields.push(DebugField::new("设备", self.matcher.device_label()));
 
         if let Some(detector) = self.presence_detector.as_ref() {
             fields.extend(detector.debug_fields(sample));
@@ -909,7 +656,6 @@ fn coarse_refine_radius_px(config: &TemplateTrackingConfig) -> u32 {
     config.global_refine_radius_px.max(384)
 }
 
-#[cfg(feature = "ai-burn")]
 fn coarse_peak_suppression_radius(
     config: &TemplateTrackingConfig,
     coarse_scale: u32,
@@ -921,7 +667,6 @@ fn coarse_peak_suppression_radius(
         .max(1)
 }
 
-#[cfg(feature = "ai-burn")]
 fn coarse_peak_threshold(result: &LocateResult, config: &TemplateTrackingConfig) -> f32 {
     let relaxed_floor = (config.global_match_threshold - TEMPLATE_COARSE_THRESHOLD_RELAX_MARGIN)
         .max(TEMPLATE_MIN_COARSE_CANDIDATE_THRESHOLD);
@@ -929,7 +674,6 @@ fn coarse_peak_threshold(result: &LocateResult, config: &TemplateTrackingConfig)
         .clamp(relaxed_floor, config.global_match_threshold)
 }
 
-#[cfg(feature = "ai-burn")]
 fn match_candidate_from_result(
     result: &LocateResult,
     origin_x: u32,
@@ -947,7 +691,6 @@ fn match_candidate_from_result(
     })
 }
 
-#[cfg(feature = "ai-burn")]
 fn coarse_peak_candidates(
     result: &LocateResult,
     config: &TemplateTrackingConfig,
@@ -1009,7 +752,6 @@ fn coarse_peak_candidates(
     candidates
 }
 
-#[cfg(feature = "ai-burn")]
 fn locate_global_template_runtime(
     matcher: &TemplateMatcher,
     color_pyramid: &ColorMapPyramid,
@@ -1042,18 +784,22 @@ fn locate_global_template_runtime(
     let global_color_mask = build_mask(
         global_template.width(),
         global_template.height(),
-        normalized_inner_radius(config.mask_inner_radius, config.mask_outer_radius),
-        1.0,
+        config
+            .mask_inner_radius
+            .clamp(0.0, TEMPLATE_MATCH_MAP_OUTER_RADIUS),
+        TEMPLATE_MATCH_MAP_OUTER_RADIUS,
     );
     let local_color_mask = build_mask(
         local_template.width(),
         local_template.height(),
-        normalized_inner_radius(config.mask_inner_radius, config.mask_outer_radius),
-        1.0,
+        config
+            .mask_inner_radius
+            .clamp(0.0, TEMPLATE_MATCH_MAP_OUTER_RADIUS),
+        TEMPLATE_MATCH_MAP_OUTER_RADIUS,
     );
     let mut best_refined = None;
     let mut best_refined_score = f32::MIN;
-    let mut refined_candidates = Vec::new();
+    let mut global_refined_candidates = Vec::new();
     for candidate in coarse_candidates {
         let region = search_region_around_center(
             color_pyramid.global.image.width(),
@@ -1063,13 +809,10 @@ fn locate_global_template_runtime(
             global_template.width(),
             global_template.height(),
         )?;
-        let crop = crop_search_region_rgba(&color_pyramid.global.image, region)?;
-        let refined = matcher.locate_global_crop_prepared(
-            &crop.image,
+        let refined = matcher.locate_global_region_prepared(
+            region,
             global_template,
             config.global_match_threshold,
-            crop.origin_x,
-            crop.origin_y,
             color_pyramid.global.scale,
         )?;
         if refined.best_score > best_refined_score {
@@ -1077,10 +820,47 @@ fn locate_global_template_runtime(
             best_refined = Some(refined.clone());
         }
 
-        let Some(accepted) = refined.accepted.as_ref() else {
+        if refined.accepted.is_none() {
             continue;
-        };
+        }
 
+        global_refined_candidates.push((candidate.score, refined));
+    }
+
+    if global_refined_candidates.is_empty() {
+        if let Some(best_refined) = best_refined {
+            if best_refined.best_score > coarse.best_score {
+                return Ok(best_refined);
+            }
+        }
+        return Ok(coarse);
+    }
+
+    global_refined_candidates.sort_by(|(left_coarse, left), (right_coarse, right)| {
+        right
+            .best_score
+            .total_cmp(&left.best_score)
+            .then_with(|| right_coarse.total_cmp(left_coarse))
+            .then(Ordering::Equal)
+    });
+
+    let best_global_score = global_refined_candidates
+        .first()
+        .map(|(_, result)| result.best_score)
+        .unwrap_or(f32::MIN);
+    let shortlist_threshold = best_global_score - TEMPLATE_LOCAL_RERANK_GLOBAL_MARGIN;
+    let shortlisted_candidates = global_refined_candidates
+        .into_iter()
+        .filter(|(_, result)| result.best_score >= shortlist_threshold)
+        .take(TEMPLATE_LOCAL_RERANK_MAX_CANDIDATES)
+        .collect::<Vec<_>>();
+
+    let mut refined_candidates = Vec::new();
+    for (coarse_score, refined) in shortlisted_candidates {
+        let accepted = refined
+            .accepted
+            .as_ref()
+            .expect("global shortlist should only include accepted candidates");
         let local_region = search_region_around_center(
             color_pyramid.local.image.width(),
             color_pyramid.local.image.height(),
@@ -1089,13 +869,10 @@ fn locate_global_template_runtime(
             local_template.width(),
             local_template.height(),
         )?;
-        let local_crop = crop_search_region_rgba(&color_pyramid.local.image, local_region)?;
-        let local_refined = matcher.locate_local_prepared(
-            &local_crop.image,
+        let local_refined = matcher.locate_local_region_prepared(
+            local_region,
             local_template,
             config.global_match_threshold,
-            local_crop.origin_x,
-            local_crop.origin_y,
             color_pyramid.local.scale,
         )?;
         let final_result = if local_refined.accepted.is_some() {
@@ -1103,15 +880,15 @@ fn locate_global_template_runtime(
         } else {
             refined.clone()
         };
-        if final_result.best_score > best_refined_score {
-            best_refined_score = final_result.best_score;
-            best_refined = Some(final_result.clone());
-        }
         let final_world = final_result
             .accepted
             .as_ref()
             .map(|candidate| candidate.world)
             .unwrap_or(accepted.world);
+        if final_result.best_score > best_refined_score {
+            best_refined_score = final_result.best_score;
+            best_refined = Some(final_result.clone());
+        }
 
         let global_color_score = scaled_color_score(
             &color_pyramid.global,
@@ -1131,11 +908,11 @@ fn locate_global_template_runtime(
             + refined.best_score * TEMPLATE_RERANK_GLOBAL_SCORE_WEIGHT
             + global_color_score * TEMPLATE_RERANK_GLOBAL_COLOR_WEIGHT
             + local_color_score * TEMPLATE_RERANK_LOCAL_COLOR_WEIGHT
-            + candidate.score * TEMPLATE_RERANK_COARSE_WEIGHT)
+            + coarse_score * TEMPLATE_RERANK_COARSE_WEIGHT)
             .clamp(0.0, 1.0);
         refined_candidates.push(TemplateRefinedCandidate {
             result: final_result,
-            coarse_score: candidate.score,
+            coarse_score,
             global_score: refined.best_score,
             global_color_score,
             local_color_score,
@@ -1173,59 +950,26 @@ pub fn rebuild_template_engine_cache(workspace: &WorkspaceSnapshot) -> Result<()
         "rebuilding template tracker cache"
     );
     clear_match_pyramid_caches(workspace)?;
-
-    #[cfg(feature = "ai-burn")]
     clear_tensor_caches_by_prefix(workspace, "template-local-search")?;
-    #[cfg(feature = "ai-burn")]
     clear_tensor_caches_by_prefix(workspace, "template-global-search")?;
-    #[cfg(feature = "ai-burn")]
     clear_tensor_caches_by_prefix(workspace, "template-coarse-search")?;
-
-    #[cfg(feature = "ai-burn")]
-    let cache_key = tracker_map_cache_key(workspace)?;
-    #[cfg(feature = "ai-burn")]
-    let color_pyramid = load_logic_color_map_pyramid(workspace)?;
-
-    #[cfg(not(feature = "ai-burn"))]
-    let _ = load_or_build_match_pyramid(workspace)?;
-
-    #[cfg(feature = "ai-burn")]
-    {
-        let masks = build_template_masks(&workspace.config);
-        let _ = TemplateMatcher::new_cached(
-            workspace,
-            &workspace.config.template,
-            &color_pyramid,
-            &masks,
-            &cache_key,
-        )?;
-    }
+    let cache_key = template_mode_cache_key(
+        &tracker_map_cache_key(workspace)?,
+        workspace.config.template.input_mode,
+    );
+    let color_pyramid =
+        prepare_template_color_map_pyramid(workspace, workspace.config.template.input_mode)?;
+    let masks = build_template_masks(&workspace.config);
+    let _ = TemplateMatcher::new_cached(
+        workspace,
+        &workspace.config.template,
+        &color_pyramid,
+        &masks,
+        cache_key.as_str(),
+    )?;
 
     info!("rebuild of template tracker cache completed");
     Ok(())
-}
-
-#[cfg(not(feature = "ai-burn"))]
-fn prepare_capture_templates(
-    captured: &GrayImage,
-    config: &AppConfig,
-    pyramid: &MapPyramid,
-) -> (GrayImage, GrayImage, GrayImage) {
-    let local_square = capture_template_inner_square(
-        captured,
-        config.template.mask_inner_radius,
-        config.template.mask_outer_radius,
-    );
-    let annulus = capture_template_annulus(
-        captured,
-        config.template.mask_inner_radius,
-        config.template.mask_outer_radius,
-    );
-    (
-        prepare_square_template(&local_square, config.view_size, pyramid.local.scale),
-        prepare_annulus_template(&annulus, config.view_size, pyramid.global.scale),
-        prepare_annulus_template(&annulus, config.view_size, pyramid.coarse.scale),
-    )
 }
 
 fn prepare_color_capture_templates(
@@ -1269,49 +1013,65 @@ fn prepare_color_capture_templates(
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-#[cfg(not(feature = "ai-burn"))]
-fn prepare_capture_template(
-    captured: &GrayImage,
-    view_size: u32,
-    scale: u32,
-    mask_inner_radius: f32,
-    mask_outer_radius: f32,
-) -> GrayImage {
-    let square = capture_template_inner_square(captured, mask_inner_radius, mask_outer_radius);
-    prepare_square_template(&square, view_size, scale)
+fn template_mode_label(mode: TemplateInputMode) -> &'static str {
+    match mode {
+        TemplateInputMode::Color => "彩色",
+        TemplateInputMode::Grayscale => "灰度",
+    }
 }
 
-#[cfg(not(feature = "ai-burn"))]
-fn prepare_square_template(square: &GrayImage, view_size: u32, scale: u32) -> GrayImage {
-    let template_size = scaled_dimension(view_size.max(1), scale.max(1));
-    let resized = if square.width() == template_size && square.height() == template_size {
-        square.clone()
-    } else {
-        image::imageops::resize(
-            square,
-            template_size,
-            template_size,
-            image::imageops::FilterType::Triangle,
-        )
-    };
-    build_match_representation(&resized)
+fn template_mode_score_label(mode: TemplateInputMode) -> &'static str {
+    template_mode_label(mode)
 }
 
-#[cfg(not(feature = "ai-burn"))]
-fn prepare_annulus_template(square: &GrayImage, view_size: u32, scale: u32) -> GrayImage {
-    let template_size = scaled_dimension(view_size.max(1), scale.max(1));
-    let resized = if square.width() == template_size && square.height() == template_size {
-        square.clone()
-    } else {
-        image::imageops::resize(
-            square,
-            template_size,
-            template_size,
-            image::imageops::FilterType::Triangle,
-        )
+fn template_mode_cache_key(base: &str, mode: TemplateInputMode) -> String {
+    let suffix = match mode {
+        TemplateInputMode::Color => "color",
+        TemplateInputMode::Grayscale => "grayscale",
     };
-    build_match_representation(&resized)
+    format!("{base}-{suffix}")
+}
+
+fn prepare_template_capture_input(captured: &RgbaImage, mode: TemplateInputMode) -> RgbaImage {
+    match mode {
+        TemplateInputMode::Color => captured.clone(),
+        TemplateInputMode::Grayscale => rgba_to_luma_rgba(captured),
+    }
+}
+
+fn prepare_template_color_map_pyramid(
+    workspace: &WorkspaceSnapshot,
+    mode: TemplateInputMode,
+) -> Result<ColorMapPyramid> {
+    let pyramid = load_logic_color_map_pyramid(workspace)?;
+    match mode {
+        TemplateInputMode::Color => Ok(pyramid),
+        TemplateInputMode::Grayscale => Ok(ColorMapPyramid {
+            local: ScaledColorMap {
+                scale: pyramid.local.scale,
+                image: rgba_to_luma_rgba(&pyramid.local.image),
+            },
+            global: ScaledColorMap {
+                scale: pyramid.global.scale,
+                image: rgba_to_luma_rgba(&pyramid.global.image),
+            },
+            coarse: ScaledColorMap {
+                scale: pyramid.coarse.scale,
+                image: rgba_to_luma_rgba(&pyramid.coarse.image),
+            },
+        }),
+    }
+}
+
+fn rgba_to_luma_rgba(image: &RgbaImage) -> RgbaImage {
+    RgbaImage::from_fn(image.width(), image.height(), |x, y| {
+        let [r, g, b, a] = image.get_pixel(x, y).0;
+        if a == 0 {
+            return Rgba([0, 0, 0, 0]);
+        }
+        let luma = ((u32::from(r) * 77 + u32::from(g) * 150 + u32::from(b) * 29 + 128) >> 8) as u8;
+        Rgba([luma, luma, luma, a])
+    })
 }
 
 fn build_template_masks(config: &AppConfig) -> MaskSet {
@@ -1321,19 +1081,33 @@ fn build_template_masks(config: &AppConfig) -> MaskSet {
     let local_size = scaled_dimension(config.view_size.max(1), local_scale);
     let global_size = scaled_dimension(config.view_size.max(1), global_scale);
     let coarse_size = scaled_dimension(config.view_size.max(1), coarse_scale);
-    let annulus_inner = normalized_inner_radius(
-        config.template.mask_inner_radius,
-        config.template.mask_outer_radius,
-    );
+    let annulus_inner = config
+        .template
+        .mask_inner_radius
+        .clamp(0.0, TEMPLATE_MATCH_MAP_OUTER_RADIUS);
 
     MaskSet {
-        local: build_mask(local_size, local_size, annulus_inner, 1.0),
-        global: build_mask(global_size, global_size, annulus_inner, 1.0),
-        coarse: build_mask(coarse_size, coarse_size, annulus_inner, 1.0),
+        local: build_mask(
+            local_size,
+            local_size,
+            annulus_inner,
+            TEMPLATE_MATCH_MAP_OUTER_RADIUS,
+        ),
+        global: build_mask(
+            global_size,
+            global_size,
+            annulus_inner,
+            TEMPLATE_MATCH_MAP_OUTER_RADIUS,
+        ),
+        coarse: build_mask(
+            coarse_size,
+            coarse_size,
+            annulus_inner,
+            TEMPLATE_MATCH_MAP_OUTER_RADIUS,
+        ),
     }
 }
 
-#[cfg(feature = "ai-burn")]
 impl TemplateMatcher {
     #[allow(dead_code)]
     fn new(
@@ -1628,6 +1402,7 @@ impl TemplateMatcher {
         })
     }
 
+    #[allow(unreachable_patterns)]
     fn locate_coarse_prepared(
         &self,
         template: &PreparedTemplate,
@@ -1656,6 +1431,36 @@ impl TemplateMatcher {
         }
     }
 
+    #[allow(unreachable_patterns)]
+    fn locate_global_region_prepared(
+        &self,
+        region: SearchRegion,
+        template: &PreparedTemplate,
+        threshold: f32,
+        scale: u32,
+    ) -> Result<LocateResult> {
+        match (self, template) {
+            (Self::NdArray(matcher), PreparedTemplate::NdArray(template)) => {
+                matcher.locate_global_region_prepared(region, template, threshold, scale)
+            }
+            #[cfg(burn_cuda_backend)]
+            (Self::Cuda(matcher), PreparedTemplate::Cuda(template)) => {
+                matcher.locate_global_region_prepared(region, template, threshold, scale)
+            }
+            #[cfg(burn_vulkan_backend)]
+            (Self::Vulkan(matcher), PreparedTemplate::Vulkan(template)) => {
+                matcher.locate_global_region_prepared(region, template, threshold, scale)
+            }
+            #[cfg(burn_metal_backend)]
+            (Self::Metal(matcher), PreparedTemplate::Metal(template)) => {
+                matcher.locate_global_region_prepared(region, template, threshold, scale)
+            }
+            _ => anyhow::bail!("prepared template backend does not match matcher backend"),
+        }
+    }
+
+    #[allow(unreachable_patterns)]
+    #[cfg_attr(not(test), allow(dead_code))]
     fn locate_global_crop_prepared(
         &self,
         image: &RgbaImage,
@@ -1681,6 +1486,36 @@ impl TemplateMatcher {
         }
     }
 
+    #[allow(unreachable_patterns)]
+    fn locate_local_region_prepared(
+        &self,
+        region: SearchRegion,
+        template: &PreparedTemplate,
+        threshold: f32,
+        scale: u32,
+    ) -> Result<LocateResult> {
+        match (self, template) {
+            (Self::NdArray(matcher), PreparedTemplate::NdArray(template)) => {
+                matcher.locate_local_region_prepared(region, template, threshold, scale)
+            }
+            #[cfg(burn_cuda_backend)]
+            (Self::Cuda(matcher), PreparedTemplate::Cuda(template)) => {
+                matcher.locate_local_region_prepared(region, template, threshold, scale)
+            }
+            #[cfg(burn_vulkan_backend)]
+            (Self::Vulkan(matcher), PreparedTemplate::Vulkan(template)) => {
+                matcher.locate_local_region_prepared(region, template, threshold, scale)
+            }
+            #[cfg(burn_metal_backend)]
+            (Self::Metal(matcher), PreparedTemplate::Metal(template)) => {
+                matcher.locate_local_region_prepared(region, template, threshold, scale)
+            }
+            _ => anyhow::bail!("prepared template backend does not match matcher backend"),
+        }
+    }
+
+    #[allow(unreachable_patterns)]
+    #[cfg_attr(not(test), allow(dead_code))]
     fn locate_local_prepared(
         &self,
         image: &RgbaImage,
@@ -1711,7 +1546,6 @@ impl TemplateMatcher {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 impl PreparedTemplate {
     fn image(&self) -> &RgbaImage {
         match self {
@@ -1734,7 +1568,6 @@ impl PreparedTemplate {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 impl<B> BurnTemplateMatcher<B>
 where
     B: Backend<FloatElem = f32>,
@@ -1748,12 +1581,17 @@ where
         pyramid: &ColorMapPyramid,
         masks: &MaskSet,
     ) -> Result<Self> {
+        let local_search = SearchTensorCache::<B>::from_rgba_image(&pyramid.local.image, &device)?;
+        let global_search =
+            SearchTensorCache::<B>::from_rgba_image(&pyramid.global.image, &device)?;
         let coarse_search =
             SearchTensorCache::<B>::from_rgba_image(&pyramid.coarse.image, &device)?;
         Self::from_parts(
             device,
             device_label,
             chunk_budget_bytes,
+            local_search,
+            global_search,
             coarse_search,
             masks,
         )
@@ -1768,6 +1606,20 @@ where
         masks: &MaskSet,
         map_cache_key: &str,
     ) -> Result<Self> {
+        let local_search = load_or_build_template_search::<B>(
+            workspace,
+            "template-local-search",
+            map_cache_key,
+            &pyramid.local.image,
+            &device,
+        )?;
+        let global_search = load_or_build_template_search::<B>(
+            workspace,
+            "template-global-search",
+            map_cache_key,
+            &pyramid.global.image,
+            &device,
+        )?;
         let coarse_search = load_or_build_template_search::<B>(
             workspace,
             "template-coarse-search",
@@ -1779,6 +1631,8 @@ where
             device,
             device_label,
             chunk_budget_bytes,
+            local_search,
+            global_search,
             coarse_search,
             masks,
         )
@@ -1788,12 +1642,26 @@ where
         device: B::Device,
         device_label: String,
         chunk_budget_bytes: Option<usize>,
+        local_search: SearchTensorCache<B>,
+        global_search: SearchTensorCache<B>,
         coarse_search: SearchTensorCache<B>,
         masks: &MaskSet,
     ) -> Result<Self> {
         let global_mask_squared = mask_squared_tensor::<B>(&masks.global, &device);
         let coarse_mask_squared = mask_squared_tensor::<B>(&masks.coarse, &device);
         let local_mask_squared = mask_squared_tensor::<B>(&masks.local, &device);
+        let local_search_patch_energy = conv2d(
+            local_search.squared.clone(),
+            local_mask_squared.clone(),
+            None::<Tensor<B, 1>>,
+            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
+        );
+        let global_search_patch_energy = conv2d(
+            global_search.squared.clone(),
+            global_mask_squared.clone(),
+            None::<Tensor<B, 1>>,
+            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
+        );
         let coarse_search_patch_energy = conv2d(
             coarse_search.squared.clone(),
             coarse_mask_squared.clone(),
@@ -1804,7 +1672,11 @@ where
         Ok(Self {
             device,
             device_label,
+            local_search,
+            global_search,
             coarse_search,
+            local_search_patch_energy,
+            global_search_patch_energy,
             global_mask_squared,
             coarse_mask_squared,
             coarse_search_patch_energy,
@@ -1906,6 +1778,32 @@ where
         )
     }
 
+    fn locate_global_region_prepared(
+        &self,
+        region: SearchRegion,
+        template: &BurnPreparedTemplate<B>,
+        threshold: f32,
+        scale: u32,
+    ) -> Result<LocateResult> {
+        let search = self.global_search.crop(region)?;
+        let patch_energy = cropped_patch_energy(
+            &self.global_search_patch_energy,
+            region,
+            template.width(),
+            template.height(),
+        );
+        self.locate_cached(
+            &search,
+            template,
+            patch_energy,
+            false,
+            threshold,
+            region.origin_x,
+            region.origin_y,
+            scale,
+        )
+    }
+
     #[allow(dead_code)]
     fn locate_local(
         &self,
@@ -1932,6 +1830,32 @@ where
         let search = SearchTensorCache::<B>::from_rgba_image(image, &self.device)?;
         self.locate_cached(
             &search, template, None, false, threshold, origin_x, origin_y, scale,
+        )
+    }
+
+    fn locate_local_region_prepared(
+        &self,
+        region: SearchRegion,
+        template: &BurnPreparedTemplate<B>,
+        threshold: f32,
+        scale: u32,
+    ) -> Result<LocateResult> {
+        let search = self.local_search.crop(region)?;
+        let patch_energy = cropped_patch_energy(
+            &self.local_search_patch_energy,
+            region,
+            template.width(),
+            template.height(),
+        );
+        self.locate_cached(
+            &search,
+            template,
+            patch_energy,
+            false,
+            threshold,
+            region.origin_x,
+            region.origin_y,
+            scale,
         )
     }
 
@@ -2030,7 +1954,6 @@ where
     }
 }
 
-#[cfg(feature = "ai-burn")]
 impl<B> SearchTensorCache<B>
 where
     B: Backend<FloatElem = f32>,
@@ -2081,9 +2004,58 @@ where
         let squared = tensor_to_flat_f32(self.squared.clone())?;
         PersistedTensorCache::from_parts(self.width, self.height, 3, image, squared)
     }
+
+    fn crop(&self, region: SearchRegion) -> Result<Self> {
+        let right = region.origin_x.saturating_add(region.width);
+        let bottom = region.origin_y.saturating_add(region.height);
+        if right > self.width || bottom > self.height {
+            anyhow::bail!(
+                "template search crop {}x{} @ {}, {} exceeds search bounds {}x{}",
+                region.width,
+                region.height,
+                region.origin_x,
+                region.origin_y,
+                self.width,
+                self.height
+            );
+        }
+
+        Ok(Self {
+            image: self
+                .image
+                .clone()
+                .narrow(2, region.origin_y as usize, region.height as usize)
+                .narrow(3, region.origin_x as usize, region.width as usize),
+            squared: self
+                .squared
+                .clone()
+                .narrow(2, region.origin_y as usize, region.height as usize)
+                .narrow(3, region.origin_x as usize, region.width as usize),
+            width: region.width,
+            height: region.height,
+        })
+    }
 }
 
-#[cfg(feature = "ai-burn")]
+fn cropped_patch_energy<B>(
+    patch_energy: &Tensor<B, 4>,
+    region: SearchRegion,
+    template_width: u32,
+    template_height: u32,
+) -> Option<Tensor<B, 4>>
+where
+    B: Backend<FloatElem = f32>,
+{
+    let score_width = region.width.checked_sub(template_width)?.checked_add(1)?;
+    let score_height = region.height.checked_sub(template_height)?.checked_add(1)?;
+    Some(
+        patch_energy
+            .clone()
+            .narrow(2, region.origin_y as usize, score_height as usize)
+            .narrow(3, region.origin_x as usize, score_width as usize),
+    )
+}
+
 fn load_or_build_template_search<B>(
     workspace: &WorkspaceSnapshot,
     prefix: &str,
@@ -2122,15 +2094,12 @@ impl TrackingWorker for TemplateTrackerWorker {
     }
 
     fn initial_status(&self) -> TrackingStatus {
-        #[cfg(feature = "ai-burn")]
         let message = format!(
-            "多尺度模板匹配引擎已启动：设备 {}，可用后端 {}，Burn masked NCC 张量匹配 + 局部锁定 / 全局重定位 / 惯性保位。",
+            "多尺度模板匹配引擎已启动：设备 {}，可用后端 {}，输入模式 {}，Burn masked NCC 张量匹配 + 局部锁定 / 全局重定位 / 惯性保位。",
             self.matcher.device_label(),
             available_burn_backends(),
+            template_mode_label(self.config.template.input_mode),
         );
-
-        #[cfg(not(feature = "ai-burn"))]
-        let message = "多尺度模板匹配引擎当前二进制未启用 `ai-burn` 特性。".to_owned();
 
         TrackingStatus::new(TrackerEngineKind::MultiScaleTemplateMatch, message)
     }
@@ -2140,7 +2109,6 @@ impl TrackingWorker for TemplateTrackerWorker {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 fn rgba_image_tensor<B>(image: &RgbaImage, device: &B::Device) -> Tensor<B, 4>
 where
     B: Backend<FloatElem = f32>,
@@ -2154,7 +2122,6 @@ where
     )
 }
 
-#[cfg(feature = "ai-burn")]
 fn mask_squared_tensor<B>(mask: &GrayImage, device: &B::Device) -> Tensor<B, 4>
 where
     B: Backend<FloatElem = f32>,
@@ -2172,7 +2139,6 @@ where
     )
 }
 
-#[cfg(feature = "ai-burn")]
 fn burn_match_chunk_rows(
     chunk_budget_bytes: Option<usize>,
     search_width: u32,
@@ -2207,7 +2173,6 @@ fn burn_match_chunk_rows(
     ((budget_bytes / per_output_row_bytes).max(1) as u32).min(output_height)
 }
 
-#[cfg(feature = "ai-burn")]
 fn locate_cached_in_chunks<B>(
     search: &SearchTensorCache<B>,
     weighted_template: &Tensor<B, 4>,
@@ -2300,7 +2265,6 @@ where
     ))
 }
 
-#[cfg(feature = "ai-burn")]
 fn tensor_to_flat_f32<B>(tensor: Tensor<B, 4>) -> Result<Vec<f32>>
 where
     B: Backend<FloatElem = f32>,
@@ -2311,7 +2275,6 @@ where
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
-#[cfg(feature = "ai-burn")]
 fn tensor_best_match<B>(
     tensor: Tensor<B, 4>,
     score_width: u32,
@@ -2433,7 +2396,7 @@ fn locate_result_from_best(
     }
 }
 
-#[cfg(all(test, feature = "ai-burn", burn_vulkan_backend))]
+#[cfg(all(test, burn_vulkan_backend))]
 mod tests {
     use std::sync::OnceLock;
 
@@ -2508,6 +2471,10 @@ mod tests {
         stress_env_u32("GAME_MAP_TRACKER_STRESS_LOCAL_STEP_MAX", LOCAL_STEP_MAX)
     }
 
+    fn perf_iterations() -> usize {
+        stress_env_usize("GAME_MAP_TRACKER_TEMPLATE_PERF_ITERS", 48)
+    }
+
     fn template_env_f32(name: &str, default: f32) -> f32 {
         std::env::var(name)
             .ok()
@@ -2550,10 +2517,13 @@ mod tests {
                 )
                 .expect("failed to assemble augmented z8 color logic map");
                 let map = imageproc::contrast::equalize_histogram(&raw_map);
-                let color_pyramid = load_logic_color_map_pyramid(&workspace)
-                    .expect("failed to build color pyramid");
-                let map_cache_key =
-                    tracker_map_cache_key(&workspace).expect("failed to compute map cache key");
+                let color_pyramid =
+                    prepare_template_color_map_pyramid(&workspace, config.template.input_mode)
+                        .expect("failed to build template input pyramid");
+                let map_cache_key = template_mode_cache_key(
+                    &tracker_map_cache_key(&workspace).expect("failed to compute map cache key"),
+                    config.template.input_mode,
+                );
                 let masks = build_template_masks(&config);
 
                 TestFixture {
@@ -2583,6 +2553,20 @@ mod tests {
             &fixture.map_cache_key,
         )
         .expect("failed to create Vulkan template matcher")
+    }
+
+    fn matcher_for_cpu(fixture: &TestFixture) -> TemplateMatcher {
+        let mut config = fixture.config.template.clone();
+        config.device = AiDevicePreference::Cpu;
+        config.device_index = 0;
+        TemplateMatcher::new_cached(
+            &fixture.workspace,
+            &config,
+            &fixture.color_pyramid,
+            &fixture.masks,
+            &fixture.map_cache_key,
+        )
+        .expect("failed to create CPU template matcher")
     }
 
     fn within_tolerance(actual: Option<WorldPoint>, expected: (u32, u32), tolerance: f32) -> bool {
@@ -2628,13 +2612,10 @@ mod tests {
                     templates.local.width(),
                     templates.local.height(),
                 )?;
-                let crop = crop_search_region_rgba(&fixture.color_pyramid.local.image, region)?;
-                let result = matcher.locate_local_prepared(
-                    &crop.image,
+                let result = matcher.locate_local_region_prepared(
+                    region,
                     &templates.local,
                     fixture.config.template.local_match_threshold,
-                    crop.origin_x,
-                    crop.origin_y,
                     fixture.color_pyramid.local.scale,
                 )?;
                 if let Some(candidate) = result.accepted.clone() {
@@ -2687,13 +2668,10 @@ mod tests {
                 templates.local.width(),
                 templates.local.height(),
             )?;
-            let crop = crop_search_region_rgba(&fixture.color_pyramid.local.image, region)?;
-            let refine = matcher.locate_local_prepared(
-                &crop.image,
+            let refine = matcher.locate_local_region_prepared(
+                region,
                 &templates.local,
                 fixture.config.template.global_match_threshold,
-                crop.origin_x,
-                crop.origin_y,
                 fixture.color_pyramid.local.scale,
             )?;
             best_score = Some(refine.best_score);
@@ -2786,6 +2764,338 @@ mod tests {
         }
 
         Ok(stats)
+    }
+
+    fn assert_locate_result_close(left: &LocateResult, right: &LocateResult) {
+        assert!(
+            left.best_left.abs_diff(right.best_left) <= 1,
+            "best_left mismatch: left={} right={}",
+            left.best_left,
+            right.best_left
+        );
+        assert!(
+            left.best_top.abs_diff(right.best_top) <= 1,
+            "best_top mismatch: left={} right={}",
+            left.best_top,
+            right.best_top
+        );
+        assert!(
+            (left.best_score - right.best_score).abs() <= 1e-2,
+            "best score mismatch: left={} right={}",
+            left.best_score,
+            right.best_score
+        );
+        assert_eq!(left.accepted.is_some(), right.accepted.is_some());
+        if let (Some(left), Some(right)) = (left.accepted.as_ref(), right.accepted.as_ref()) {
+            assert!(
+                (left.world.x - right.world.x).abs() <= 4.0
+                    && (left.world.y - right.world.y).abs() <= 4.0,
+                "accepted world mismatch: left=({:.3}, {:.3}) right=({:.3}, {:.3})",
+                left.world.x,
+                left.world.y,
+                right.world.x,
+                right.world.y
+            );
+            assert!(
+                (left.score - right.score).abs() <= 1e-2,
+                "accepted score mismatch: left={} right={}",
+                left.score,
+                right.score
+            );
+        }
+    }
+
+    fn assert_locate_result_similar(stage: &str, left: &LocateResult, right: &LocateResult) {
+        assert_eq!(
+            left.best_left, right.best_left,
+            "{stage} best_left mismatch: left={} right={}",
+            left.best_left, right.best_left
+        );
+        assert_eq!(
+            left.best_top, right.best_top,
+            "{stage} best_top mismatch: left={} right={}",
+            left.best_top, right.best_top
+        );
+        assert!(
+            (left.best_score - right.best_score).abs() <= 1e-2,
+            "{stage} best_score mismatch: left={} right={}",
+            left.best_score,
+            right.best_score
+        );
+        assert_eq!(
+            left.accepted.is_some(),
+            right.accepted.is_some(),
+            "{stage} accepted presence mismatch"
+        );
+        if let (Some(left), Some(right)) = (left.accepted.as_ref(), right.accepted.as_ref()) {
+            assert!(
+                (left.world.x - right.world.x).abs() <= 0.5
+                    && (left.world.y - right.world.y).abs() <= 0.5,
+                "{stage} accepted world mismatch: left=({:.3}, {:.3}) right=({:.3}, {:.3})",
+                left.world.x,
+                left.world.y,
+                right.world.x,
+                right.world.y
+            );
+            assert!(
+                (left.score - right.score).abs() <= 1e-2,
+                "{stage} accepted score mismatch: left={} right={}",
+                left.score,
+                right.score
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_and_vulkan_stage_parity_on_template_cases() -> Result<()> {
+        let fixture = fixture();
+        let (ordinal, device_name) = require_vulkan_discrete_ordinal();
+        let cpu = matcher_for_cpu(fixture);
+        let vulkan = matcher_for_vulkan(fixture, ordinal);
+        let case = random_stress_paths(
+            &fixture.map,
+            fixture.config.view_size,
+            1,
+            1,
+            local_step_min(),
+            local_step_max(),
+            0x4350_5556_4b50_4152,
+        )
+        .into_iter()
+        .next()
+        .expect("missing parity case");
+        let target = case.start;
+        let capture = synthetic_capture_rgba_from_map(&fixture.color_map, &fixture.config, target);
+        let cpu_templates =
+            cpu.prepare_capture_templates(&capture, &fixture.config, &fixture.color_pyramid)?;
+        let vulkan_templates =
+            vulkan.prepare_capture_templates(&capture, &fixture.config, &fixture.color_pyramid)?;
+
+        let cpu_coarse = cpu.locate_coarse_prepared(
+            &cpu_templates.coarse,
+            fixture.config.template.global_match_threshold,
+            0,
+            0,
+            fixture.color_pyramid.coarse.scale,
+        )?;
+        let vulkan_coarse = vulkan.locate_coarse_prepared(
+            &vulkan_templates.coarse,
+            fixture.config.template.global_match_threshold,
+            0,
+            0,
+            fixture.color_pyramid.coarse.scale,
+        )?;
+        assert_locate_result_similar(
+            &format!("coarse device={ordinal} ({device_name})"),
+            &cpu_coarse,
+            &vulkan_coarse,
+        );
+
+        let world = WorldPoint::new(target.0 as f32, target.1 as f32);
+        let global_region = search_region_around_center(
+            fixture.color_pyramid.global.image.width(),
+            fixture.color_pyramid.global.image.height(),
+            center_to_scaled(world, fixture.color_pyramid.global.scale),
+            coarse_refine_radius_px(&fixture.config.template)
+                / fixture.color_pyramid.global.scale.max(1),
+            cpu_templates.global.width(),
+            cpu_templates.global.height(),
+        )?;
+        let cpu_global = cpu.locate_global_region_prepared(
+            global_region,
+            &cpu_templates.global,
+            fixture.config.template.global_match_threshold,
+            fixture.color_pyramid.global.scale,
+        )?;
+        let vulkan_global = vulkan.locate_global_region_prepared(
+            global_region,
+            &vulkan_templates.global,
+            fixture.config.template.global_match_threshold,
+            fixture.color_pyramid.global.scale,
+        )?;
+        assert_locate_result_similar(
+            &format!("global device={ordinal} ({device_name})"),
+            &cpu_global,
+            &vulkan_global,
+        );
+
+        let local_region = search_region_around_center(
+            fixture.color_pyramid.local.image.width(),
+            fixture.color_pyramid.local.image.height(),
+            center_to_scaled(world, fixture.color_pyramid.local.scale),
+            fixture.config.local_search.radius_px / fixture.color_pyramid.local.scale.max(1),
+            cpu_templates.local.width(),
+            cpu_templates.local.height(),
+        )?;
+        let cpu_local = cpu.locate_local_region_prepared(
+            local_region,
+            &cpu_templates.local,
+            fixture.config.template.local_match_threshold,
+            fixture.color_pyramid.local.scale,
+        )?;
+        let vulkan_local = vulkan.locate_local_region_prepared(
+            local_region,
+            &vulkan_templates.local,
+            fixture.config.template.local_match_threshold,
+            fixture.color_pyramid.local.scale,
+        )?;
+        assert_locate_result_similar(
+            &format!("local device={ordinal} ({device_name})"),
+            &cpu_local,
+            &vulkan_local,
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn vulkan_discrete_region_cache_matches_crop_path_and_reports_speedup() -> Result<()> {
+        let fixture = fixture();
+        let (ordinal, device_name) = require_vulkan_discrete_ordinal();
+        let (matcher, init_elapsed) = timed(|| matcher_for_vulkan(fixture, ordinal));
+        print_perf_ms("template/vulkan", "matcher_init_perf_compare", init_elapsed);
+
+        let case = random_stress_paths(
+            &fixture.map,
+            fixture.config.view_size,
+            1,
+            1,
+            local_step_min(),
+            local_step_max(),
+            0x564b_5045_5246_5445,
+        )
+        .into_iter()
+        .next()
+        .expect("missing perf case");
+        let capture =
+            synthetic_capture_rgba_from_map(&fixture.color_map, &fixture.config, case.start);
+        let templates =
+            matcher.prepare_capture_templates(&capture, &fixture.config, &fixture.color_pyramid)?;
+        let world = WorldPoint::new(case.start.0 as f32, case.start.1 as f32);
+        let iterations = perf_iterations();
+
+        let local_region = search_region_around_center(
+            fixture.color_pyramid.local.image.width(),
+            fixture.color_pyramid.local.image.height(),
+            center_to_scaled(world, fixture.color_pyramid.local.scale),
+            fixture.config.local_search.radius_px / fixture.color_pyramid.local.scale.max(1),
+            templates.local.width(),
+            templates.local.height(),
+        )?;
+        let local_crop = crop_search_region_rgba(&fixture.color_pyramid.local.image, local_region)?;
+
+        let local_crop_result = matcher.locate_local_prepared(
+            &local_crop.image,
+            &templates.local,
+            fixture.config.template.local_match_threshold,
+            local_crop.origin_x,
+            local_crop.origin_y,
+            fixture.color_pyramid.local.scale,
+        )?;
+        let local_region_result = matcher.locate_local_region_prepared(
+            local_region,
+            &templates.local,
+            fixture.config.template.local_match_threshold,
+            fixture.color_pyramid.local.scale,
+        )?;
+        assert_locate_result_close(&local_crop_result, &local_region_result);
+
+        let (local_crop_perf, local_crop_elapsed) = timed(|| -> Result<()> {
+            for _ in 0..iterations {
+                let _ = matcher.locate_local_prepared(
+                    &local_crop.image,
+                    &templates.local,
+                    fixture.config.template.local_match_threshold,
+                    local_crop.origin_x,
+                    local_crop.origin_y,
+                    fixture.color_pyramid.local.scale,
+                )?;
+            }
+            Ok(())
+        });
+        local_crop_perf?;
+        let (local_region_perf, local_region_elapsed) = timed(|| -> Result<()> {
+            for _ in 0..iterations {
+                let _ = matcher.locate_local_region_prepared(
+                    local_region,
+                    &templates.local,
+                    fixture.config.template.local_match_threshold,
+                    fixture.color_pyramid.local.scale,
+                )?;
+            }
+            Ok(())
+        });
+        local_region_perf?;
+
+        let global_region = search_region_around_center(
+            fixture.color_pyramid.global.image.width(),
+            fixture.color_pyramid.global.image.height(),
+            center_to_scaled(world, fixture.color_pyramid.global.scale),
+            coarse_refine_radius_px(&fixture.config.template)
+                / fixture.color_pyramid.global.scale.max(1),
+            templates.global.width(),
+            templates.global.height(),
+        )?;
+        let global_crop =
+            crop_search_region_rgba(&fixture.color_pyramid.global.image, global_region)?;
+
+        let global_crop_result = matcher.locate_global_crop_prepared(
+            &global_crop.image,
+            &templates.global,
+            fixture.config.template.global_match_threshold,
+            global_crop.origin_x,
+            global_crop.origin_y,
+            fixture.color_pyramid.global.scale,
+        )?;
+        let global_region_result = matcher.locate_global_region_prepared(
+            global_region,
+            &templates.global,
+            fixture.config.template.global_match_threshold,
+            fixture.color_pyramid.global.scale,
+        )?;
+        assert_locate_result_close(&global_crop_result, &global_region_result);
+
+        let (global_crop_perf, global_crop_elapsed) = timed(|| -> Result<()> {
+            for _ in 0..iterations {
+                let _ = matcher.locate_global_crop_prepared(
+                    &global_crop.image,
+                    &templates.global,
+                    fixture.config.template.global_match_threshold,
+                    global_crop.origin_x,
+                    global_crop.origin_y,
+                    fixture.color_pyramid.global.scale,
+                )?;
+            }
+            Ok(())
+        });
+        global_crop_perf?;
+        let (global_region_perf, global_region_elapsed) = timed(|| -> Result<()> {
+            for _ in 0..iterations {
+                let _ = matcher.locate_global_region_prepared(
+                    global_region,
+                    &templates.global,
+                    fixture.config.template.global_match_threshold,
+                    fixture.color_pyramid.global.scale,
+                )?;
+            }
+            Ok(())
+        });
+        global_region_perf?;
+
+        println!(
+            "[template/vulkan][perf-compare] device={} ({}) iterations={} local_crop_ms={:.2} local_region_ms={:.2} local_speedup={:.2}x global_crop_ms={:.2} global_region_ms={:.2} global_speedup={:.2}x",
+            ordinal,
+            device_name,
+            iterations,
+            local_crop_elapsed.as_secs_f64() * 1000.0,
+            local_region_elapsed.as_secs_f64() * 1000.0,
+            local_crop_elapsed.as_secs_f64() / local_region_elapsed.as_secs_f64().max(1e-9),
+            global_crop_elapsed.as_secs_f64() * 1000.0,
+            global_region_elapsed.as_secs_f64() * 1000.0,
+            global_crop_elapsed.as_secs_f64() / global_region_elapsed.as_secs_f64().max(1e-9),
+        );
+
+        Ok(())
     }
 
     #[test]

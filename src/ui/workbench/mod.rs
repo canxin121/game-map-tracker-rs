@@ -29,7 +29,10 @@ use gpui_component::{Root, input::InputEvent};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::{AiDevicePreference, AppConfig, CONFIG_FILE_NAME, CaptureRegion, save_config},
+    config::{
+        AiDevicePreference, AppConfig, CONFIG_FILE_NAME, CaptureRegion, TemplateInputMode,
+        save_config,
+    },
     domain::{
         geometry::WorldPoint,
         marker::{MarkerIconStyle, MarkerStyle},
@@ -66,8 +69,8 @@ use self::{
         BwikiIconPickerItem, ConfigDraft, ConfigFormInputs, DeviceIndexPickerItem,
         DevicePreferencePickerItem, GroupDraft, GroupFormInputs, GroupInlineEditInputs,
         MarkerDraft, MarkerFormInputs, MarkerGroupPickerItem, PagedListState, PlannerRouteDraft,
-        PointReorderTargetItem, RoutePlannerFormInputs, parse_input_value, read_input_value,
-        set_input_value,
+        PointReorderTargetItem, RoutePlannerFormInputs, TemplateInputModePickerItem,
+        parse_input_value, read_input_value, set_input_value,
     },
     minimap_picker::{MinimapRegionPickResult, MinimapRegionPicker},
     page::{MapPage, SettingsPage, WorkbenchPage},
@@ -452,6 +455,8 @@ pub struct TrackerWorkbench {
     minimap_presence_probe_device_index: usize,
     minimap_presence_probe_device_picker: gpui::Entity<SelectState<DevicePreferencePickerItem>>,
     minimap_presence_probe_device_index_picker: gpui::Entity<SelectState<DeviceIndexPickerItem>>,
+    template_input_mode: TemplateInputMode,
+    template_input_mode_picker: gpui::Entity<SelectState<TemplateInputModePickerItem>>,
     template_device_preference: AiDevicePreference,
     template_device_index: usize,
     template_device_picker: gpui::Entity<SelectState<DevicePreferencePickerItem>>,
@@ -548,6 +553,15 @@ impl TrackerWorkbench {
             SelectState::new(
                 Self::device_preference_picker_items(),
                 Some(AiDevicePreference::Cpu),
+                6,
+                window,
+                cx,
+            )
+        });
+        let template_input_mode_picker = cx.new(|cx| {
+            SelectState::new(
+                Self::template_input_mode_picker_items(),
+                Some(TemplateInputMode::Color),
                 6,
                 window,
                 cx,
@@ -712,6 +726,8 @@ impl TrackerWorkbench {
                         .clone(),
                     minimap_presence_probe_device_index_picker:
                         minimap_presence_probe_device_index_picker.clone(),
+                    template_input_mode: TemplateInputMode::Color,
+                    template_input_mode_picker: template_input_mode_picker.clone(),
                     template_device_preference: AiDevicePreference::Cpu,
                     template_device_index: 0,
                     template_device_picker: template_device_picker.clone(),
@@ -842,6 +858,8 @@ impl TrackerWorkbench {
                     minimap_presence_probe_device_index: 0,
                     minimap_presence_probe_device_picker,
                     minimap_presence_probe_device_index_picker,
+                    template_input_mode: TemplateInputMode::Color,
+                    template_input_mode_picker,
                     template_device_preference: AiDevicePreference::Cpu,
                     template_device_index: 0,
                     template_device_picker,
@@ -1124,6 +1142,19 @@ impl TrackerWorkbench {
                 };
                 this.minimap_presence_probe_device_index = *device_index;
                 this.sync_minimap_presence_probe_device_picker_state(window, cx);
+                cx.notify();
+            },
+        ));
+        let template_input_mode_picker = workbench.template_input_mode_picker.clone();
+        workbench.subscriptions.push(cx.subscribe_in(
+            &template_input_mode_picker,
+            window,
+            |this, _, event: &SelectEvent<TemplateInputModePickerItem>, window, cx| {
+                let SelectEvent::Confirm(Some(mode)) = event else {
+                    return;
+                };
+                this.template_input_mode = *mode;
+                this.sync_template_input_mode_picker_state(window, cx);
                 cx.notify();
             },
         ));
@@ -1425,6 +1456,23 @@ impl TrackerWorkbench {
             .collect()
     }
 
+    fn template_input_mode_picker_items() -> Vec<TemplateInputModePickerItem> {
+        vec![
+            TemplateInputModePickerItem::new(
+                TemplateInputMode::Color,
+                "彩色",
+                "默认，保留颜色与亮度信息",
+                "color rgb chroma 彩色 颜色",
+            ),
+            TemplateInputModePickerItem::new(
+                TemplateInputMode::Grayscale,
+                "灰度",
+                "只保留亮度纹理，忽略色差",
+                "grayscale gray mono 灰度 黑白 亮度",
+            ),
+        ]
+    }
+
     fn normalized_device_selection(
         preference: AiDevicePreference,
         device_index: usize,
@@ -1495,6 +1543,27 @@ impl TrackerWorkbench {
                 picker.set_items(index_items.clone(), window, cx);
                 picker.set_selected_value(&device_index, window, cx);
             });
+    }
+
+    fn sync_template_input_mode_picker_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let items = Self::template_input_mode_picker_items();
+        let selected = if items
+            .iter()
+            .any(|item| item.value == self.template_input_mode)
+        {
+            self.template_input_mode
+        } else {
+            TemplateInputMode::Color
+        };
+        self.template_input_mode = selected;
+        self.template_input_mode_picker.update(cx, |picker, cx| {
+            picker.set_items(items.clone(), window, cx);
+            picker.set_selected_value(&selected, window, cx);
+        });
     }
 
     fn sync_template_device_picker_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4994,6 +5063,8 @@ impl TrackerWorkbench {
             window,
             cx,
         );
+        self.template_input_mode = config.template.input_mode;
+        self.sync_template_input_mode_picker_state(window, cx);
         self.template_device_preference = config.template.device;
         self.template_device_index = config.template.device_index;
         self.sync_template_device_picker_state(window, cx);
@@ -5063,6 +5134,7 @@ impl TrackerWorkbench {
                     (!weights_path.is_empty()).then(|| weights_path.to_owned());
             }
             TrackerCacheKind::Template => {
+                config.template.input_mode = self.template_input_mode;
                 config.template.device = self.template_device_preference;
                 config.template.device_index = self.template_device_index;
             }

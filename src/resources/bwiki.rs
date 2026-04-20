@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
-    io::Read,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -1041,16 +1040,15 @@ fn fetch_remote_dataset() -> Result<BwikiDataset> {
 }
 
 fn fetch_remote_text(url: &str) -> Result<String> {
-    let agent = Agent::new();
-    let response = agent
+    let agent = Agent::new_with_defaults();
+    let mut response = agent
         .get(url)
-        .set("User-Agent", USER_AGENT)
+        .header("User-Agent", USER_AGENT)
         .call()
         .with_context(|| format!("failed to fetch BWiki endpoint {url}"))?;
-    let mut reader = response.into_reader();
-    let mut body = String::new();
-    reader
-        .read_to_string(&mut body)
+    let body = response
+        .body_mut()
+        .read_to_string()
         .with_context(|| format!("failed to read BWiki response body {url}"))?;
     let parsed = serde_json::from_str::<ParseResponse>(&body)
         .with_context(|| format!("failed to decode BWiki parse payload {url}"))?;
@@ -1187,16 +1185,15 @@ fn download_icon(cache: &BwikiCachePaths, mark_type: u32, icon_url: &str) -> Res
 }
 
 fn download_binary(url: &str) -> Result<Vec<u8>> {
-    let agent = Agent::new();
-    let response = agent
+    let agent = Agent::new_with_defaults();
+    let mut response = agent
         .get(url)
-        .set("User-Agent", USER_AGENT)
+        .header("User-Agent", USER_AGENT)
         .call()
         .with_context(|| format!("failed to download remote asset {url}"))?;
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .read_to_end(&mut bytes)
+    let bytes = response
+        .body_mut()
+        .read_to_vec()
         .with_context(|| format!("failed to read remote asset body {url}"))?;
     Ok(bytes)
 }

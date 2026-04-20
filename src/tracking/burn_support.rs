@@ -103,26 +103,25 @@ pub(crate) fn available_burn_device_descriptors(
     }
 }
 
-#[cfg(feature = "ai-burn")]
 use anyhow::Result;
-#[cfg(feature = "ai-burn")]
+
+#[cfg(any(burn_cuda_backend, burn_vulkan_backend, burn_metal_backend))]
 use burn::tensor::{Tensor, backend::Backend};
-#[cfg(feature = "ai-burn")]
+
+#[cfg(any(burn_cuda_backend, burn_vulkan_backend, burn_metal_backend))]
 use cubecl_runtime::runtime::Runtime as CubeRuntime;
 
-#[cfg(feature = "ai-burn")]
 use crate::config::{AiTrackingConfig, MinimapPresenceProbeConfig, TemplateTrackingConfig};
 
-#[cfg(all(feature = "ai-burn", burn_cuda_backend))]
+#[cfg(burn_cuda_backend)]
 use burn::backend::cuda::CudaDevice;
-#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
+#[cfg(any(burn_vulkan_backend, burn_metal_backend))]
 use burn::backend::wgpu::WgpuDevice;
-#[cfg(all(feature = "ai-burn", burn_cuda_backend))]
+#[cfg(burn_cuda_backend)]
 use cubecl_cuda::CudaRuntime;
-#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
+#[cfg(any(burn_vulkan_backend, burn_metal_backend))]
 use cubecl_wgpu::WgpuRuntime;
 
-#[cfg(feature = "ai-burn")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BurnDeviceSelection {
     Cpu,
@@ -134,20 +133,18 @@ pub(crate) enum BurnDeviceSelection {
     Metal(WgpuDevice),
 }
 
-#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
+#[cfg(any(burn_vulkan_backend, burn_metal_backend))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BurnWgpuDeviceChoice {
     descriptor: BurnDeviceDescriptor,
     device: WgpuDevice,
 }
 
-#[cfg(feature = "ai-burn")]
 pub(crate) trait BurnDeviceConfig {
     fn device_preference(&self) -> AiDevicePreference;
     fn device_index(&self) -> usize;
 }
 
-#[cfg(feature = "ai-burn")]
 impl BurnDeviceConfig for AiTrackingConfig {
     fn device_preference(&self) -> AiDevicePreference {
         self.device
@@ -158,7 +155,6 @@ impl BurnDeviceConfig for AiTrackingConfig {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 impl BurnDeviceConfig for TemplateTrackingConfig {
     fn device_preference(&self) -> AiDevicePreference {
         self.device
@@ -169,7 +165,6 @@ impl BurnDeviceConfig for TemplateTrackingConfig {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 impl BurnDeviceConfig for MinimapPresenceProbeConfig {
     fn device_preference(&self) -> AiDevicePreference {
         self.device
@@ -180,7 +175,6 @@ impl BurnDeviceConfig for MinimapPresenceProbeConfig {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 pub(crate) fn select_burn_device(config: &impl BurnDeviceConfig) -> Result<BurnDeviceSelection> {
     match config.device_preference() {
         AiDevicePreference::Cpu => Ok(BurnDeviceSelection::Cpu),
@@ -190,7 +184,7 @@ pub(crate) fn select_burn_device(config: &impl BurnDeviceConfig) -> Result<BurnD
     }
 }
 
-#[cfg(feature = "ai-burn")]
+#[cfg(any(burn_cuda_backend, burn_vulkan_backend, burn_metal_backend))]
 pub(crate) fn burn_device_label(device: &BurnDeviceSelection) -> String {
     match device {
         BurnDeviceSelection::Cpu => "CPU".to_owned(),
@@ -203,7 +197,7 @@ pub(crate) fn burn_device_label(device: &BurnDeviceSelection) -> String {
     }
 }
 
-#[cfg(all(feature = "ai-burn", burn_cuda_backend))]
+#[cfg(burn_cuda_backend)]
 fn build_cuda_device(ordinal: usize) -> Result<BurnDeviceSelection> {
     if !available_cuda_device_descriptors()
         .iter()
@@ -217,12 +211,12 @@ fn build_cuda_device(ordinal: usize) -> Result<BurnDeviceSelection> {
     Ok(BurnDeviceSelection::Cuda(device))
 }
 
-#[cfg(all(feature = "ai-burn", not(burn_cuda_backend)))]
+#[cfg(not(burn_cuda_backend))]
 fn build_cuda_device(_ordinal: usize) -> Result<BurnDeviceSelection> {
     anyhow::bail!("配置选择了 CUDA 设备，但当前二进制未包含 CUDA 后端；Windows 默认构建会包含 CUDA")
 }
 
-#[cfg(all(feature = "ai-burn", burn_vulkan_backend))]
+#[cfg(burn_vulkan_backend)]
 fn build_vulkan_device(ordinal: usize) -> Result<BurnDeviceSelection> {
     let device = available_vulkan_device_choices()
         .iter()
@@ -233,14 +227,14 @@ fn build_vulkan_device(ordinal: usize) -> Result<BurnDeviceSelection> {
     Ok(BurnDeviceSelection::Vulkan(device))
 }
 
-#[cfg(all(feature = "ai-burn", not(burn_vulkan_backend)))]
+#[cfg(not(burn_vulkan_backend))]
 fn build_vulkan_device(_ordinal: usize) -> Result<BurnDeviceSelection> {
     anyhow::bail!(
         "配置选择了 Vulkan 设备，但当前二进制未包含 Vulkan 后端；Windows / Linux 默认构建会包含 Vulkan"
     )
 }
 
-#[cfg(all(feature = "ai-burn", burn_metal_backend))]
+#[cfg(burn_metal_backend)]
 fn build_metal_device(ordinal: usize) -> Result<BurnDeviceSelection> {
     let device = available_metal_device_choices()
         .iter()
@@ -251,14 +245,14 @@ fn build_metal_device(ordinal: usize) -> Result<BurnDeviceSelection> {
     Ok(BurnDeviceSelection::Metal(device))
 }
 
-#[cfg(all(feature = "ai-burn", not(burn_metal_backend)))]
+#[cfg(not(burn_metal_backend))]
 fn build_metal_device(_ordinal: usize) -> Result<BurnDeviceSelection> {
     anyhow::bail!(
         "配置选择了 Metal 设备，但当前二进制未包含 Metal 后端；macOS 默认构建会包含 Metal"
     )
 }
 
-#[cfg(all(feature = "ai-burn", burn_cuda_backend))]
+#[cfg(burn_cuda_backend)]
 fn available_cuda_device_descriptors() -> Vec<BurnDeviceDescriptor> {
     static DESCRIPTORS: OnceLock<Vec<BurnDeviceDescriptor>> = OnceLock::new();
 
@@ -278,12 +272,12 @@ fn available_cuda_device_descriptors() -> Vec<BurnDeviceDescriptor> {
         .clone()
 }
 
-#[cfg(not(all(feature = "ai-burn", burn_cuda_backend)))]
+#[cfg(not(burn_cuda_backend))]
 fn available_cuda_device_descriptors() -> Vec<BurnDeviceDescriptor> {
     Vec::new()
 }
 
-#[cfg(all(feature = "ai-burn", burn_vulkan_backend))]
+#[cfg(burn_vulkan_backend)]
 fn available_vulkan_device_descriptors() -> Vec<BurnDeviceDescriptor> {
     available_vulkan_device_choices()
         .iter()
@@ -291,12 +285,12 @@ fn available_vulkan_device_descriptors() -> Vec<BurnDeviceDescriptor> {
         .collect()
 }
 
-#[cfg(not(all(feature = "ai-burn", burn_vulkan_backend)))]
+#[cfg(not(burn_vulkan_backend))]
 fn available_vulkan_device_descriptors() -> Vec<BurnDeviceDescriptor> {
     Vec::new()
 }
 
-#[cfg(all(feature = "ai-burn", burn_metal_backend))]
+#[cfg(burn_metal_backend)]
 fn available_metal_device_descriptors() -> Vec<BurnDeviceDescriptor> {
     available_metal_device_choices()
         .iter()
@@ -304,37 +298,37 @@ fn available_metal_device_descriptors() -> Vec<BurnDeviceDescriptor> {
         .collect()
 }
 
-#[cfg(not(all(feature = "ai-burn", burn_metal_backend)))]
+#[cfg(not(burn_metal_backend))]
 fn available_metal_device_descriptors() -> Vec<BurnDeviceDescriptor> {
     Vec::new()
 }
 
-#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
+#[cfg(any(burn_vulkan_backend, burn_metal_backend))]
 const WGPU_DEVICE_CLASS_ORDINAL_STRIDE: usize = 8;
 
-#[cfg(all(feature = "ai-burn", burn_vulkan_backend))]
+#[cfg(burn_vulkan_backend)]
 fn available_vulkan_device_choices() -> &'static [BurnWgpuDeviceChoice] {
     static CHOICES: OnceLock<Vec<BurnWgpuDeviceChoice>> = OnceLock::new();
     CHOICES.get_or_init(enumerate_vulkan_device_choices)
 }
 
-#[cfg(all(feature = "ai-burn", burn_metal_backend))]
+#[cfg(burn_metal_backend)]
 fn available_metal_device_choices() -> &'static [BurnWgpuDeviceChoice] {
     static CHOICES: OnceLock<Vec<BurnWgpuDeviceChoice>> = OnceLock::new();
     CHOICES.get_or_init(enumerate_metal_device_choices)
 }
 
-#[cfg(all(feature = "ai-burn", burn_vulkan_backend))]
+#[cfg(burn_vulkan_backend)]
 fn enumerate_vulkan_device_choices() -> Vec<BurnWgpuDeviceChoice> {
     enumerate_wgpu_device_choices::<cubecl_wgpu::Vulkan>()
 }
 
-#[cfg(all(feature = "ai-burn", burn_metal_backend))]
+#[cfg(burn_metal_backend)]
 fn enumerate_metal_device_choices() -> Vec<BurnWgpuDeviceChoice> {
     enumerate_wgpu_device_choices::<cubecl_wgpu::Metal>()
 }
 
-#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
+#[cfg(any(burn_vulkan_backend, burn_metal_backend))]
 fn enumerate_wgpu_device_choices<G>() -> Vec<BurnWgpuDeviceChoice>
 where
     G: cubecl_wgpu::GraphicsApi,
@@ -391,7 +385,7 @@ where
     choices
 }
 
-#[cfg(all(feature = "ai-burn", any(burn_vulkan_backend, burn_metal_backend)))]
+#[cfg(any(burn_vulkan_backend, burn_metal_backend))]
 fn wgpu_device_label(device: &WgpuDevice) -> String {
     match device {
         WgpuDevice::DefaultDevice => "default".to_owned(),
@@ -405,7 +399,7 @@ fn wgpu_device_label(device: &WgpuDevice) -> String {
     }
 }
 
-#[cfg(feature = "ai-burn")]
+#[cfg(any(burn_cuda_backend, burn_vulkan_backend, burn_metal_backend))]
 fn probe_device<B>(device: &B::Device) -> Result<()>
 where
     B: Backend,

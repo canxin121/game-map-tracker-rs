@@ -14,7 +14,6 @@ pub(crate) fn repository_tracker_encoder_path() -> Option<PathBuf> {
     repository_root().map(|root| root.join("models").join("tracker_encoder.safetensors"))
 }
 
-#[cfg(feature = "ai-burn")]
 pub(crate) fn embedded_tracker_encoder_bytes() -> &'static [u8] {
     include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),

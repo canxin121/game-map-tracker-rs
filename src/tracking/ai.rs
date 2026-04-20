@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-#[cfg(feature = "ai-burn")]
+
 use burn::{
     backend::{Autodiff, ndarray::NdArrayDevice},
     tensor::{
@@ -19,11 +19,11 @@ use burn::{
         ops::ConvOptions,
     },
 };
-#[cfg(feature = "ai-burn")]
+
 use image::{GrayImage, RgbaImage, imageops::crop_imm};
-#[cfg(feature = "ai-burn")]
+
 use safetensors::{Dtype, SafeTensors, serialize_to_file, tensor::TensorView};
-#[cfg(feature = "ai-burn")]
+
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -33,7 +33,9 @@ use crate::{
     resources::WorkspaceSnapshot,
     tracking::runtime::{TrackingStatus, TrackingTick, TrackingWorker},
 };
-#[cfg(feature = "ai-burn")]
+
+#[cfg(any(burn_cuda_backend, burn_vulkan_backend, burn_metal_backend))]
+use crate::tracking::burn_support::burn_device_label;
 use crate::{
     config::{AiTrackingConfig, AppConfig},
     domain::{
@@ -47,8 +49,8 @@ use crate::{
     },
     tracking::{
         burn_support::{
-            BurnDeviceSelection, available_burn_backends, burn_device_label,
-            burn_score_map_capture_enabled, select_burn_device,
+            BurnDeviceSelection, available_burn_backends, burn_score_map_capture_enabled,
+            select_burn_device,
         },
         capture::{DesktopCapture, preprocess_capture},
         debug::{DebugField, TrackingDebugSnapshot},
@@ -80,15 +82,12 @@ struct LocateResult {
     accepted: Option<MatchCandidate>,
 }
 
-#[cfg(feature = "ai-burn")]
 const MAX_GLOBAL_COARSE_CANDIDATES: usize = 12;
 
 pub struct BurnTrackerWorker {
-    #[cfg(feature = "ai-burn")]
     inner: BurnTrackerInner,
 }
 
-#[cfg(feature = "ai-burn")]
 struct BurnTrackerInner {
     config: AppConfig,
     capture: DesktopCapture,
@@ -99,7 +98,6 @@ struct BurnTrackerInner {
     matcher: BurnFeatureMatcher,
 }
 
-#[cfg(feature = "ai-burn")]
 enum BurnFeatureMatcher {
     NdArray(BurnFeatureMatcherBackend<burn::backend::NdArray>),
     #[cfg(burn_cuda_backend)]
@@ -110,7 +108,6 @@ enum BurnFeatureMatcher {
     Metal(BurnFeatureMatcherBackend<burn::backend::Metal>),
 }
 
-#[cfg(feature = "ai-burn")]
 struct BurnFeatureMatcherBackend<B>
 where
     B: Backend<FloatElem = f32>,
@@ -125,7 +122,6 @@ where
     chunk_budget_bytes: Option<usize>,
 }
 
-#[cfg(feature = "ai-burn")]
 struct FixedFeatureEncoder<B>
 where
     B: Backend<FloatElem = f32>,
@@ -140,7 +136,6 @@ where
     output_channels: usize,
 }
 
-#[cfg(feature = "ai-burn")]
 struct SearchTensorCache<B>
 where
     B: Backend<FloatElem = f32>,
@@ -152,14 +147,12 @@ where
     channels: usize,
 }
 
-#[cfg(feature = "ai-burn")]
 struct PreparedCaptureTemplates {
     local: PreparedTemplate,
     global: PreparedTemplate,
     coarse: PreparedTemplate,
 }
 
-#[cfg(feature = "ai-burn")]
 enum PreparedTemplate {
     NdArray(BurnPreparedTemplate<burn::backend::NdArray>),
     #[cfg(burn_cuda_backend)]
@@ -170,7 +163,6 @@ enum PreparedTemplate {
     Metal(BurnPreparedTemplate<burn::backend::Metal>),
 }
 
-#[cfg(feature = "ai-burn")]
 struct BurnPreparedTemplate<B>
 where
     B: Backend<FloatElem = f32>,
@@ -181,7 +173,6 @@ where
     template_energy: f32,
 }
 
-#[cfg(feature = "ai-burn")]
 impl<B> BurnPreparedTemplate<B>
 where
     B: Backend<FloatElem = f32>,
@@ -214,13 +205,12 @@ impl EncoderSource {
     }
 }
 
-#[cfg(feature = "ai-burn")]
+#[cfg(burn_cuda_backend)]
 const CUDA_CONV_IM2COL_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 
-#[cfg(feature = "ai-burn")]
+#[cfg(any(burn_vulkan_backend, burn_metal_backend))]
 const WGPU_CONV_IM2COL_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
-#[cfg(feature = "ai-burn")]
 const FEATURE_ENCODER_CACHE_VERSION: u32 = 2;
 
 impl BurnTrackerWorker {
@@ -232,43 +222,34 @@ impl BurnTrackerWorker {
             device_index = workspace.config.ai.device_index,
             "initializing convolution tracker worker"
         );
-        #[cfg(feature = "ai-burn")]
-        {
-            let config = workspace.config.clone();
-            if !config.minimap.is_configured() {
-                anyhow::bail!("小地图区域尚未配置，请先完成小地图取区");
-            }
-            let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
-            let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
-            let map_cache_key = tracker_map_cache_key(workspace.as_ref())?;
-            let masks = build_template_masks(&config);
-            let color_pyramid = load_logic_color_map_pyramid(workspace.as_ref())?;
-            let matcher = BurnFeatureMatcher::new(
-                workspace.as_ref(),
-                &config.ai,
-                &color_pyramid,
-                &masks,
-                &map_cache_key,
-            )?;
-
-            Ok(Self {
-                inner: BurnTrackerInner {
-                    config,
-                    capture,
-                    presence_detector,
-                    color_pyramid,
-                    state: TrackerState::default(),
-                    debug_enabled: false,
-                    matcher,
-                },
-            })
+        let config = workspace.config.clone();
+        if !config.minimap.is_configured() {
+            anyhow::bail!("小地图区域尚未配置，请先完成小地图取区");
         }
+        let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
+        let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
+        let map_cache_key = tracker_map_cache_key(workspace.as_ref())?;
+        let masks = build_template_masks(&config);
+        let color_pyramid = load_logic_color_map_pyramid(workspace.as_ref())?;
+        let matcher = BurnFeatureMatcher::new(
+            workspace.as_ref(),
+            &config.ai,
+            &color_pyramid,
+            &masks,
+            &map_cache_key,
+        )?;
 
-        #[cfg(not(feature = "ai-burn"))]
-        {
-            let _ = workspace;
-            Ok(Self {})
-        }
+        Ok(Self {
+            inner: BurnTrackerInner {
+                config,
+                capture,
+                presence_detector,
+                color_pyramid,
+                state: TrackerState::default(),
+                debug_enabled: false,
+                matcher,
+            },
+        })
     }
 }
 
@@ -279,35 +260,25 @@ pub fn rebuild_convolution_engine_cache(workspace: &WorkspaceSnapshot) -> Result
         device_index = workspace.config.ai.device_index,
         "rebuilding convolution tracker cache"
     );
-    #[cfg(feature = "ai-burn")]
-    {
-        clear_match_pyramid_caches(workspace)?;
-        clear_tensor_caches_by_prefix(workspace, "feature-local-search")?;
-        clear_tensor_caches_by_prefix(workspace, "feature-global-search")?;
-        clear_tensor_caches_by_prefix(workspace, "feature-coarse-search")?;
+    clear_match_pyramid_caches(workspace)?;
+    clear_tensor_caches_by_prefix(workspace, "feature-local-search")?;
+    clear_tensor_caches_by_prefix(workspace, "feature-global-search")?;
+    clear_tensor_caches_by_prefix(workspace, "feature-coarse-search")?;
 
-        let map_cache_key = tracker_map_cache_key(workspace)?;
-        let color_pyramid = load_logic_color_map_pyramid(workspace)?;
-        let masks = build_template_masks(&workspace.config);
-        let _ = BurnFeatureMatcher::new(
-            workspace,
-            &workspace.config.ai,
-            &color_pyramid,
-            &masks,
-            &map_cache_key,
-        )?;
-        info!("rebuild of convolution tracker cache completed");
-        return Ok(());
-    }
-
-    #[cfg(not(feature = "ai-burn"))]
-    {
-        let _ = workspace;
-        anyhow::bail!("卷积特征匹配后端被选中，但当前二进制未启用 `ai-burn` 特性")
-    }
+    let map_cache_key = tracker_map_cache_key(workspace)?;
+    let color_pyramid = load_logic_color_map_pyramid(workspace)?;
+    let masks = build_template_masks(&workspace.config);
+    let _ = BurnFeatureMatcher::new(
+        workspace,
+        &workspace.config.ai,
+        &color_pyramid,
+        &masks,
+        &map_cache_key,
+    )?;
+    info!("rebuild of convolution tracker cache completed");
+    Ok(())
 }
 
-#[cfg(feature = "ai-burn")]
 impl<B> FixedFeatureEncoder<B>
 where
     B: Backend<FloatElem = f32>,
@@ -528,7 +499,6 @@ where
     }
 }
 
-#[cfg(feature = "ai-burn")]
 fn encoder_weight_candidates(workspace: &WorkspaceSnapshot) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(path) = workspace
@@ -549,7 +519,6 @@ fn encoder_weight_candidates(workspace: &WorkspaceSnapshot) -> Vec<PathBuf> {
     candidates
 }
 
-#[cfg(feature = "ai-burn")]
 fn resolve_workspace_relative_path(workspace_root: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -558,13 +527,11 @@ fn resolve_workspace_relative_path(workspace_root: &Path, path: &Path) -> PathBu
     }
 }
 
-#[cfg(feature = "ai-burn")]
 fn dedupe_paths(paths: &mut Vec<PathBuf>) {
     let mut seen = std::collections::HashSet::new();
     paths.retain(|path| seen.insert(path.clone()));
 }
 
-#[cfg(feature = "ai-burn")]
 fn embedded_encoder_cache_fingerprint(bytes: &[u8]) -> String {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for byte in bytes {
@@ -574,7 +541,6 @@ fn embedded_encoder_cache_fingerprint(bytes: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
-#[cfg(feature = "ai-burn")]
 fn find_safetensor_name<'a>(tensors: &SafeTensors<'a>, names: &[&'a str]) -> Result<&'a str> {
     names
         .iter()
@@ -583,7 +549,6 @@ fn find_safetensor_name<'a>(tensors: &SafeTensors<'a>, names: &[&'a str]) -> Res
         .ok_or_else(|| anyhow::anyhow!("failed to resolve encoder tensor names: {:?}", names))
 }
 
-#[cfg(feature = "ai-burn")]
 fn safetensor_view_f32_vec(view: &safetensors::tensor::TensorView<'_>) -> Result<Vec<f32>> {
     if view.dtype() != safetensors::Dtype::F32 {
         anyhow::bail!(
@@ -603,21 +568,18 @@ fn safetensor_view_f32_vec(view: &safetensors::tensor::TensorView<'_>) -> Result
         .collect())
 }
 
-#[cfg(feature = "ai-burn")]
 type TrainingBackend = Autodiff<burn::backend::NdArray>;
 
-#[cfg(feature = "ai-burn")]
 const TRAINING_LOCAL_STEP_MIN: u32 = 28;
-#[cfg(feature = "ai-burn")]
+
 const TRAINING_LOCAL_STEP_MAX: u32 = 112;
-#[cfg(feature = "ai-burn")]
+
 const TRAINING_GLOBAL_NEGATIVE_DISTANCE: u32 = 640;
-#[cfg(feature = "ai-burn")]
+
 const TRAINING_LOCAL_NEGATIVE_MIN_DISTANCE: u32 = 56;
-#[cfg(feature = "ai-burn")]
+
 const TRAINING_POINT_ATTEMPTS: usize = 24;
 
-#[cfg(feature = "ai-burn")]
 #[derive(Debug, Clone)]
 struct EncoderTrainingConfig {
     workspace_root: Option<PathBuf>,
@@ -635,7 +597,6 @@ struct EncoderTrainingConfig {
     resume: bool,
 }
 
-#[cfg(feature = "ai-burn")]
 impl Default for EncoderTrainingConfig {
     fn default() -> Self {
         Self {
@@ -656,7 +617,6 @@ impl Default for EncoderTrainingConfig {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 #[derive(Debug, Clone)]
 struct EncoderTrainingPaths {
     workspace_root: PathBuf,
@@ -666,7 +626,6 @@ struct EncoderTrainingPaths {
     checkpoint_state: PathBuf,
 }
 
-#[cfg(feature = "ai-burn")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EncoderTrainingState {
     epoch: usize,
@@ -677,7 +636,6 @@ struct EncoderTrainingState {
     best_loss: Option<f32>,
 }
 
-#[cfg(feature = "ai-burn")]
 impl EncoderTrainingState {
     fn fresh(seed: u64) -> Self {
         Self {
@@ -691,7 +649,6 @@ impl EncoderTrainingState {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 #[derive(Debug)]
 struct EncoderTrainingFixture {
     workspace: WorkspaceSnapshot,
@@ -705,7 +662,6 @@ struct EncoderTrainingFixture {
     max_y: u32,
 }
 
-#[cfg(feature = "ai-burn")]
 #[derive(Debug)]
 struct PreparedTrainingTemplate<B>
 where
@@ -717,7 +673,6 @@ where
     template_energy: Tensor<B, 1>,
 }
 
-#[cfg(feature = "ai-burn")]
 #[derive(Debug, Clone, Default)]
 struct TrainingSampleStats {
     global_positive: f32,
@@ -728,7 +683,6 @@ struct TrainingSampleStats {
     local_negative: f32,
 }
 
-#[cfg(feature = "ai-burn")]
 #[derive(Debug, Clone, Default)]
 struct TrainingStepAverages {
     samples: usize,
@@ -740,7 +694,6 @@ struct TrainingStepAverages {
     local_negative: f32,
 }
 
-#[cfg(feature = "ai-burn")]
 impl TrainingStepAverages {
     fn push(&mut self, sample: &TrainingSampleStats) {
         self.samples += 1;
@@ -761,13 +714,11 @@ impl TrainingStepAverages {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 #[derive(Debug, Clone)]
 struct TrainingRng {
     state: u64,
 }
 
-#[cfg(feature = "ai-burn")]
 impl TrainingRng {
     fn new(seed: u64) -> Self {
         Self {
@@ -799,28 +750,18 @@ impl TrainingRng {
 }
 
 pub fn run_encoder_training_cli(args: Vec<OsString>) -> Result<()> {
-    #[cfg(not(feature = "ai-burn"))]
+    if args
+        .iter()
+        .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--help" | "-h"))
     {
-        let _ = args;
-        anyhow::bail!("当前二进制未启用 `ai-burn`，无法训练卷积特征编码器")
+        print_encoder_training_usage();
+        return Ok(());
     }
 
-    #[cfg(feature = "ai-burn")]
-    {
-        if args
-            .iter()
-            .any(|arg| matches!(arg.to_string_lossy().as_ref(), "--help" | "-h"))
-        {
-            print_encoder_training_usage();
-            return Ok(());
-        }
-
-        let config = parse_encoder_training_args(args)?;
-        train_convolution_encoder(config)
-    }
+    let config = parse_encoder_training_args(args)?;
+    train_convolution_encoder(config)
 }
 
-#[cfg(feature = "ai-burn")]
 fn print_encoder_training_usage() {
     println!(
         "用法: game-map-tracker-rs train-encoder [workspace_root] [选项]\n\
@@ -841,7 +782,6 @@ fn print_encoder_training_usage() {
     );
 }
 
-#[cfg(feature = "ai-burn")]
 fn parse_encoder_training_args(args: Vec<OsString>) -> Result<EncoderTrainingConfig> {
     let mut config = EncoderTrainingConfig::default();
     let mut index = 0usize;
@@ -919,7 +859,6 @@ fn parse_encoder_training_args(args: Vec<OsString>) -> Result<EncoderTrainingCon
     Ok(config)
 }
 
-#[cfg(feature = "ai-burn")]
 fn resolve_encoder_training_paths(config: &EncoderTrainingConfig) -> Result<EncoderTrainingPaths> {
     let workspace_root = match config.workspace_root.clone() {
         Some(path) if path.is_absolute() => path,
@@ -956,7 +895,6 @@ fn resolve_encoder_training_paths(config: &EncoderTrainingConfig) -> Result<Enco
     })
 }
 
-#[cfg(feature = "ai-burn")]
 fn normalize_training_path(workspace_root: &Path, path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
@@ -965,7 +903,6 @@ fn normalize_training_path(workspace_root: &Path, path: PathBuf) -> PathBuf {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 fn build_encoder_training_fixture(workspace_root: &Path) -> Result<EncoderTrainingFixture> {
     let workspace = WorkspaceSnapshot::load(workspace_root.to_path_buf())?;
     let config = workspace.config.clone();
@@ -999,17 +936,14 @@ fn build_encoder_training_fixture(workspace_root: &Path) -> Result<EncoderTraini
     })
 }
 
-#[cfg(feature = "ai-burn")]
 fn align_training_point(value: u32, step: u32) -> u32 {
     value / step.max(1) * step.max(1)
 }
 
-#[cfg(feature = "ai-burn")]
 fn local_texture_radius(view_size: u32) -> u32 {
     (view_size / 2).clamp(96, 180)
 }
 
-#[cfg(feature = "ai-burn")]
 fn local_texture_score(image: &GrayImage, center_x: u32, center_y: u32, radius: u32) -> u64 {
     let left = center_x.saturating_sub(radius);
     let top = center_y.saturating_sub(radius);
@@ -1030,7 +964,6 @@ fn local_texture_score(image: &GrayImage, center_x: u32, center_y: u32, radius: 
     total
 }
 
-#[cfg(feature = "ai-burn")]
 fn sample_textured_world_point(
     fixture: &EncoderTrainingFixture,
     rng: &mut TrainingRng,
@@ -1052,7 +985,6 @@ fn sample_textured_world_point(
     best
 }
 
-#[cfg(feature = "ai-burn")]
 fn clamp_world_point(fixture: &EncoderTrainingFixture, point: (i32, i32)) -> (u32, u32) {
     (
         align_training_point(
@@ -1070,7 +1002,6 @@ fn clamp_world_point(fixture: &EncoderTrainingFixture, point: (i32, i32)) -> (u3
     )
 }
 
-#[cfg(feature = "ai-burn")]
 fn sample_local_world_point(
     fixture: &EncoderTrainingFixture,
     rng: &mut TrainingRng,
@@ -1101,7 +1032,6 @@ fn sample_local_world_point(
     best
 }
 
-#[cfg(feature = "ai-burn")]
 fn crop_centered_training_patch(
     image: &RgbaImage,
     center: (u32, u32),
@@ -1123,7 +1053,6 @@ fn crop_centered_training_patch(
     Ok(crop_imm(image, left, top, width, height).to_image())
 }
 
-#[cfg(feature = "ai-burn")]
 fn crop_map_patch_at_world(
     map: &crate::tracking::vision::ScaledColorMap,
     world: (u32, u32),
@@ -1134,12 +1063,10 @@ fn crop_map_patch_at_world(
     crop_centered_training_patch(&map.image, center, width, height)
 }
 
-#[cfg(feature = "ai-burn")]
 fn world_distance(a: (u32, u32), b: (u32, u32)) -> u32 {
     a.0.abs_diff(b.0) + a.1.abs_diff(b.1)
 }
 
-#[cfg(feature = "ai-burn")]
 fn random_far_world_point(
     fixture: &EncoderTrainingFixture,
     rng: &mut TrainingRng,
@@ -1155,7 +1082,6 @@ fn random_far_world_point(
     sample_textured_world_point(fixture, rng)
 }
 
-#[cfg(feature = "ai-burn")]
 fn global_negative_candidates(
     fixture: &EncoderTrainingFixture,
     rng: &mut TrainingRng,
@@ -1185,7 +1111,6 @@ fn global_negative_candidates(
     candidates
 }
 
-#[cfg(feature = "ai-burn")]
 fn local_negative_candidates(
     fixture: &EncoderTrainingFixture,
     rng: &mut TrainingRng,
@@ -1222,7 +1147,6 @@ fn local_negative_candidates(
     candidates
 }
 
-#[cfg(feature = "ai-burn")]
 fn select_hard_negative_world(
     map: &crate::tracking::vision::ScaledColorMap,
     template: &RgbaImage,
@@ -1250,7 +1174,6 @@ fn select_hard_negative_world(
         .map(|(_, world)| world)
 }
 
-#[cfg(feature = "ai-burn")]
 fn prepare_training_template<B>(
     encoder: &FixedFeatureEncoder<B>,
     image: &RgbaImage,
@@ -1272,7 +1195,6 @@ where
     })
 }
 
-#[cfg(feature = "ai-burn")]
 fn score_patch_against_template<B>(
     encoder: &FixedFeatureEncoder<B>,
     prepared: &PreparedTrainingTemplate<B>,
@@ -1289,7 +1211,6 @@ where
     Ok(numerator / (patch_energy * prepared.template_energy.clone() + 1e-6).sqrt())
 }
 
-#[cfg(feature = "ai-burn")]
 fn tensor_scalar_f32<B>(tensor: Tensor<B, 1>) -> Result<f32>
 where
     B: Backend<FloatElem = f32>,
@@ -1304,7 +1225,6 @@ where
         .ok_or_else(|| anyhow::anyhow!("tensor scalar conversion returned an empty buffer"))
 }
 
-#[cfg(feature = "ai-burn")]
 fn ranking_loss<B>(
     device: &B::Device,
     positive: Tensor<B, 1>,
@@ -1318,7 +1238,6 @@ where
     relu(Tensor::<B, 1>::from_data([margin], device) + negative - positive)
 }
 
-#[cfg(feature = "ai-burn")]
 fn positive_pull_loss<B>(device: &B::Device, positive: Tensor<B, 1>) -> Tensor<B, 1>
 where
     B: AutodiffBackend<FloatElem = f32>,
@@ -1327,7 +1246,6 @@ where
     relu(Tensor::<B, 1>::ones([1], device) - positive)
 }
 
-#[cfg(feature = "ai-burn")]
 fn compute_training_sample_loss(
     fixture: &EncoderTrainingFixture,
     encoder: &FixedFeatureEncoder<TrainingBackend>,
@@ -1471,7 +1389,6 @@ fn compute_training_sample_loss(
     Ok((loss, stats))
 }
 
-#[cfg(feature = "ai-burn")]
 fn apply_training_step(
     encoder: &mut FixedFeatureEncoder<TrainingBackend>,
     grads: &<TrainingBackend as AutodiffBackend>::Gradients,
@@ -1497,7 +1414,6 @@ fn apply_training_step(
     Ok(())
 }
 
-#[cfg(feature = "ai-burn")]
 fn load_or_initialize_training_state(
     fixture: &EncoderTrainingFixture,
     paths: &EncoderTrainingPaths,
@@ -1539,7 +1455,6 @@ fn load_or_initialize_training_state(
     Ok((state, encoder))
 }
 
-#[cfg(feature = "ai-burn")]
 fn serialize_f32(values: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
     for value in values {
@@ -1548,7 +1463,6 @@ fn serialize_f32(values: &[f32]) -> Vec<u8> {
     bytes
 }
 
-#[cfg(feature = "ai-burn")]
 fn save_encoder_weights<B>(encoder: &FixedFeatureEncoder<B>, path: &Path) -> Result<()>
 where
     B: Backend<FloatElem = f32>,
@@ -1581,17 +1495,16 @@ where
                 ("edge_bank.bias", bias_view),
                 ("edge_bank.weight", weight_view),
             ],
-            &None,
+            None,
             path,
         )?;
         return Ok(());
     }
 
-    serialize_to_file(vec![("edge_bank.weight", weight_view)], &None, path)?;
+    serialize_to_file(vec![("edge_bank.weight", weight_view)], None, path)?;
     Ok(())
 }
 
-#[cfg(feature = "ai-burn")]
 fn save_training_checkpoint(
     paths: &EncoderTrainingPaths,
     state: &EncoderTrainingState,
@@ -1607,7 +1520,6 @@ fn save_training_checkpoint(
     Ok(())
 }
 
-#[cfg(feature = "ai-burn")]
 fn train_convolution_encoder(config: EncoderTrainingConfig) -> Result<()> {
     let paths = resolve_encoder_training_paths(&config)?;
     let fixture = build_encoder_training_fixture(&paths.workspace_root)?;
@@ -1723,7 +1635,7 @@ fn train_convolution_encoder(config: EncoderTrainingConfig) -> Result<()> {
     );
     Ok(())
 }
-#[cfg(feature = "ai-burn")]
+
 fn prepare_color_capture_templates(
     captured: &RgbaImage,
     config: &AppConfig,
@@ -1757,7 +1669,6 @@ fn prepare_color_capture_templates(
     }
 }
 
-#[cfg(feature = "ai-burn")]
 fn build_template_masks(config: &AppConfig) -> MaskSet {
     let local_scale = config.template.local_downscale.max(1);
     let global_scale = config.template.global_downscale.max(local_scale);
@@ -1777,7 +1688,6 @@ fn build_template_masks(config: &AppConfig) -> MaskSet {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 impl BurnFeatureMatcher {
     fn new(
         workspace: &WorkspaceSnapshot,
@@ -1966,6 +1876,7 @@ impl BurnFeatureMatcher {
         }
     }
 
+    #[allow(unreachable_patterns)]
     fn locate_coarse_prepared(
         &self,
         template: &PreparedTemplate,
@@ -2023,6 +1934,7 @@ impl BurnFeatureMatcher {
         }
     }
 
+    #[allow(unreachable_patterns)]
     fn locate_global_crop_prepared(
         &self,
         image: &RgbaImage,
@@ -2077,6 +1989,7 @@ impl BurnFeatureMatcher {
         }
     }
 
+    #[allow(unreachable_patterns)]
     fn locate_dynamic_prepared(
         &self,
         image: &RgbaImage,
@@ -2107,7 +2020,6 @@ impl BurnFeatureMatcher {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 impl PreparedTemplate {
     fn image(&self) -> &RgbaImage {
         match self {
@@ -2130,7 +2042,6 @@ impl PreparedTemplate {
     }
 }
 
-#[cfg(feature = "ai-burn")]
 impl<B> BurnFeatureMatcherBackend<B>
 where
     B: Backend<FloatElem = f32>,
@@ -2395,7 +2306,6 @@ where
     }
 }
 
-#[cfg(feature = "ai-burn")]
 impl<B> SearchTensorCache<B>
 where
     B: Backend<FloatElem = f32>,
@@ -2466,7 +2376,6 @@ where
     }
 }
 
-#[cfg(feature = "ai-burn")]
 fn load_or_build_feature_search<B>(
     workspace: &WorkspaceSnapshot,
     prefix: &str,
@@ -2493,7 +2402,6 @@ where
     Ok(search)
 }
 
-#[cfg(feature = "ai-burn")]
 fn mask_tensor<B>(mask: &GrayImage, channels: usize, device: &B::Device) -> Tensor<B, 4>
 where
     B: Backend<FloatElem = f32>,
@@ -2507,7 +2415,6 @@ where
     )
 }
 
-#[cfg(feature = "ai-burn")]
 fn burn_match_chunk_rows(
     chunk_budget_bytes: Option<usize>,
     search_width: u32,
@@ -2542,7 +2449,6 @@ fn burn_match_chunk_rows(
     ((budget_bytes / per_output_row_bytes).max(1) as u32).min(output_height)
 }
 
-#[cfg(feature = "ai-burn")]
 fn locate_cached_in_chunks<B>(
     search: &SearchTensorCache<B>,
     weighted_template: &Tensor<B, 4>,
@@ -2635,7 +2541,6 @@ where
     ))
 }
 
-#[cfg(feature = "ai-burn")]
 fn tensor4_to_flat_f32<B>(tensor: Tensor<B, 4>) -> Result<Vec<f32>>
 where
     B: Backend<FloatElem = f32>,
@@ -2646,7 +2551,6 @@ where
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
-#[cfg(feature = "ai-burn")]
 fn tensor_best_match<B>(
     tensor: Tensor<B, 4>,
     score_width: u32,
@@ -2764,7 +2668,6 @@ fn locate_result_from_best(
     }
 }
 
-#[cfg(feature = "ai-burn")]
 impl BurnTrackerInner {
     fn run_frame(&mut self) -> Result<TrackingTick> {
         self.state.begin_frame();
@@ -3177,7 +3080,6 @@ fn coarse_refine_radius_px(config: &TemplateTrackingConfig) -> u32 {
     config.global_refine_radius_px.max(384)
 }
 
-#[cfg(feature = "ai-burn")]
 fn coarse_peak_suppression_radius(
     config: &TemplateTrackingConfig,
     coarse_scale: u32,
@@ -3189,7 +3091,6 @@ fn coarse_peak_suppression_radius(
         .max(1)
 }
 
-#[cfg(feature = "ai-burn")]
 fn coarse_peak_candidates(
     result: &LocateResult,
     config: &TemplateTrackingConfig,
@@ -3227,7 +3128,6 @@ fn coarse_peak_candidates(
     candidates
 }
 
-#[cfg(feature = "ai-burn")]
 fn locate_global_relocate_runtime(
     matcher: &BurnFeatureMatcher,
     color_pyramid: &ColorMapPyramid,
@@ -3285,52 +3185,24 @@ fn locate_global_relocate_runtime(
 
 impl TrackingWorker for BurnTrackerWorker {
     fn refresh_interval(&self) -> Duration {
-        #[cfg(feature = "ai-burn")]
-        {
-            return Duration::from_millis(self.inner.config.ai.refresh_rate_ms);
-        }
-
-        #[cfg(not(feature = "ai-burn"))]
-        {
-            Duration::from_millis(250)
-        }
+        Duration::from_millis(self.inner.config.ai.refresh_rate_ms)
     }
 
     fn tick(&mut self) -> Result<TrackingTick> {
-        #[cfg(feature = "ai-burn")]
-        {
-            return self.inner.run_frame();
-        }
-
-        #[cfg(not(feature = "ai-burn"))]
-        {
-            anyhow::bail!("卷积特征匹配后端被选中，但当前二进制未启用 `ai-burn` 特性")
-        }
+        self.inner.run_frame()
     }
 
     fn set_debug_enabled(&mut self, enabled: bool) {
-        #[cfg(feature = "ai-burn")]
-        {
-            self.inner.debug_enabled = enabled;
-        }
-
-        #[cfg(not(feature = "ai-burn"))]
-        {
-            let _ = enabled;
-        }
+        self.inner.debug_enabled = enabled;
     }
 
     fn initial_status(&self) -> TrackingStatus {
-        #[cfg(feature = "ai-burn")]
         let message = format!(
             "卷积特征匹配引擎已就绪：设备 {}，可用后端 {}，{} + Burn 张量相似度搜索。",
             self.inner.matcher.device_label(),
             available_burn_backends(),
             self.inner.matcher.source_label()
         );
-
-        #[cfg(not(feature = "ai-burn"))]
-        let message = "卷积特征匹配引擎当前二进制未启用 `ai-burn` 特性。".to_owned();
 
         TrackingStatus::new(TrackerEngineKind::ConvolutionFeatureMatch, message)
     }
@@ -3340,7 +3212,7 @@ impl TrackingWorker for BurnTrackerWorker {
     }
 }
 
-#[cfg(all(test, feature = "ai-burn", burn_vulkan_backend))]
+#[cfg(all(test, burn_vulkan_backend))]
 mod tests {
     use std::sync::OnceLock;
 

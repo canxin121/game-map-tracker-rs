@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{
     env, fs,
     path::PathBuf,
@@ -7,10 +9,12 @@ use std::{
 use directories::ProjectDirs;
 use image::{GrayImage, RgbaImage};
 
-#[cfg(all(feature = "ai-burn", burn_vulkan_backend))]
+#[cfg(burn_vulkan_backend)]
+use crate::config::AiDevicePreference;
+#[cfg(burn_vulkan_backend)]
 use crate::tracking::burn_support::available_burn_device_descriptors;
 use crate::{
-    config::{AiDevicePreference, AppConfig, CONFIG_FILE_NAME, load_existing_config},
+    config::{AppConfig, CONFIG_FILE_NAME, load_existing_config},
     resources::{
         AssetManifest, BwikiCachePaths, WorkspaceLoadReport, WorkspaceSnapshot,
         default_map_dimensions,
@@ -278,7 +282,7 @@ pub(crate) fn write_stress_report(
     path
 }
 
-#[cfg(all(feature = "ai-burn", burn_vulkan_backend))]
+#[cfg(burn_vulkan_backend)]
 pub(crate) fn require_vulkan_discrete_ordinal() -> (usize, String) {
     let descriptors = available_burn_device_descriptors(AiDevicePreference::Vulkan);
     descriptors

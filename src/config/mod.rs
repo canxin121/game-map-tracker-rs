@@ -57,6 +57,14 @@ pub enum AiDevicePreference {
     Metal,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateInputMode {
+    #[default]
+    Color,
+    Grayscale,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
 pub struct TemplateTrackingConfig {
@@ -64,6 +72,7 @@ pub struct TemplateTrackingConfig {
     pub local_downscale: u32,
     pub global_downscale: u32,
     pub global_refine_radius_px: u32,
+    pub input_mode: TemplateInputMode,
     pub local_match_threshold: f32,
     pub global_match_threshold: f32,
     pub mask_outer_radius: f32,
@@ -186,6 +195,7 @@ impl Default for TemplateTrackingConfig {
             local_downscale: 4,
             global_downscale: 8,
             global_refine_radius_px: 480,
+            input_mode: TemplateInputMode::default(),
             local_match_threshold: 0.45,
             global_match_threshold: 0.40,
             mask_outer_radius: 0.96,

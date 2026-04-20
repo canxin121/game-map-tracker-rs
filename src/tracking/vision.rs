@@ -491,19 +491,19 @@ pub(crate) fn capture_selection_outer_square_rgba(
     );
     RgbaImage::from_fn(layout.square_side_px, layout.square_side_px, |x, y| {
         let Some(source_x) = x.checked_sub(layout.source_offset_x) else {
-            return Rgba([0, 0, 0, 255]);
+            return Rgba([0, 0, 0, 0]);
         };
         let Some(source_y) = y.checked_sub(layout.source_offset_y) else {
-            return Rgba([0, 0, 0, 255]);
+            return Rgba([0, 0, 0, 0]);
         };
         if source_x >= captured.width() || source_y >= captured.height() {
-            return Rgba([0, 0, 0, 255]);
+            return Rgba([0, 0, 0, 0]);
         }
         let Some(distance) = capture_selection_distance(layout, x, y) else {
-            return Rgba([0, 0, 0, 255]);
+            return Rgba([0, 0, 0, 0]);
         };
         if distance > 1.0 || distance < layout.normalized_inner_radius {
-            return Rgba([0, 0, 0, 255]);
+            return Rgba([0, 0, 0, 0]);
         }
 
         *captured.get_pixel(source_x, source_y)
@@ -590,14 +590,6 @@ fn shade_rgb(value: [u8; 3], factor: f32, lift: f32) -> [u8; 3] {
     ]
 }
 
-fn blend_rgb(base: [u8; 3], overlay: [u8; 3], alpha: f32) -> [u8; 3] {
-    [
-        blend_channel(base[0], overlay[0], alpha),
-        blend_channel(base[1], overlay[1], alpha),
-        blend_channel(base[2], overlay[2], alpha),
-    ]
-}
-
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn synthesize_runtime_capture_from_map(
     map: &GrayImage,
@@ -679,14 +671,12 @@ pub(crate) fn synthesize_runtime_capture_rgba_from_map(
         FilterType::Triangle,
     );
     let mean = mean_rgb_value(&map_square);
-    let background = shade_rgb(mean, 0.08, 6.0);
     let border = shade_rgb(mean, 0.18, 12.0);
     let frame = shade_rgb(mean, 0.32, 20.0);
-    let hole = blend_rgb(shade_rgb(mean, 0.60, 54.0), [236, 232, 220], 0.55);
     let mut canvas = RgbaImage::from_pixel(
         config.minimap.width,
         config.minimap.height,
-        Rgba([background[0], background[1], background[2], 255]),
+        Rgba([0, 0, 0, 0]),
     );
 
     for local_y in 0..layout.circle_diameter_px {
@@ -712,13 +702,12 @@ pub(crate) fn synthesize_runtime_capture_rgba_from_map(
                 let map_y = local_y
                     .saturating_sub(layout.map_inset_px)
                     .min(map_square.height().saturating_sub(1));
-                let source = map_square.get_pixel(map_x, map_y).0;
-                let [r, g, b] = if distance <= layout.normalized_inner_radius {
-                    blend_rgb(hole, [source[0], source[1], source[2]], 0.22)
+                if distance <= layout.normalized_inner_radius {
+                    Rgba([0, 0, 0, 0])
                 } else {
-                    [source[0], source[1], source[2]]
-                };
-                Rgba([r, g, b, 255])
+                    let source = map_square.get_pixel(map_x, map_y).0;
+                    Rgba([source[0], source[1], source[2], 255])
+                }
             };
 
             canvas.put_pixel(
@@ -1044,12 +1033,15 @@ pub fn masked_chroma_similarity(search: &RgbaImage, template: &RgbaImage, mask: 
     for y in 0..search.height() {
         for x in 0..search.width() {
             let mask_weight = f32::from(mask.get_pixel(x, y).0[0]) / 255.0;
-            if mask_weight <= 0.0 {
+            let search_pixel = search.get_pixel(x, y).0;
+            let template_pixel = template.get_pixel(x, y).0;
+            let alpha_weight =
+                (f32::from(search_pixel[3]) / 255.0) * (f32::from(template_pixel[3]) / 255.0);
+            let effective_weight = mask_weight * alpha_weight;
+            if effective_weight <= 0.0 {
                 continue;
             }
 
-            let search_pixel = search.get_pixel(x, y).0;
-            let template_pixel = template.get_pixel(x, y).0;
             let search_rgb = normalized_rgb_linear(search_pixel);
             let template_rgb = normalized_rgb_linear(template_pixel);
             let search_chroma = normalized_rgb(search_pixel);
@@ -1058,20 +1050,20 @@ pub fn masked_chroma_similarity(search: &RgbaImage, template: &RgbaImage, mask: 
                 + 0.9
                     * ((pixel_chroma(search_pixel) + pixel_chroma(template_pixel)) * 0.5)
                         .clamp(0.0, 1.0);
-            rgb_dot += mask_weight
+            rgb_dot += effective_weight
                 * (search_rgb[0] * template_rgb[0]
                     + search_rgb[1] * template_rgb[1]
                     + search_rgb[2] * template_rgb[2]);
-            rgb_search_norm += mask_weight
+            rgb_search_norm += effective_weight
                 * (search_rgb[0] * search_rgb[0]
                     + search_rgb[1] * search_rgb[1]
                     + search_rgb[2] * search_rgb[2]);
-            rgb_template_norm += mask_weight
+            rgb_template_norm += effective_weight
                 * (template_rgb[0] * template_rgb[0]
                     + template_rgb[1] * template_rgb[1]
                     + template_rgb[2] * template_rgb[2]);
 
-            let weight = mask_weight * chroma_weight;
+            let weight = effective_weight * chroma_weight;
             chroma_dot += weight
                 * (search_chroma[0] * template_chroma[0]
                     + search_chroma[1] * template_chroma[1]
@@ -1337,11 +1329,10 @@ pub fn rgba_image_as_unit_vec(image: &RgbaImage) -> Vec<f32> {
     let plane_len = image.width() as usize * image.height() as usize;
     let mut values = Vec::with_capacity(plane_len * 3);
     for channel in 0..3 {
-        values.extend(
-            image
-                .pixels()
-                .map(|pixel| f32::from(pixel.0[channel]) / 255.0),
-        );
+        values.extend(image.pixels().map(|pixel| {
+            let alpha = f32::from(pixel.0[3]) / 255.0;
+            (f32::from(pixel.0[channel]) / 255.0) * alpha
+        }));
     }
     values
 }
@@ -1499,6 +1490,61 @@ mod tests {
             0,
             "ring pixels should survive the approximate outer-square preprocessing",
         );
+    }
+
+    #[test]
+    fn capture_selection_outer_square_rgba_keeps_outer_and_center_transparent() {
+        let image = RgbaImage::from_pixel(128, 128, Rgba([90, 120, 160, 255]));
+        let square = capture_selection_outer_square_rgba(&image, 0.18, 1.0);
+
+        assert_eq!(square.width(), 128);
+        assert_eq!(square.height(), 128);
+        assert_eq!(square.get_pixel(0, 0).0[3], 0);
+        assert_eq!(
+            square.get_pixel(square.width() / 2, square.height() / 2).0[3],
+            0
+        );
+        assert_eq!(
+            square.get_pixel(square.width() / 2, square.height() / 4).0[3],
+            255
+        );
+    }
+
+    #[test]
+    fn synthetic_runtime_capture_rgba_keeps_outer_and_center_transparent() {
+        let config = AppConfig {
+            view_size: 96,
+            minimap: crate::config::CaptureRegion {
+                top: 0,
+                left: 0,
+                width: 160,
+                height: 120,
+            },
+            template: crate::config::TemplateTrackingConfig {
+                mask_inner_radius: 0.16,
+                mask_outer_radius: 80.0 / 120.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let map = RgbaImage::from_fn(256, 256, |x, y| {
+            Rgba([
+                ((x * 11 + y * 7) % 251) as u8,
+                ((x * 13 + y * 5) % 251) as u8,
+                ((x * 17 + y * 3) % 251) as u8,
+                255,
+            ])
+        });
+        let capture = synthesize_runtime_capture_rgba_from_map(&map, &config, (128, 128));
+        let layout = synthetic_capture_layout(&config);
+        let center_x = layout.circle_offset_x + layout.circle_diameter_px / 2;
+        let center_y = layout.circle_offset_y + layout.circle_diameter_px / 2;
+        let ring_x = center_x;
+        let ring_y = layout.circle_offset_y + layout.circle_diameter_px / 4;
+
+        assert_eq!(capture.get_pixel(0, 0).0[3], 0);
+        assert_eq!(capture.get_pixel(center_x, center_y).0[3], 0);
+        assert_eq!(capture.get_pixel(ring_x, ring_y).0[3], 255);
     }
 
     #[test]
