@@ -15,9 +15,7 @@ use crate::{
         AssetManifest, BwikiCachePaths, WorkspaceLoadReport, WorkspaceSnapshot,
         default_map_dimensions,
     },
-    tracking::vision::{
-        synthesize_runtime_capture_rgba_from_map,
-    },
+    tracking::vision::synthesize_runtime_capture_rgba_from_map,
 };
 
 const APP_QUALIFIER: &str = "io";

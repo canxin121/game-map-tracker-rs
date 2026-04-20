@@ -1,13 +1,17 @@
 use gpui::{
-    AnyWindowHandle, App, Bounds, ClickEvent, Context, CursorStyle, InteractiveElement as _,
+    AnyWindowHandle, Bounds, ClickEvent, Context, CursorStyle, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    PathBuilder, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, canvas, div, hsla, point, px, size, transparent_black,
+    PathBuilder, Pixels, Point, Render, Styled, Window, canvas, div, hsla, point, px, size,
+    transparent_black,
 };
 
 use crate::config::CaptureRegion;
 
-use super::TrackerWorkbench;
+use super::{
+    TrackerWorkbench,
+    picker_geometry::{capture_region_from_selection_bounds, selection_bounds_from_capture_region},
+    picker_shared::{close_picker, commit_picker_result, picker_control_button},
+};
 
 const MIN_SELECTION_SIZE: f32 = 24.0;
 const OUTLINE_STROKE_WIDTH: f32 = 3.0;
@@ -64,7 +68,7 @@ pub(super) struct MinimapRegionPickResult {
 pub(super) struct MinimapRegionPicker {
     workbench: gpui::WeakEntity<TrackerWorkbench>,
     main_window_handle: AnyWindowHandle,
-    display_bounds: Bounds<Pixels>,
+    picker_bounds: Bounds<Pixels>,
     selection: Option<CircleSelection>,
     drag_mode: Option<DragMode>,
     pointer_position: Option<Point<Pixels>>,
@@ -75,14 +79,14 @@ impl MinimapRegionPicker {
     pub(super) fn new(
         workbench: gpui::WeakEntity<TrackerWorkbench>,
         main_window_handle: AnyWindowHandle,
-        display_bounds: Bounds<Pixels>,
+        picker_bounds: Bounds<Pixels>,
         minimap_region: CaptureRegion,
         mask_inner_radius: f32,
         mask_outer_radius: f32,
     ) -> Self {
         let default_inner_ratio = normalized_inner_ratio(mask_inner_radius, mask_outer_radius);
         let selection = selection_from_existing_region(
-            display_bounds,
+            picker_bounds,
             &minimap_region,
             mask_inner_radius,
             mask_outer_radius,
@@ -90,7 +94,7 @@ impl MinimapRegionPicker {
         Self {
             workbench,
             main_window_handle,
-            display_bounds,
+            picker_bounds,
             selection,
             drag_mode: None,
             pointer_position: None,
@@ -196,12 +200,9 @@ impl MinimapRegionPicker {
     }
 
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(workbench) = self.workbench.upgrade() {
-            let _ = workbench.update(cx, |this, _| {
-                this.handle_minimap_region_picker_cancelled();
-            });
-        }
-        window.remove_window();
+        close_picker(&self.workbench, window, cx, |this, _| {
+            this.handle_minimap_region_picker_cancelled();
+        });
     }
 
     fn reset_selection(&mut self, cx: &mut Context<Self>) {
@@ -225,28 +226,25 @@ impl MinimapRegionPicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let workbench = self.workbench.clone();
-        let main_window_handle = self.main_window_handle;
-
-        let _ = main_window_handle.update(cx, move |_, main_window, cx| {
-            if let Some(workbench) = workbench.upgrade() {
-                let _ = workbench.update(cx, |this, cx| {
-                    this.finish_minimap_region_pick(result, main_window, cx);
-                });
-            }
-        });
-
-        window.remove_window();
+        commit_picker_result(
+            &self.workbench,
+            self.main_window_handle,
+            window,
+            cx,
+            move |this, main_window, cx| {
+                this.finish_minimap_region_pick(result, main_window, cx);
+            },
+        );
     }
 
     fn pick_result_for(&self, selection: CircleSelection) -> MinimapRegionPickResult {
-        pick_result_for_selection(self.display_bounds, selection)
+        pick_result_for_selection(self.picker_bounds, selection)
     }
 
     fn local_bounds(&self) -> Bounds<Pixels> {
         Bounds {
             origin: point(px(0.0), px(0.0)),
-            size: self.display_bounds.size,
+            size: self.picker_bounds.size,
         }
     }
 
@@ -408,57 +406,6 @@ fn picker_controls(has_selection: bool, cx: &mut Context<MinimapRegionPicker>) -
                     }),
                 )),
         )
-}
-
-fn picker_control_button(
-    id: impl Into<SharedString>,
-    label: &'static str,
-    background: gpui::Hsla,
-    hover_background: gpui::Hsla,
-    border_color: gpui::Hsla,
-    enabled: bool,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let button = div()
-        .id(id.into())
-        .h(px(34.0))
-        .px_3()
-        .min_w(px(72.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_lg()
-        .bg(background)
-        .border_1()
-        .border_color(border_color)
-        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-            cx.stop_propagation();
-        })
-        .on_mouse_up(MouseButton::Left, |_, _, cx| {
-            cx.stop_propagation();
-        })
-        .child(
-            div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(hsla(0.0, 0.0, 1.0, 0.96))
-                .child(label),
-        );
-
-    if enabled {
-        button
-            .cursor(CursorStyle::PointingHand)
-            .hover(move |style| style.bg(hover_background))
-            .active(|style| style.opacity(0.92))
-            .on_click(
-                move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    cx.stop_propagation();
-                    on_click(event, window, cx);
-                },
-            )
-    } else {
-        button.opacity(0.42)
-    }
 }
 
 fn circular_selection_bounds(start: Point<Pixels>, end: Point<Pixels>) -> Bounds<Pixels> {
@@ -693,12 +640,7 @@ fn pick_result_for_selection(
 ) -> MinimapRegionPickResult {
     let bounds = circle_selection_bounds(selection);
     MinimapRegionPickResult {
-        region: CaptureRegion {
-            top: (f32::from(display_bounds.origin.y) + f32::from(bounds.origin.y)).round() as i32,
-            left: (f32::from(display_bounds.origin.x) + f32::from(bounds.origin.x)).round() as i32,
-            width: f32::from(bounds.size.width).round().max(1.0) as u32,
-            height: f32::from(bounds.size.height).round().max(1.0) as u32,
-        },
+        region: capture_region_from_selection_bounds(display_bounds, bounds),
         mask_inner_radius: selection.inner_ratio,
         mask_outer_radius: 1.0,
     }
@@ -710,9 +652,7 @@ fn selection_from_existing_region(
     mask_inner_radius: f32,
     mask_outer_radius: f32,
 ) -> Option<CircleSelection> {
-    if region.width == 0 || region.height == 0 {
-        return None;
-    }
+    let bounds = selection_bounds_from_capture_region(display_bounds, region)?;
 
     let base_radius = region.width.min(region.height) as f32 * 0.5;
     if base_radius <= 0.0 {
@@ -726,8 +666,8 @@ fn selection_from_existing_region(
     };
     let selection = CircleSelection {
         center: point(
-            px(region.left as f32 - f32::from(display_bounds.origin.x) + region.width as f32 * 0.5),
-            px(region.top as f32 - f32::from(display_bounds.origin.y) + region.height as f32 * 0.5),
+            bounds.origin.x + px(region.width as f32 * 0.5),
+            bounds.origin.y + px(region.height as f32 * 0.5),
         ),
         radius: px((base_radius * outer_ratio).max(MIN_SELECTION_SIZE * 0.5)),
         inner_ratio: normalized_inner_ratio(mask_inner_radius, outer_ratio),

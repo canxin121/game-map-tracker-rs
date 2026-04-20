@@ -40,7 +40,7 @@ impl TrackingStatus {
             lifecycle: TrackerLifecycle::Idle,
             source: None,
             match_score: None,
-            probe_summary: "默认存在".to_owned(),
+            probe_summary: "等待探针".to_owned(),
             locate_summary: "等待首帧".to_owned(),
         }
     }
@@ -151,7 +151,7 @@ fn run_tracker_session(
         lifecycle: TrackerLifecycle::Idle,
         source: None,
         match_score: None,
-        probe_summary: "默认存在".to_owned(),
+        probe_summary: "等待探针".to_owned(),
         locate_summary: "等待初始化".to_owned(),
     }));
 

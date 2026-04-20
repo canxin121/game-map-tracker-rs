@@ -1490,7 +1490,10 @@ mod tests {
         assert_eq!(square.width(), 12);
         assert_eq!(square.height(), 12);
         assert_eq!(square.get_pixel(0, 0).0[0], 0);
-        assert_eq!(square.get_pixel(square.width() / 2, square.height() / 2).0[0], 0);
+        assert_eq!(
+            square.get_pixel(square.width() / 2, square.height() / 2).0[0],
+            0
+        );
         assert_ne!(
             square.get_pixel(square.width() / 2, 2).0[0],
             0,
@@ -1526,7 +1529,10 @@ mod tests {
         assert_eq!(square.width(), 160);
         assert_eq!(square.height(), 160);
         assert_eq!(square.get_pixel(0, 0).0[0], 0);
-        assert_eq!(square.get_pixel(square.width() / 2, square.height() / 2).0[0], 0);
+        assert_eq!(
+            square.get_pixel(square.width() / 2, square.height() / 2).0[0],
+            0
+        );
     }
 
     #[test]

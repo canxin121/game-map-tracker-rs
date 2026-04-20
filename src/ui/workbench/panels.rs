@@ -1,10 +1,13 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
 use gpui::{
     AnyElement, Bounds, ClickEvent, ClipboardItem, ContentMask, Context, ImgResourceLoader,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, PathBuilder, ScrollDelta, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement as _, Styled as _, canvas, div, fill, point,
+    MouseUpEvent, ParentElement as _, PathBuilder, RenderImage, ScrollDelta, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement as _, Styled as _, canvas, div, fill, point,
     prelude::FluentBuilder as _, px, size,
 };
 use gpui_component::{
@@ -31,6 +34,7 @@ use crate::{
 
 use super::{
     MapCanvasKind, TestCaseLabel, TrackerCacheKind, TrackerMapRenderSnapshot, TrackerWorkbench,
+    debug_images::contained_image_bounds,
     forms::read_input_value,
     page::{MapPage, SettingsPage, WorkbenchPage},
     select::Select,
@@ -1373,7 +1377,7 @@ fn page_header(
                         if this.is_tracking_active() {
                             this.stop_tracker(false);
                         } else {
-                            this.start_tracker();
+                            this.start_tracker(cx);
                         }
                         cx.notify();
                     }),
@@ -2128,22 +2132,77 @@ fn settings_capture_page(
             )
             .into_any_element(),
             editable_config_section(
-                "小地图圆环探针",
+                "F1-P 标签探针",
                 vec![
-                    div()
-                        .text_xs()
-                        .text_color(tokens.text_muted)
-                        .child("圆环探针直接复用上方“小地图环形取区”和模板内外圈半径，不再单独使用任何额外矩形探针区域。")
+                    toolbar_cluster(vec![
+                        toolbar_button_with_tooltip(
+                            "settings-minimap-presence-probe-picker",
+                            tokens,
+                            if this.is_minimap_presence_probe_picker_active() {
+                                this.busy_spinner_icon()
+                            } else {
+                                "F"
+                            },
+                            if this.is_minimap_presence_probe_picker_active() {
+                                "取区中"
+                            } else {
+                                "标签取区"
+                            },
+                            Some(if this.is_minimap_presence_probe_picker_active() {
+                                "F1-P 标签探针流程已打开：请只框住标签带，不要包含上方图标；确认后会先生成建模预览，再由你手动确认保存。".into()
+                            } else {
+                                "打开屏幕取区窗口，手动框选 F1 到 P 这排标签；确认后会先展示建模结果，再手动确认保存。".into()
+                            }),
+                            if this.is_minimap_presence_probe_picker_active() {
+                                ToolbarButtonTone::Primary
+                            } else {
+                                ToolbarButtonTone::Neutral
+                            },
+                            false,
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.toggle_minimap_presence_probe_picker(window, cx);
+                                cx.notify();
+                            }),
+                        )
                         .into_any_element(),
-                    div()
-                        .text_xs()
-                        .text_color(tokens.text_muted)
-                        .child("实时判断依据是双层地图边框：内层等宽灰色圆框，外层半透明黑色外框；命中后会提取去掉中心箭头区域的小地图圆环。")
-                        .into_any_element(),
+                    ])
+                    .into_any_element(),
                     config_row(vec![
                         labeled_input(
                             tokens,
-                            "命中阈值",
+                            "启用 true/false",
+                            &this.config_form.minimap_presence_probe_enabled,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "Top",
+                            &this.config_form.minimap_presence_probe_top,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "Left",
+                            &this.config_form.minimap_presence_probe_left,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "Width",
+                            &this.config_form.minimap_presence_probe_width,
+                        )
+                        .into_any_element(),
+                        labeled_input(
+                            tokens,
+                            "Height",
+                            &this.config_form.minimap_presence_probe_height,
+                        )
+                        .into_any_element(),
+                    ]),
+                    config_row(vec![
+                        labeled_input(
+                            tokens,
+                            "匹配阈值",
                             &this.config_form.minimap_presence_probe_match_threshold,
                         )
                         .into_any_element(),
@@ -2442,28 +2501,20 @@ fn settings_debug_page(
         .compact()
         .on_click(cx.listener(|this, indices: &Vec<usize>, _, cx| {
             if let Some(index) = indices.first().copied() {
-                this.set_debug_mode_enabled(index == 1);
+                this.set_debug_mode_enabled(index == 1, cx);
                 cx.notify();
             }
         }));
     let snapshot = this
         .is_debug_mode_enabled()
-        .then(|| this.debug_snapshot.clone())
+        .then_some(this.debug_snapshot.as_ref())
         .flatten();
-    let images = snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.images.clone())
-        .unwrap_or_default();
-    let fields = snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.fields.clone())
-        .unwrap_or_default();
 
     settings_page_shell(
         "追踪调试",
         if this.is_debug_mode_enabled() {
             snapshot.as_ref().map_or_else(
-                || "调试模式已开启。这里会显示当前 tracker 的 minimap、heatmap、refine 预览和状态字段。".to_owned(),
+                || "调试模式已开启。这里会显示当前 tracker 的探针裁剪图、heatmap、refine 预览和状态字段。".to_owned(),
                 |snapshot| {
                     format!(
                         "调试模式已开启。引擎 {}，阶段 {}，帧序号 {}。",
@@ -2543,9 +2594,9 @@ fn settings_debug_page(
                     body_text(
                         tokens,
                         if this.is_test_case_capture_enabled() {
-                            "开启后，调试页和追踪画中画都会显示 minimap 测试样本捕获入口；捕获结果会直接保存到项目的 assets/test。"
+                            "开启后，调试页和追踪画中画都会显示 F1-P 测试样本捕获入口；捕获结果会直接保存到项目的 assets/test。"
                         } else {
-                            "关闭后，所有 minimap 测试样本捕获入口都会隐藏，也不会再弹出画中画外置捕获面板。"
+                            "关闭后，所有 F1-P 测试样本捕获入口都会隐藏，也不会再弹出画中画外置捕获面板。"
                         },
                     )
                     .into_any_element(),
@@ -2556,12 +2607,11 @@ fn settings_debug_page(
                                 tokens,
                                 "+",
                                 "捕获有图",
-                                Some("立刻抓取当前 minimap，并保存为 has_map_*.png。".into()),
+                                Some("立刻抓取当前 F1-P 区域，并保存为 has_map_*.png。".into()),
                                 ToolbarButtonTone::Neutral,
                                 false,
                                 cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.capture_test_case(TestCaseLabel::HasMap);
-                                    cx.notify();
+                                    this.capture_test_case_with_feedback(TestCaseLabel::HasMap, Some(cx));
                                 }),
                             )
                             .into_any_element(),
@@ -2570,12 +2620,11 @@ fn settings_debug_page(
                                 tokens,
                                 "-",
                                 "捕获无图",
-                                Some("立刻抓取当前 minimap，并保存为 no_map_*.png。".into()),
+                                Some("立刻抓取当前 F1-P 区域，并保存为 no_map_*.png。".into()),
                                 ToolbarButtonTone::Neutral,
                                 false,
                                 cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.capture_test_case(TestCaseLabel::NoMap);
-                                    cx.notify();
+                                    this.capture_test_case_with_feedback(TestCaseLabel::NoMap, Some(cx));
                                 }),
                             )
                             .into_any_element(),
@@ -2594,12 +2643,22 @@ fn settings_debug_page(
                     .gap_3()
                     .flex_wrap()
                     .children(
-                        if images.is_empty() {
+                        if snapshot.map_or(true, |snapshot| snapshot.images.is_empty()) {
                             vec![empty_list_state(tokens, "当前还没有可显示的调试图像。").into_any_element()]
                         } else {
-                            images
+                            snapshot
                                 .into_iter()
-                                .map(|image| debug_image_card(image, tokens))
+                                .flat_map(|snapshot| snapshot.images.iter().enumerate())
+                                .map(|(index, image)| {
+                                    debug_image_card(
+                                        image,
+                                        this.debug_snapshot_render_images
+                                            .get(index)
+                                            .cloned()
+                                            .flatten(),
+                                        tokens,
+                                    )
+                                })
                                 .collect::<Vec<_>>()
                         },
                     )
@@ -2614,11 +2673,12 @@ fn settings_debug_page(
                     .gap_3()
                     .flex_wrap()
                     .children(
-                        if fields.is_empty() {
+                        if snapshot.map_or(true, |snapshot| snapshot.fields.is_empty()) {
                             vec![empty_list_state(tokens, "当前还没有可显示的调试字段。").into_any_element()]
                         } else {
-                            fields
+                            snapshot
                                 .into_iter()
+                                .flat_map(|snapshot| snapshot.fields.iter())
                                 .map(|field| debug_field_card(field, tokens).into_any_element())
                                 .collect::<Vec<_>>()
                         },
@@ -3475,7 +3535,8 @@ fn bwiki_map_panel(
 }
 
 fn debug_image_card(
-    image: crate::tracking::debug::DebugImage,
+    image: &crate::tracking::debug::DebugImage,
+    render_image: Option<Arc<RenderImage>>,
     tokens: WorkbenchThemeTokens,
 ) -> AnyElement {
     let title = format!("{} · {}", image.label, image.kind);
@@ -3492,68 +3553,53 @@ fn debug_image_card(
                 .flex_col()
                 .gap_2()
                 .child(div().text_xs().text_color(tokens.text_muted).child(title))
-                .child(debug_image_canvas(Some(image), tokens)),
+                .child(debug_image_canvas(
+                    image.width,
+                    image.height,
+                    image.format,
+                    render_image,
+                    tokens,
+                )),
         )
         .into_any_element()
 }
 
 fn debug_image_canvas(
-    image: Option<crate::tracking::debug::DebugImage>,
+    image_width: u32,
+    image_height: u32,
+    image_format: crate::tracking::debug::DebugImageFormat,
+    render_image: Option<Arc<RenderImage>>,
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
     canvas(
-        move |_, _, _| image.clone(),
-        move |bounds, image, window, _| {
+        move |_, _, _| {
+            (
+                image_width,
+                image_height,
+                image_format,
+                render_image.clone(),
+            )
+        },
+        move |bounds, state, window, _| {
             window.paint_quad(fill(bounds, tokens.debug_canvas_bg));
-            let Some(image) = image.as_ref() else {
+            let (image_width, image_height, image_format, render_image) = state;
+            if image_width == 0 || image_height == 0 {
+                return;
+            }
+            let Some(render_image) = render_image.as_ref() else {
                 return;
             };
-            if image.width == 0 || image.height == 0 || image.pixels.is_empty() {
-                return;
-            }
-
-            let scale_x = f32::from(bounds.size.width) / image.width as f32;
-            let scale_y = f32::from(bounds.size.height) / image.height as f32;
-            match image.format {
-                crate::tracking::debug::DebugImageFormat::Gray8 => {
-                    for y in 0..image.height {
-                        for x in 0..image.width {
-                            let intensity = image.pixels[(y * image.width + x) as usize] as u32;
-                            let rgb = (intensity << 16) | (intensity << 8) | intensity;
-                            let pixel_bounds = Bounds {
-                                origin: point(
-                                    bounds.origin.x + px(x as f32 * scale_x),
-                                    bounds.origin.y + px(y as f32 * scale_y),
-                                ),
-                                size: size(px(scale_x.max(1.0)), px(scale_y.max(1.0))),
-                            };
-                            window.paint_quad(fill(pixel_bounds, gpui::rgb(rgb)));
-                        }
-                    }
-                }
-                crate::tracking::debug::DebugImageFormat::Rgba8 => {
-                    for y in 0..image.height {
-                        for x in 0..image.width {
-                            let index = ((y * image.width + x) * 4) as usize;
-                            if index + 3 >= image.pixels.len() {
-                                continue;
-                            }
-                            let r = image.pixels[index] as u32;
-                            let g = image.pixels[index + 1] as u32;
-                            let b = image.pixels[index + 2] as u32;
-                            let rgb = (r << 16) | (g << 8) | b;
-                            let pixel_bounds = Bounds {
-                                origin: point(
-                                    bounds.origin.x + px(x as f32 * scale_x),
-                                    bounds.origin.y + px(y as f32 * scale_y),
-                                ),
-                                size: size(px(scale_x.max(1.0)), px(scale_y.max(1.0))),
-                            };
-                            window.paint_quad(fill(pixel_bounds, gpui::rgb(rgb)));
-                        }
-                    }
-                }
-            }
+            let image_bounds = contained_image_bounds(bounds, image_width, image_height);
+            let _ = window.paint_image(
+                image_bounds,
+                0.0.into(),
+                render_image.clone(),
+                0,
+                matches!(
+                    image_format,
+                    crate::tracking::debug::DebugImageFormat::Gray8
+                ),
+            );
         },
     )
     .h(px(180.0))
@@ -3561,7 +3607,7 @@ fn debug_image_canvas(
 }
 
 fn debug_field_card(
-    field: crate::tracking::debug::DebugField,
+    field: &crate::tracking::debug::DebugField,
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
     div()
@@ -3580,9 +3626,14 @@ fn debug_field_card(
                     div()
                         .text_xs()
                         .text_color(tokens.text_muted)
-                        .child(field.label),
+                        .child(field.label.clone()),
                 )
-                .child(div().text_sm().text_color(tokens.app_fg).child(field.value)),
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(tokens.app_fg)
+                        .child(field.value.clone()),
+                ),
         )
 }
 

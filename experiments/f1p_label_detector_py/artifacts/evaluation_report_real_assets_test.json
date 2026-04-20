@@ -1,0 +1,1065 @@
+{
+  "positive_total": 36,
+  "positive_true_positive": 36,
+  "positive_recall": 1.0,
+  "negative_total": 81,
+  "negative_false_positive": 0,
+  "negative_specificity": 1.0,
+  "average_inference_ms": 1.191,
+  "median_inference_ms": 1.099,
+  "samples": [
+    {
+      "file": "has_map_1776666573349.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776668145295.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776668151039.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776668154050.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776668156743.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776668161640.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776668164873.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776668171137.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776668175138.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776668179090.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776668184379.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776668188661.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676038213.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676041305.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676043256.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676046308.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676048967.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676051688.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676053586.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676057415.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676061648.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676064936.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676067782.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676072106.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676074038.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676077545.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676082884.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676085799.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676088657.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676090922.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676094247.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676096203.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676098220.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676100311.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676103066.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "has_map_1776676105129.png",
+      "kind": "positive",
+      "expected": true,
+      "predicted": true,
+      "final_score": 1.0,
+      "mean_raw_score": 1.0,
+      "min_raw_score": 1.0
+    },
+    {
+      "file": "no_map_1776672857073.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0,
+      "mean_raw_score": 0.0,
+      "min_raw_score": 0.0
+    },
+    {
+      "file": "no_map_1776672859011.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0037,
+      "mean_raw_score": 0.0433,
+      "min_raw_score": -0.0912
+    },
+    {
+      "file": "no_map_1776672862640.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.091,
+      "mean_raw_score": 0.1378,
+      "min_raw_score": 0.0041
+    },
+    {
+      "file": "no_map_1776672866379.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0569,
+      "mean_raw_score": 0.0648,
+      "min_raw_score": 0.0423
+    },
+    {
+      "file": "no_map_1776672963599.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0,
+      "mean_raw_score": 0.0,
+      "min_raw_score": 0.0
+    },
+    {
+      "file": "no_map_1776673326725.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0244,
+      "mean_raw_score": 0.0375,
+      "min_raw_score": 0.0
+    },
+    {
+      "file": "no_map_1776675854794.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.1647,
+      "mean_raw_score": 0.2058,
+      "min_raw_score": 0.0883
+    },
+    {
+      "file": "no_map_1776675858617.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0264,
+      "mean_raw_score": 0.0689,
+      "min_raw_score": -0.0526
+    },
+    {
+      "file": "no_map_1776675934487.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0371,
+      "mean_raw_score": 0.0784,
+      "min_raw_score": -0.0396
+    },
+    {
+      "file": "no_map_1776675938106.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0384,
+      "mean_raw_score": -0.0017,
+      "min_raw_score": -0.1063
+    },
+    {
+      "file": "no_map_1776675942327.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0219,
+      "mean_raw_score": 0.0357,
+      "min_raw_score": -0.1289
+    },
+    {
+      "file": "no_map_1776675944806.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0382,
+      "mean_raw_score": 0.0658,
+      "min_raw_score": -0.0131
+    },
+    {
+      "file": "no_map_1776675947179.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0964,
+      "mean_raw_score": 0.1506,
+      "min_raw_score": -0.0043
+    },
+    {
+      "file": "no_map_1776675950294.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0193,
+      "mean_raw_score": 0.0566,
+      "min_raw_score": -0.0498
+    },
+    {
+      "file": "no_map_1776675952982.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0041,
+      "mean_raw_score": 0.061,
+      "min_raw_score": -0.125
+    },
+    {
+      "file": "no_map_1776675956142.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0194,
+      "mean_raw_score": 0.0678,
+      "min_raw_score": -0.1813
+    },
+    {
+      "file": "no_map_1776675963768.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0858,
+      "mean_raw_score": 0.1241,
+      "min_raw_score": 0.0147
+    },
+    {
+      "file": "no_map_1776675967583.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.083,
+      "mean_raw_score": 0.1188,
+      "min_raw_score": 0.0166
+    },
+    {
+      "file": "no_map_1776675970123.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0651,
+      "mean_raw_score": 0.0972,
+      "min_raw_score": 0.0054
+    },
+    {
+      "file": "no_map_1776675972181.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.001,
+      "mean_raw_score": 0.0511,
+      "min_raw_score": -0.0976
+    },
+    {
+      "file": "no_map_1776675975377.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0721,
+      "mean_raw_score": 0.1189,
+      "min_raw_score": -0.0148
+    },
+    {
+      "file": "no_map_1776675978410.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.012,
+      "mean_raw_score": 0.071,
+      "min_raw_score": -0.1663
+    },
+    {
+      "file": "no_map_1776675980428.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.025,
+      "mean_raw_score": 0.058,
+      "min_raw_score": -0.0363
+    },
+    {
+      "file": "no_map_1776675983751.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0215,
+      "mean_raw_score": 0.0337,
+      "min_raw_score": -0.0011
+    },
+    {
+      "file": "no_map_1776675985582.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.1203,
+      "mean_raw_score": 0.162,
+      "min_raw_score": 0.0429
+    },
+    {
+      "file": "no_map_1776675986744.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0245,
+      "mean_raw_score": 0.0969,
+      "min_raw_score": -0.1099
+    },
+    {
+      "file": "no_map_1776675988047.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.069,
+      "mean_raw_score": 0.0945,
+      "min_raw_score": 0.0218
+    },
+    {
+      "file": "no_map_1776675989351.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0316,
+      "mean_raw_score": 0.0791,
+      "min_raw_score": -0.0567
+    },
+    {
+      "file": "no_map_1776675990745.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0821,
+      "mean_raw_score": 0.1267,
+      "min_raw_score": -0.0007
+    },
+    {
+      "file": "no_map_1776675992230.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0097,
+      "mean_raw_score": 0.073,
+      "min_raw_score": -0.1078
+    },
+    {
+      "file": "no_map_1776675993807.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0623,
+      "mean_raw_score": 0.0772,
+      "min_raw_score": 0.0344
+    },
+    {
+      "file": "no_map_1776675995307.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0891,
+      "mean_raw_score": 0.103,
+      "min_raw_score": 0.0632
+    },
+    {
+      "file": "no_map_1776675996769.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0191,
+      "mean_raw_score": 0.0627,
+      "min_raw_score": -0.062
+    },
+    {
+      "file": "no_map_1776675998359.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0621,
+      "mean_raw_score": 0.0988,
+      "min_raw_score": -0.006
+    },
+    {
+      "file": "no_map_1776675999803.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0486,
+      "mean_raw_score": 0.0834,
+      "min_raw_score": -0.016
+    },
+    {
+      "file": "no_map_1776676001924.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0348,
+      "mean_raw_score": 0.0717,
+      "min_raw_score": -0.0337
+    },
+    {
+      "file": "no_map_1776676002928.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0428,
+      "mean_raw_score": 0.0787,
+      "min_raw_score": -0.0238
+    },
+    {
+      "file": "no_map_1776676003788.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0168,
+      "mean_raw_score": 0.0246,
+      "min_raw_score": -0.0936
+    },
+    {
+      "file": "no_map_1776676005101.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0781,
+      "mean_raw_score": 0.1173,
+      "min_raw_score": 0.0052
+    },
+    {
+      "file": "no_map_1776676006176.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0219,
+      "mean_raw_score": 0.0164,
+      "min_raw_score": -0.093
+    },
+    {
+      "file": "no_map_1776676007653.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0328,
+      "mean_raw_score": 0.0667,
+      "min_raw_score": -0.0301
+    },
+    {
+      "file": "no_map_1776676008630.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0619,
+      "mean_raw_score": -0.0182,
+      "min_raw_score": -0.1432
+    },
+    {
+      "file": "no_map_1776676010070.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0361,
+      "mean_raw_score": 0.0833,
+      "min_raw_score": -0.0516
+    },
+    {
+      "file": "no_map_1776676011577.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0704,
+      "mean_raw_score": 0.0989,
+      "min_raw_score": 0.0177
+    },
+    {
+      "file": "no_map_1776676012590.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0745,
+      "mean_raw_score": 0.1301,
+      "min_raw_score": -0.0287
+    },
+    {
+      "file": "no_map_1776676013442.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0168,
+      "mean_raw_score": 0.0236,
+      "min_raw_score": -0.0919
+    },
+    {
+      "file": "no_map_1776676014202.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0485,
+      "mean_raw_score": 0.0801,
+      "min_raw_score": -0.0102
+    },
+    {
+      "file": "no_map_1776676015031.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0184,
+      "mean_raw_score": 0.0108,
+      "min_raw_score": -0.0726
+    },
+    {
+      "file": "no_map_1776676015780.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.038,
+      "mean_raw_score": 0.063,
+      "min_raw_score": -0.0086
+    },
+    {
+      "file": "no_map_1776676016511.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0241,
+      "mean_raw_score": 0.0582,
+      "min_raw_score": -0.0393
+    },
+    {
+      "file": "no_map_1776676017227.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.024,
+      "mean_raw_score": 0.0561,
+      "min_raw_score": -0.0355
+    },
+    {
+      "file": "no_map_1776676017918.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0728,
+      "mean_raw_score": 0.0996,
+      "min_raw_score": 0.0231
+    },
+    {
+      "file": "no_map_1776676018671.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0281,
+      "mean_raw_score": 0.0732,
+      "min_raw_score": -0.0555
+    },
+    {
+      "file": "no_map_1776676120171.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0183,
+      "mean_raw_score": 0.0679,
+      "min_raw_score": -0.0737
+    },
+    {
+      "file": "no_map_1776676122011.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0095,
+      "mean_raw_score": 0.0295,
+      "min_raw_score": -0.0277
+    },
+    {
+      "file": "no_map_1776676123770.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.1592,
+      "mean_raw_score": 0.22,
+      "min_raw_score": 0.0463
+    },
+    {
+      "file": "no_map_1776676125523.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0474,
+      "mean_raw_score": 0.0709,
+      "min_raw_score": 0.0036
+    },
+    {
+      "file": "no_map_1776676127621.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0354,
+      "mean_raw_score": 0.0888,
+      "min_raw_score": -0.0638
+    },
+    {
+      "file": "no_map_1776676129792.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0054,
+      "mean_raw_score": 0.0414,
+      "min_raw_score": -0.0924
+    },
+    {
+      "file": "no_map_1776676131839.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.03,
+      "mean_raw_score": 0.0611,
+      "min_raw_score": -0.0279
+    },
+    {
+      "file": "no_map_1776676134063.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.1248,
+      "mean_raw_score": 0.2049,
+      "min_raw_score": -0.0238
+    },
+    {
+      "file": "no_map_1776676135897.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0921,
+      "mean_raw_score": 0.1416,
+      "min_raw_score": 0.0
+    },
+    {
+      "file": "no_map_1776676138829.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0762,
+      "mean_raw_score": 0.0907,
+      "min_raw_score": 0.0492
+    },
+    {
+      "file": "no_map_1776676141791.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0781,
+      "mean_raw_score": 0.1128,
+      "min_raw_score": 0.0136
+    },
+    {
+      "file": "no_map_1776676144276.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0061,
+      "mean_raw_score": 0.0514,
+      "min_raw_score": -0.1128
+    },
+    {
+      "file": "no_map_1776676147944.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0729,
+      "mean_raw_score": 0.1059,
+      "min_raw_score": 0.0117
+    },
+    {
+      "file": "no_map_1776676151066.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0707,
+      "mean_raw_score": 0.1482,
+      "min_raw_score": -0.0732
+    },
+    {
+      "file": "no_map_1776676153653.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0655,
+      "mean_raw_score": 0.1124,
+      "min_raw_score": -0.0217
+    },
+    {
+      "file": "no_map_1776676156226.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0323,
+      "mean_raw_score": 0.0601,
+      "min_raw_score": -0.0192
+    },
+    {
+      "file": "no_map_1776676159319.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.1042,
+      "mean_raw_score": 0.1781,
+      "min_raw_score": -0.033
+    },
+    {
+      "file": "no_map_1776676161826.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.1337,
+      "mean_raw_score": 0.1851,
+      "min_raw_score": 0.0384
+    },
+    {
+      "file": "no_map_1776676166009.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.051,
+      "mean_raw_score": 0.1232,
+      "min_raw_score": -0.0832
+    },
+    {
+      "file": "no_map_1776676172274.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.3812,
+      "mean_raw_score": 0.3888,
+      "min_raw_score": 0.3671
+    },
+    {
+      "file": "no_map_1776676176165.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0331,
+      "mean_raw_score": 0.0073,
+      "min_raw_score": -0.1083
+    },
+    {
+      "file": "no_map_1776676179587.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.0481,
+      "mean_raw_score": 0.0184,
+      "min_raw_score": -0.1717
+    },
+    {
+      "file": "no_map_1776676183749.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.071,
+      "mean_raw_score": 0.0186,
+      "min_raw_score": -0.2375
+    },
+    {
+      "file": "no_map_1776676185947.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0051,
+      "mean_raw_score": 0.0222,
+      "min_raw_score": -0.0268
+    },
+    {
+      "file": "no_map_1776676189215.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": -0.1007,
+      "mean_raw_score": -0.0366,
+      "min_raw_score": -0.2198
+    },
+    {
+      "file": "no_map_1776676192301.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0,
+      "mean_raw_score": 0.0,
+      "min_raw_score": 0.0
+    },
+    {
+      "file": "no_map_1776676195743.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0583,
+      "mean_raw_score": 0.0897,
+      "min_raw_score": 0.0
+    },
+    {
+      "file": "no_map_1776676198321.png",
+      "kind": "negative",
+      "expected": false,
+      "predicted": false,
+      "final_score": 0.0132,
+      "mean_raw_score": 0.0497,
+      "min_raw_score": -0.0545
+    }
+  ]
+}

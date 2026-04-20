@@ -57,14 +57,14 @@ use crate::{
             load_tensor_cache, metadata_fingerprint, save_tensor_cache, tracker_map_cache_key,
             tracker_tensor_cache_path,
         },
+        presence::{MinimapPresenceDetector, MinimapPresenceSample},
         vision::{
             ColorCaptureTemplates, ColorMapPyramid, ColorTemplateShape, LocalCandidateDecision,
             MaskSet, MatchCandidate, SearchCrop, SearchStage, TrackerState, build_debug_snapshot,
-            build_mask, capture_template_inner_square, center_to_scaled,
-            coarse_global_downscale, crop_search_region_rgba, load_logic_color_map_pyramid,
-            local_candidate_decision, mask_as_unit_vec, normalized_inner_radius,
-            prepare_color_capture_template, preview_image, rgba_image_as_unit_vec,
-            scaled_color_score, scaled_dimension,
+            build_mask, capture_template_inner_square, center_to_scaled, coarse_global_downscale,
+            crop_search_region_rgba, load_logic_color_map_pyramid, local_candidate_decision,
+            mask_as_unit_vec, normalized_inner_radius, prepare_color_capture_template,
+            preview_image, rgba_image_as_unit_vec, scaled_color_score, scaled_dimension,
             search_region_around_center, synthesize_runtime_capture_rgba_from_map, top_score_peaks,
         },
     },
@@ -92,6 +92,7 @@ pub struct BurnTrackerWorker {
 struct BurnTrackerInner {
     config: AppConfig,
     capture: DesktopCapture,
+    presence_detector: Option<MinimapPresenceDetector>,
     color_pyramid: ColorMapPyramid,
     state: TrackerState,
     debug_enabled: bool,
@@ -234,7 +235,11 @@ impl BurnTrackerWorker {
         #[cfg(feature = "ai-burn")]
         {
             let config = workspace.config.clone();
+            if !config.minimap.is_configured() {
+                anyhow::bail!("小地图区域尚未配置，请先完成小地图取区");
+            }
             let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
+            let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
             let map_cache_key = tracker_map_cache_key(workspace.as_ref())?;
             let masks = build_template_masks(&config);
             let color_pyramid = load_logic_color_map_pyramid(workspace.as_ref())?;
@@ -250,6 +255,7 @@ impl BurnTrackerWorker {
                 inner: BurnTrackerInner {
                     config,
                     capture,
+                    presence_detector,
                     color_pyramid,
                     state: TrackerState::default(),
                     debug_enabled: false,
@@ -2762,6 +2768,33 @@ fn locate_result_from_best(
 impl BurnTrackerInner {
     fn run_frame(&mut self) -> Result<TrackingTick> {
         self.state.begin_frame();
+        let probe_sample = self
+            .presence_detector
+            .as_ref()
+            .map(MinimapPresenceDetector::sample)
+            .transpose()?;
+        if let Some(sample) = probe_sample.as_ref().filter(|sample| !sample.present) {
+            let mut status = self.base_status();
+            status.probe_summary = self.probe_summary(Some(sample));
+            let estimate = self.apply_probe_absent_fallback(&mut status);
+            status.locate_summary = estimate.as_ref().map_or_else(
+                || "F1-P 标签探针未命中，已阻止定位".to_owned(),
+                |estimate| {
+                    format!(
+                        "F1-P 标签探针未命中，已阻止定位，惯性保位 @ {:.0}, {:.0}",
+                        estimate.world.x, estimate.world.y
+                    )
+                },
+            );
+            let debug = self
+                .debug_enabled
+                .then(|| self.build_probe_miss_debug_snapshot(sample, estimate.as_ref()));
+            return Ok(TrackingTick {
+                status,
+                estimate,
+                debug,
+            });
+        }
 
         let captured_rgba = self.capture.capture_rgba()?;
         let captured = preprocess_capture(captured_rgba.clone());
@@ -2772,7 +2805,7 @@ impl BurnTrackerInner {
         )?;
 
         let mut status = self.base_status();
-        status.probe_summary = self.probe_summary();
+        status.probe_summary = self.probe_summary(probe_sample.as_ref());
         let mut estimate = None;
         let mut global_result = None;
         let mut refine_result = None;
@@ -2924,6 +2957,7 @@ impl BurnTrackerInner {
                 None,
                 refine_result.as_ref().or(local_result.as_ref()),
                 estimate.as_ref(),
+                probe_sample.as_ref(),
             )
         });
 
@@ -2947,8 +2981,21 @@ impl BurnTrackerInner {
         }
     }
 
-    fn probe_summary(&self) -> String {
-        "默认存在".to_owned()
+    fn probe_summary(&self, sample: Option<&MinimapPresenceSample>) -> String {
+        match sample {
+            Some(sample) => format!(
+                "{} m{:.3}/{:.3} n{:.3}",
+                if sample.present {
+                    "存在"
+                } else {
+                    "不存在"
+                },
+                sample.mean_raw_score,
+                sample.threshold,
+                sample.min_raw_score
+            ),
+            None => "探针未启用".to_owned(),
+        }
     }
 
     fn locate_success_summary(scope: &str, candidate: &MatchCandidate) -> String {
@@ -3000,6 +3047,22 @@ impl BurnTrackerInner {
         ))
     }
 
+    fn apply_probe_absent_fallback(
+        &mut self,
+        status: &mut TrackingStatus,
+    ) -> Option<PositionEstimate> {
+        let estimate = self.apply_inertial_fallback(status);
+        if estimate.is_some() {
+            status.message = format!("F1-P 标签探针未命中，小地图疑似被遮挡，{}", status.message);
+            return estimate;
+        }
+
+        status.source = None;
+        status.match_score = None;
+        status.message = "F1-P 标签探针未命中，小地图疑似被遮挡，等待界面恢复。".to_owned();
+        None
+    }
+
     fn build_debug_snapshot(
         &self,
         captured: &GrayImage,
@@ -3008,6 +3071,7 @@ impl BurnTrackerInner {
         _refine_crop: Option<&SearchCrop>,
         refine_result: Option<&LocateResult>,
         estimate: Option<&PositionEstimate>,
+        probe_sample: Option<&MinimapPresenceSample>,
     ) -> TrackingDebugSnapshot {
         let minimap_input = preview_image(
             "Minimap Input",
@@ -3052,8 +3116,52 @@ impl BurnTrackerInner {
                 format!("{:.0}, {:.0}", position.world.x, position.world.y),
             ));
         }
+        if let (Some(detector), Some(sample)) = (self.presence_detector.as_ref(), probe_sample) {
+            fields.extend(detector.debug_fields(sample));
+        }
 
-        let images = vec![minimap_input];
+        let mut images = vec![minimap_input];
+        if let (Some(detector), Some(sample)) = (self.presence_detector.as_ref(), probe_sample) {
+            images.extend(detector.debug_images(sample));
+        }
+
+        build_debug_snapshot(
+            TrackerEngineKind::ConvolutionFeatureMatch,
+            self.state.frame_index,
+            self.state.stage,
+            images,
+            fields,
+        )
+    }
+
+    fn build_probe_miss_debug_snapshot(
+        &self,
+        sample: &MinimapPresenceSample,
+        estimate: Option<&PositionEstimate>,
+    ) -> TrackingDebugSnapshot {
+        let mut fields = vec![
+            DebugField::new("阶段", self.state.stage.to_string()),
+            DebugField::new("设备", self.matcher.device_label()),
+            DebugField::new("编码器", self.matcher.source_label()),
+            DebugField::new("局部失败", self.state.local_fail_streak.to_string()),
+            DebugField::new("丢失帧", self.state.lost_frames.to_string()),
+        ];
+
+        if let Some(detector) = self.presence_detector.as_ref() {
+            fields.extend(detector.debug_fields(sample));
+        }
+        if let Some(position) = estimate {
+            fields.push(DebugField::new(
+                "输出坐标",
+                format!("{:.0}, {:.0}", position.world.x, position.world.y),
+            ));
+        }
+
+        let images = self
+            .presence_detector
+            .as_ref()
+            .map(|detector| detector.debug_images(sample))
+            .unwrap_or_default();
 
         build_debug_snapshot(
             TrackerEngineKind::ConvolutionFeatureMatch,

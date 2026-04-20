@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use gpui::{
     AppContext, Bounds, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, WindowControlArea, canvas, div, fill, point, prelude::FluentBuilder as _, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, RenderImage,
+    ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, WindowControlArea, canvas, div, fill, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, Sizable as _, Size, select::SelectItem, tooltip::Tooltip,
@@ -12,15 +14,14 @@ use crate::{
     config::CaptureRegion,
     domain::geometry::{MapCamera, WorldPoint},
     resources::BwikiResourceManager,
-    tracking::{
-        capture::DesktopCapture,
-        debug::{DebugImage, DebugImageFormat, DebugImageKind},
-    },
+    tracking::debug::{DebugImage, DebugImageFormat, DebugImageKind},
     ui::{map_canvas::MapViewportState, tile_cache::TileImageCache},
 };
 
 use super::{
     TestCaseLabel, TrackerMapRenderSnapshot, TrackerWorkbench,
+    capture_utils::capture_region_rgba,
+    debug_images::{contained_image_bounds, render_image_from_debug_image},
     forms::{PipCapturePickerItem, PipCapturePickerTarget},
     panels::{paint_bwiki_tile_layers, paint_tracker_map_overlay_snapshot},
     select::{ActionMenu, ActionMenuEvent, ActionMenuState},
@@ -175,8 +176,8 @@ impl TrackerPipWindow {
             Ok(()) => {
                 self.always_on_top = next;
                 if let Some(workbench) = self.workbench.upgrade() {
-                    let _ = workbench.update(cx, |this, _| {
-                        this.set_tracker_pip_always_on_top_from_pip(next);
+                    let _ = workbench.update(cx, |this, cx| {
+                        this.set_tracker_pip_always_on_top_from_pip(next, cx);
                     });
                 }
                 cx.notify();
@@ -204,6 +205,9 @@ impl TrackerPipWindow {
         if let Some(workbench) = self.workbench.upgrade() {
             let _ = workbench.update(cx, |this, cx| match target {
                 PipCapturePickerTarget::Minimap => this.toggle_minimap_region_picker_from_pip(cx),
+                PipCapturePickerTarget::MinimapPresenceProbe => {
+                    this.toggle_minimap_presence_probe_picker_from_pip(cx)
+                }
             });
         }
     }
@@ -218,12 +222,20 @@ impl TrackerPipWindow {
     }
 
     fn capture_picker_items() -> Vec<PipCapturePickerItem> {
-        vec![PipCapturePickerItem::new(
-            PipCapturePickerTarget::Minimap,
-            "小地图",
-            "圆形外接截图区域",
-            "minimap capture picker 小地图 截图 取区",
-        )]
+        vec![
+            PipCapturePickerItem::new(
+                PipCapturePickerTarget::Minimap,
+                "小地图",
+                "圆形外接截图区域",
+                "minimap capture picker 小地图 截图 取区",
+            ),
+            PipCapturePickerItem::new(
+                PipCapturePickerTarget::MinimapPresenceProbe,
+                "F1-P 标签",
+                "小地图存在探针区域",
+                "f1-p presence probe picker 标签 探针 取区",
+            ),
+        ]
     }
 }
 
@@ -288,18 +300,27 @@ impl Render for TrackerPipWindow {
 
 pub(super) struct TrackerPipCapturePanelWindow {
     workbench: gpui::WeakEntity<TrackerWorkbench>,
-    minimap_region: CaptureRegion,
+    capture_region: Option<CaptureRegion>,
     capture_label_menu: gpui::Entity<ActionMenuState<PipTestCaseLabelItem>>,
     capture_label: TestCaseLabel,
-    capture_preview: Option<DebugImage>,
+    capture_feedback: Option<SharedString>,
+    capture_preview_info: Option<PipCapturePreviewInfo>,
+    capture_preview_render_image: Option<Arc<RenderImage>>,
     capture_preview_error: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PipCapturePreviewInfo {
+    width: u32,
+    height: u32,
+    format: DebugImageFormat,
 }
 
 impl TrackerPipCapturePanelWindow {
     pub(super) fn new(
         workbench: gpui::WeakEntity<TrackerWorkbench>,
-        minimap_region: CaptureRegion,
+        capture_region: Option<CaptureRegion>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -319,35 +340,52 @@ impl TrackerPipCapturePanelWindow {
 
         let mut this = Self {
             workbench,
-            minimap_region,
+            capture_region,
             capture_label_menu,
             capture_label: TestCaseLabel::HasMap,
-            capture_preview: None,
+            capture_feedback: None,
+            capture_preview_info: None,
+            capture_preview_render_image: None,
             capture_preview_error: None,
             _subscriptions: subscriptions,
         };
-        this.refresh_capture_preview();
+        this.refresh_capture_preview(cx);
         this
     }
 
-    pub(super) fn update_minimap_region(
+    pub(super) fn update_capture_region(
         &mut self,
-        minimap_region: CaptureRegion,
-        _cx: &mut Context<Self>,
-    ) {
-        self.minimap_region = minimap_region;
-        self.refresh_capture_preview();
+        capture_region: Option<CaptureRegion>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.capture_region == capture_region {
+            return false;
+        }
+
+        self.capture_region = capture_region;
+        self.refresh_capture_preview(cx);
+        true
     }
 
     fn capture_test_case(&mut self, label: TestCaseLabel, cx: &mut Context<Self>) {
         if let Some(workbench) = self.workbench.upgrade() {
-            let _ = workbench.update(cx, |this, _| {
-                this.capture_test_case(label);
+            let result = workbench.update(cx, |this, cx| {
+                this.capture_test_case_with_feedback(label, Some(cx))
             });
+            self.capture_feedback = Some(result);
         }
         self.capture_label = label;
-        self.refresh_capture_preview();
+        self.refresh_capture_preview(cx);
         cx.notify();
+    }
+
+    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(workbench) = self.workbench.upgrade() {
+            let _ = workbench.update(cx, |this, cx| {
+                this.handle_tracker_pip_capture_panel_window_closed(cx);
+            });
+        }
+        window.remove_window();
     }
 
     fn capture_label_items() -> Vec<PipTestCaseLabelItem> {
@@ -357,23 +395,39 @@ impl TrackerPipCapturePanelWindow {
         ]
     }
 
-    fn refresh_capture_preview(&mut self) {
-        match DesktopCapture::from_absolute_region(&self.minimap_region)
-            .and_then(|capture| capture.capture_rgba())
-        {
+    fn refresh_capture_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(image) = self.capture_preview_render_image.take() {
+            cx.drop_image(image, None);
+        }
+
+        let Some(capture_region) = self.capture_region.as_ref() else {
+            self.capture_preview_info = None;
+            self.capture_preview_error =
+                Some("F1-P 标签探针区域尚未完整配置，当前无法显示捕获图。".into());
+            return;
+        };
+
+        match capture_region_rgba(capture_region) {
             Ok(image) => {
                 let (width, height) = image.dimensions();
-                self.capture_preview = Some(DebugImage::rgba(
-                    "Minimap Capture",
+                let debug_image = DebugImage::rgba(
+                    "F1-P Capture",
                     width,
                     height,
                     DebugImageKind::Snapshot,
                     image.into_raw(),
-                ));
+                );
+                self.capture_preview_render_image = render_image_from_debug_image(&debug_image);
+                self.capture_preview_info = Some(PipCapturePreviewInfo {
+                    width,
+                    height,
+                    format: debug_image.format,
+                });
                 self.capture_preview_error = None;
             }
             Err(error) => {
-                self.capture_preview = None;
+                self.capture_preview_info = None;
+                self.capture_preview_render_image = None;
                 self.capture_preview_error = Some(format!("刷新捕获图失败：{error:#}").into());
             }
         }
@@ -381,7 +435,7 @@ impl TrackerPipCapturePanelWindow {
 }
 
 impl Render for TrackerPipCapturePanelWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = WorkbenchThemeTokens::from_theme(cx.theme());
 
         div()
@@ -404,40 +458,92 @@ impl Render for TrackerPipCapturePanelWindow {
                             .gap_3()
                             .child(
                                 div()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(tokens.app_fg)
-                                    .child("捕获调试图"),
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(tokens.app_fg)
+                                            .child("捕获调试图"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(tokens.text_muted)
+                                            .child("仅捕获当前 F1-P 标签探针区域"),
+                                    ),
                             )
                             .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(tokens.text_muted)
-                                    .child("仅捕获当前 minimap"),
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(pip_control_text_button(
+                                        "tracker-pip-capture-refresh",
+                                        tokens,
+                                        "刷新",
+                                        "重新抓取当前 F1-P 区域预览",
+                                        PipControlTone::Neutral,
+                                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.refresh_capture_preview(cx);
+                                            cx.notify();
+                                        }),
+                                    ))
+                                    .child(pip_control_icon_button(
+                                        "tracker-pip-capture-close",
+                                        tokens,
+                                        Icon::default().path("assets/icons/close.svg"),
+                                        "关闭 F1-P 捕获调试面板",
+                                        PipControlTone::Danger,
+                                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                                            this.close_window(window, cx);
+                                        }),
+                                    )),
                             ),
                     )
                     .child(pip_capture_preview(
-                        self.capture_preview.clone(),
+                        self.capture_preview_info,
+                        self.capture_preview_render_image.clone(),
                         self.capture_preview_error.clone(),
                         tokens,
                     ))
                     .child(
                         div()
                             .flex()
-                            .items_center()
+                            .flex_col()
+                            .items_start()
                             .gap_2()
-                            .child(pip_capture_label_menu(self, tokens))
-                            .child(pip_control_text_button(
-                                "tracker-pip-capture-run",
-                                tokens,
-                                "捕获",
-                                "按当前标签保存 minimap 测试样本",
-                                PipControlTone::Neutral,
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    let label = this.capture_label;
-                                    this.capture_test_case(label, cx);
-                                }),
-                            )),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(pip_capture_label_menu(self, tokens))
+                                    .child(pip_control_text_button(
+                                        "tracker-pip-capture-run",
+                                        tokens,
+                                        "捕获",
+                                        "按当前标签保存 F1-P 测试样本",
+                                        PipControlTone::Neutral,
+                                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            let label = this.capture_label;
+                                            this.capture_test_case(label, cx);
+                                        }),
+                                    )),
+                            )
+                            .when_some(self.capture_feedback.clone(), |column, feedback| {
+                                column.child(
+                                    div()
+                                        .text_xs()
+                                        .line_height(px(18.0))
+                                        .text_color(tokens.text_muted)
+                                        .child(feedback),
+                                )
+                            }),
                     ),
             )
     }
@@ -524,7 +630,7 @@ fn pip_capture_menu(this: &TrackerPipWindow, tokens: WorkbenchThemeTokens) -> im
         .border_color(tokens.border)
         .menu_width(px(280.0))
         .label("取区")
-        .search_placeholder("搜索 小地图")
+        .search_placeholder("搜索 小地图 / F1-P 标签")
         .empty_message("当前没有可用的取区目标。")
 }
 
@@ -797,11 +903,12 @@ fn pip_capture_label_menu(
 }
 
 fn pip_capture_preview(
-    image: Option<DebugImage>,
+    preview_info: Option<PipCapturePreviewInfo>,
+    render_image: Option<Arc<RenderImage>>,
     error: Option<SharedString>,
     tokens: WorkbenchThemeTokens,
 ) -> impl IntoElement {
-    let placeholder = error.unwrap_or_else(|| "打开面板后会自动刷新当前 minimap 捕获图。".into());
+    let placeholder = error.unwrap_or_else(|| "打开面板后会自动刷新当前 F1-P 捕获图。".into());
     div()
         .flex_1()
         .min_h(px(0.0))
@@ -810,8 +917,8 @@ fn pip_capture_preview(
         .border_1()
         .border_color(tokens.border_strong)
         .overflow_hidden()
-        .child(if let Some(image) = image {
-            pip_debug_image_canvas(image, tokens).into_any_element()
+        .child(if let Some(preview_info) = preview_info {
+            pip_debug_image_canvas(preview_info, render_image, tokens).into_any_element()
         } else {
             div()
                 .size_full()
@@ -826,57 +933,31 @@ fn pip_capture_preview(
         })
 }
 
-fn pip_debug_image_canvas(image: DebugImage, tokens: WorkbenchThemeTokens) -> impl IntoElement {
+fn pip_debug_image_canvas(
+    preview_info: PipCapturePreviewInfo,
+    render_image: Option<Arc<RenderImage>>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
     canvas(
-        move |_, _, _| image.clone(),
-        move |bounds, image, window, _| {
+        move |_, _, _| (preview_info, render_image.clone()),
+        move |bounds, state, window, _| {
             window.paint_quad(fill(bounds, tokens.debug_canvas_bg));
-            if image.width == 0 || image.height == 0 || image.pixels.is_empty() {
+            let (preview_info, render_image) = state;
+            if preview_info.width == 0 || preview_info.height == 0 {
                 return;
             }
-
-            let scale_x = f32::from(bounds.size.width) / image.width as f32;
-            let scale_y = f32::from(bounds.size.height) / image.height as f32;
-            match image.format {
-                DebugImageFormat::Gray8 => {
-                    for y in 0..image.height {
-                        for x in 0..image.width {
-                            let intensity = image.pixels[(y * image.width + x) as usize] as u32;
-                            let rgb = (intensity << 16) | (intensity << 8) | intensity;
-                            let pixel_bounds = Bounds {
-                                origin: point(
-                                    bounds.origin.x + px(x as f32 * scale_x),
-                                    bounds.origin.y + px(y as f32 * scale_y),
-                                ),
-                                size: size(px(scale_x.max(1.0)), px(scale_y.max(1.0))),
-                            };
-                            window.paint_quad(fill(pixel_bounds, gpui::rgb(rgb)));
-                        }
-                    }
-                }
-                DebugImageFormat::Rgba8 => {
-                    for y in 0..image.height {
-                        for x in 0..image.width {
-                            let index = ((y * image.width + x) * 4) as usize;
-                            if index + 3 >= image.pixels.len() {
-                                continue;
-                            }
-                            let r = image.pixels[index] as u32;
-                            let g = image.pixels[index + 1] as u32;
-                            let b = image.pixels[index + 2] as u32;
-                            let rgb = (r << 16) | (g << 8) | b;
-                            let pixel_bounds = Bounds {
-                                origin: point(
-                                    bounds.origin.x + px(x as f32 * scale_x),
-                                    bounds.origin.y + px(y as f32 * scale_y),
-                                ),
-                                size: size(px(scale_x.max(1.0)), px(scale_y.max(1.0))),
-                            };
-                            window.paint_quad(fill(pixel_bounds, gpui::rgb(rgb)));
-                        }
-                    }
-                }
-            }
+            let Some(render_image) = render_image.as_ref() else {
+                return;
+            };
+            let image_bounds =
+                contained_image_bounds(bounds, preview_info.width, preview_info.height);
+            let _ = window.paint_image(
+                image_bounds,
+                0.0.into(),
+                render_image.clone(),
+                0,
+                matches!(preview_info.format, DebugImageFormat::Gray8),
+            );
         },
     )
     .size_full()

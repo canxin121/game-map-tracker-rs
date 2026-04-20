@@ -3,6 +3,7 @@ pub mod burn_support;
 pub mod capture;
 pub mod debug;
 pub mod precompute;
+pub mod presence;
 pub mod runtime;
 pub mod template;
 pub mod vision;

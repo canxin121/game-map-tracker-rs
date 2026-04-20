@@ -29,15 +29,15 @@ use crate::{
         capture::{DesktopCapture, preprocess_capture},
         debug::{DebugField, TrackingDebugSnapshot},
         precompute::{clear_match_pyramid_caches, tracker_map_cache_key},
+        presence::{MinimapPresenceDetector, MinimapPresenceSample},
         runtime::{TrackingStatus, TrackingTick, TrackingWorker},
         vision::{
             ColorCaptureTemplates, ColorMapPyramid, ColorTemplateShape, LocalCandidateDecision,
             MaskSet, MatchCandidate, SearchCrop, SearchStage, TrackerState, build_debug_snapshot,
-            build_mask, capture_template_inner_square,
-            capture_template_inner_square_rgba, center_to_scaled, coarse_global_downscale,
-            crop_search_region_rgba, load_logic_color_map_pyramid, local_candidate_decision,
-            normalized_inner_radius, prepare_color_capture_template, preview_image,
-            scaled_color_score, scaled_dimension,
+            build_mask, capture_template_inner_square, capture_template_inner_square_rgba,
+            center_to_scaled, coarse_global_downscale, crop_search_region_rgba,
+            load_logic_color_map_pyramid, local_candidate_decision, normalized_inner_radius,
+            prepare_color_capture_template, preview_image, scaled_color_score, scaled_dimension,
             search_region_around_center, top_score_peaks,
         },
     },
@@ -110,6 +110,7 @@ struct TemplateRefinedCandidate {
 pub struct TemplateTrackerWorker {
     config: AppConfig,
     capture: DesktopCapture,
+    presence_detector: Option<MinimapPresenceDetector>,
     #[cfg(not(feature = "ai-burn"))]
     pyramid: MapPyramid,
     #[cfg(feature = "ai-burn")]
@@ -217,7 +218,11 @@ impl TemplateTrackerWorker {
             "initializing template tracker worker"
         );
         let config = workspace.config.clone();
+        if !config.minimap.is_configured() {
+            anyhow::bail!("小地图区域尚未配置，请先完成小地图取区");
+        }
         let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
+        let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
         #[cfg(feature = "ai-burn")]
         let cache_key = tracker_map_cache_key(workspace.as_ref())?;
         #[cfg(not(feature = "ai-burn"))]
@@ -238,6 +243,7 @@ impl TemplateTrackerWorker {
         Ok(Self {
             config,
             capture,
+            presence_detector,
             #[cfg(not(feature = "ai-burn"))]
             pyramid,
             #[cfg(feature = "ai-burn")]
@@ -252,6 +258,33 @@ impl TemplateTrackerWorker {
     #[cfg(feature = "ai-burn")]
     fn run_frame(&mut self) -> Result<TrackingTick> {
         self.state.begin_frame();
+        let probe_sample = self
+            .presence_detector
+            .as_ref()
+            .map(MinimapPresenceDetector::sample)
+            .transpose()?;
+        if let Some(sample) = probe_sample.as_ref().filter(|sample| !sample.present) {
+            let mut status = self.base_status();
+            status.probe_summary = self.probe_summary(Some(sample));
+            let estimate = self.apply_probe_absent_fallback(&mut status);
+            status.locate_summary = estimate.as_ref().map_or_else(
+                || "F1-P 标签探针未命中，已阻止定位".to_owned(),
+                |estimate| {
+                    format!(
+                        "F1-P 标签探针未命中，已阻止定位，惯性保位 @ {:.0}, {:.0}",
+                        estimate.world.x, estimate.world.y
+                    )
+                },
+            );
+            let debug = self
+                .debug_enabled
+                .then(|| self.build_probe_miss_debug_snapshot(sample, estimate.as_ref()));
+            return Ok(TrackingTick {
+                status,
+                estimate,
+                debug,
+            });
+        }
 
         let captured_rgba = self.capture.capture_rgba()?;
         let captured = preprocess_capture(captured_rgba.clone());
@@ -262,7 +295,7 @@ impl TemplateTrackerWorker {
         )?;
 
         let mut status = self.base_status();
-        status.probe_summary = self.probe_summary();
+        status.probe_summary = self.probe_summary(probe_sample.as_ref());
         let mut estimate = None;
         let mut global_result = None;
         let mut refine_result = None;
@@ -408,6 +441,7 @@ impl TemplateTrackerWorker {
                 None,
                 refine_result.as_ref().or(local_result.as_ref()),
                 estimate.as_ref(),
+                probe_sample.as_ref(),
             )
         });
 
@@ -421,13 +455,40 @@ impl TemplateTrackerWorker {
     #[cfg(not(feature = "ai-burn"))]
     fn run_frame(&mut self) -> Result<TrackingTick> {
         self.state.begin_frame();
+        let probe_sample = self
+            .presence_detector
+            .as_ref()
+            .map(MinimapPresenceDetector::sample)
+            .transpose()?;
+        if let Some(sample) = probe_sample.as_ref().filter(|sample| !sample.present) {
+            let mut status = self.base_status();
+            status.probe_summary = self.probe_summary(Some(sample));
+            let estimate = self.apply_probe_absent_fallback(&mut status);
+            status.locate_summary = estimate.as_ref().map_or_else(
+                || "F1-P 标签探针未命中，已阻止定位".to_owned(),
+                |estimate| {
+                    format!(
+                        "F1-P 标签探针未命中，已阻止定位，惯性保位 @ {:.0}, {:.0}",
+                        estimate.world.x, estimate.world.y
+                    )
+                },
+            );
+            let debug = self
+                .debug_enabled
+                .then(|| self.build_probe_miss_debug_snapshot(sample, estimate.as_ref()));
+            return Ok(TrackingTick {
+                status,
+                estimate,
+                debug,
+            });
+        }
 
         let captured = self.capture.capture_gray()?;
         let (local_template, global_template, coarse_template) =
             prepare_capture_templates(&captured, &self.config, &self.pyramid);
 
         let mut status = self.base_status();
-        status.probe_summary = self.probe_summary();
+        status.probe_summary = self.probe_summary(probe_sample.as_ref());
         let mut estimate = None;
         let mut global_result = None;
         let mut refine_crop = None;
@@ -569,6 +630,7 @@ impl TemplateTrackerWorker {
                 refine_crop.as_ref(),
                 refine_result.as_ref().or(local_result.as_ref()),
                 estimate.as_ref(),
+                probe_sample.as_ref(),
             )
         });
 
@@ -634,8 +696,21 @@ impl TemplateTrackerWorker {
         }
     }
 
-    fn probe_summary(&self) -> String {
-        "默认存在".to_owned()
+    fn probe_summary(&self, sample: Option<&MinimapPresenceSample>) -> String {
+        match sample {
+            Some(sample) => format!(
+                "{} m{:.3}/{:.3} n{:.3}",
+                if sample.present {
+                    "存在"
+                } else {
+                    "不存在"
+                },
+                sample.mean_raw_score,
+                sample.threshold,
+                sample.min_raw_score
+            ),
+            None => "探针未启用".to_owned(),
+        }
     }
 
     fn locate_success_summary(scope: &str, candidate: &MatchCandidate) -> String {
@@ -687,6 +762,22 @@ impl TemplateTrackerWorker {
         ))
     }
 
+    fn apply_probe_absent_fallback(
+        &mut self,
+        status: &mut TrackingStatus,
+    ) -> Option<PositionEstimate> {
+        let estimate = self.apply_inertial_fallback(status);
+        if estimate.is_some() {
+            status.message = format!("F1-P 标签探针未命中，小地图疑似被遮挡，{}", status.message);
+            return estimate;
+        }
+
+        status.source = None;
+        status.match_score = None;
+        status.message = "F1-P 标签探针未命中，小地图疑似被遮挡，等待界面恢复。".to_owned();
+        None
+    }
+
     fn build_debug_snapshot(
         &self,
         captured: &GrayImage,
@@ -695,6 +786,7 @@ impl TemplateTrackerWorker {
         _refine_crop: Option<&SearchCrop>,
         refine_result: Option<&LocateResult>,
         estimate: Option<&PositionEstimate>,
+        probe_sample: Option<&MinimapPresenceSample>,
     ) -> TrackingDebugSnapshot {
         let minimap_input = preview_image(
             "Minimap Input",
@@ -748,8 +840,60 @@ impl TemplateTrackerWorker {
                 format!("{} / {}", position.source, self.engine_kind()),
             ));
         }
+        if let (Some(detector), Some(sample)) = (self.presence_detector.as_ref(), probe_sample) {
+            fields.extend(detector.debug_fields(sample));
+        }
 
-        let images = vec![minimap_input];
+        let mut images = vec![minimap_input];
+        if let (Some(detector), Some(sample)) = (self.presence_detector.as_ref(), probe_sample) {
+            images.extend(detector.debug_images(sample));
+        }
+
+        build_debug_snapshot(
+            self.engine_kind(),
+            self.state.frame_index,
+            self.state.stage,
+            images,
+            fields,
+        )
+    }
+
+    fn build_probe_miss_debug_snapshot(
+        &self,
+        sample: &MinimapPresenceSample,
+        estimate: Option<&PositionEstimate>,
+    ) -> TrackingDebugSnapshot {
+        let mut fields = vec![
+            DebugField::new("阶段", self.state.stage.to_string()),
+            DebugField::new("局部失败", self.state.local_fail_streak.to_string()),
+            DebugField::new("丢失帧", self.state.lost_frames.to_string()),
+            DebugField::new(
+                "最后坐标",
+                self.state.last_world.map_or_else(
+                    || "--".to_owned(),
+                    |world| format!("{:.0}, {:.0}", world.x, world.y),
+                ),
+            ),
+        ];
+
+        #[cfg(feature = "ai-burn")]
+        fields.push(DebugField::new("设备", self.matcher.device_label()));
+
+        if let Some(detector) = self.presence_detector.as_ref() {
+            fields.extend(detector.debug_fields(sample));
+        }
+        if let Some(position) = estimate {
+            fields.push(DebugField::new(
+                "输出来源",
+                format!("{} / {}", position.source, self.engine_kind()),
+            ));
+        }
+
+        let images = self
+            .presence_detector
+            .as_ref()
+            .map(|detector| detector.debug_images(sample))
+            .unwrap_or_default();
 
         build_debug_snapshot(
             self.engine_kind(),

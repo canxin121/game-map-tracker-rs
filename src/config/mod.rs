@@ -16,6 +16,13 @@ pub struct CaptureRegion {
     pub height: u32,
 }
 
+impl CaptureRegion {
+    #[must_use]
+    pub fn is_configured(&self) -> bool {
+        self.width > 0 && self.height > 0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
 pub struct LocalSearchConfig {
@@ -103,10 +110,10 @@ pub struct AppConfig {
 impl Default for CaptureRegion {
     fn default() -> Self {
         Self {
-            top: 54,
-            left: 2278,
-            width: 255,
-            height: 235,
+            top: 0,
+            left: 0,
+            width: 0,
+            height: 0,
         }
     }
 }
@@ -192,12 +199,12 @@ impl Default for TemplateTrackingConfig {
 impl Default for MinimapPresenceProbeConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             top: 0,
             left: 0,
             width: 0,
             height: 0,
-            match_threshold: 0.62,
+            match_threshold: 0.96,
             device: AiDevicePreference::Cpu,
             device_index: 0,
         }
@@ -265,7 +272,14 @@ impl MinimapPresenceProbeConfig {
 
     #[must_use]
     pub fn capture_region(&self) -> Option<CaptureRegion> {
-        self.is_configured().then_some(CaptureRegion {
+        CaptureRegion {
+            top: self.top,
+            left: self.left,
+            width: self.width,
+            height: self.height,
+        }
+        .is_configured()
+        .then_some(CaptureRegion {
             top: self.top,
             left: self.left,
             width: self.width,
@@ -321,6 +335,16 @@ mod tests {
         let path = std::env::temp_dir().join(format!("game-map-tracker-rs-{test_name}-{unique}"));
         fs::create_dir_all(&path).expect("failed to create temp config root");
         path
+    }
+
+    #[test]
+    fn default_capture_regions_start_unconfigured() {
+        let config = AppConfig::default();
+
+        assert!(!config.minimap.is_configured());
+        assert!(!config.minimap_presence_probe.enabled);
+        assert!(!config.minimap_presence_probe.is_configured());
+        assert_eq!(config.minimap_presence_probe.match_threshold, 0.96);
     }
 
     #[test]
