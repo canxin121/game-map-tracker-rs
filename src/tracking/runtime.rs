@@ -14,7 +14,13 @@ use crate::{
     error::Result,
     resources::WorkspaceSnapshot,
     tracking::{
-        ai::BurnTrackerWorker, debug::TrackingDebugSnapshot, template::TemplateTrackerWorker,
+        ai::BurnTrackerWorker,
+        burn_support::{
+            BurnDeviceSelection, cleanup_burn_device_selections, collect_allocator_memory,
+            planned_burn_cleanup_targets,
+        },
+        debug::TrackingDebugSnapshot,
+        template::TemplateTrackerWorker,
     },
 };
 
@@ -67,12 +73,15 @@ pub enum TrackingEvent {
     Error(String),
 }
 
-pub trait TrackingWorker: Send {
+pub(crate) trait TrackingWorker: Send {
     fn refresh_interval(&self) -> Duration;
     fn tick(&mut self) -> Result<TrackingTick>;
     fn set_debug_enabled(&mut self, _enabled: bool) {}
     fn initial_status(&self) -> TrackingStatus;
     fn engine_kind(&self) -> TrackerEngineKind;
+    fn cleanup_targets(&self) -> Vec<BurnDeviceSelection> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug)]
@@ -161,13 +170,18 @@ fn run_tracker_session(
         return;
     }
 
-    let worker = match build_worker(workspace, engine) {
+    let worker = match build_worker(workspace.clone(), engine) {
         Ok(worker) => {
             info!(%engine, "tracker worker initialized");
             worker
         }
         Err(error) => {
             error!(%engine, error = %error, "failed to initialize tracker worker");
+            cleanup_burn_device_selections(&planned_burn_cleanup_targets(
+                &workspace.config,
+                engine,
+            ));
+            collect_allocator_memory();
             let _ = event_tx.send(TrackingEvent::Error(error.to_string()));
             let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Failed));
             return;
@@ -176,6 +190,7 @@ fn run_tracker_session(
 
     if handle_tracker_commands_without_worker(&command_rx, &mut debug_enabled) {
         info!(%engine, "tracker thread stopped after worker initialization");
+        release_worker(worker);
         let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
         return;
     }
@@ -215,10 +230,9 @@ fn run_worker_loop(
     initial_status.lifecycle = TrackerLifecycle::Running;
     let _ = event_tx.send(TrackingEvent::Status(initial_status));
 
-    loop {
+    let lifecycle = loop {
         if handle_tracker_commands(worker.as_mut(), &command_rx) {
-            let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
-            return;
+            break TrackerLifecycle::Idle;
         }
 
         let loop_started = Instant::now();
@@ -248,8 +262,7 @@ fn run_worker_loop(
             Err(error) => {
                 error!(%engine, error = %error, "tracker tick failed");
                 let _ = event_tx.send(TrackingEvent::Error(error.to_string()));
-                let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Failed));
-                return;
+                break TrackerLifecycle::Failed;
             }
         }
 
@@ -263,8 +276,7 @@ fn run_worker_loop(
         match command_rx.recv_timeout(wait_for) {
             Ok(TrackerCommand::Stop) => {
                 info!(%engine, "tracker worker loop received stop command");
-                let _ = event_tx.send(TrackingEvent::LifecycleChanged(TrackerLifecycle::Idle));
-                return;
+                break TrackerLifecycle::Idle;
             }
             Ok(TrackerCommand::SetDebugEnabled(enabled)) => {
                 info!(%engine, enabled, "tracker debug mode changed");
@@ -272,7 +284,10 @@ fn run_worker_loop(
             }
             Err(_) => {}
         }
-    }
+    };
+
+    release_worker(worker);
+    let _ = event_tx.send(TrackingEvent::LifecycleChanged(lifecycle));
 }
 
 fn handle_tracker_commands(
@@ -315,4 +330,17 @@ fn handle_tracker_commands_without_worker(
 
 fn should_log_tick(frame_index: u64) -> bool {
     frame_index <= 3 || frame_index % 30 == 0
+}
+
+fn release_worker(worker: Box<dyn TrackingWorker>) {
+    let engine = worker.engine_kind();
+    let cleanup_targets = worker.cleanup_targets();
+    drop(worker);
+    cleanup_burn_device_selections(&cleanup_targets);
+    collect_allocator_memory();
+    debug!(
+        %engine,
+        cleanup_target_count = cleanup_targets.len(),
+        "released tracker worker resources"
+    );
 }

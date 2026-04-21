@@ -14,11 +14,11 @@ pub(super) enum WorkbenchPage {
 
 #[derive(Debug, Clone, Copy, Default, Display, EnumIter, PartialEq, Eq, Hash)]
 pub(super) enum MapPage {
+    #[display("节点图鉴")]
+    Bwiki,
     #[default]
     #[display("路线追踪")]
     Tracker,
-    #[display("节点图鉴")]
-    Bwiki,
 }
 
 #[derive(Debug, Clone, Copy, Default, Display, EnumIter, PartialEq, Eq, Hash)]

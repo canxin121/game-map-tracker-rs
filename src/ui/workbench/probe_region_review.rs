@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyWindowHandle, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
+    AnyWindowHandle, App, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, Render, RenderImage, Styled, Window, canvas, div, fill, hsla, px,
 };
 
@@ -36,8 +36,12 @@ impl MinimapPresenceProbeReviewWindow {
         region: CaptureRegion,
         build: MinimapPresenceModelBuild,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        cx.on_release(|this, cx| {
+            this.release_images_in_app(cx);
+        })
+        .detach();
         let raw_render_image = render_rgba_image("F1-P Raw", &build.sample.current_raw_preview);
         let modeled_render_image =
             render_rgba_image("F1-P Modeled", &build.sample.current_modeled_preview);
@@ -75,6 +79,10 @@ impl MinimapPresenceProbeReviewWindow {
     }
 
     fn release_images(&mut self, cx: &mut Context<Self>) {
+        self.release_images_in_app(cx);
+    }
+
+    fn release_images_in_app(&mut self, cx: &mut App) {
         if let Some(image) = self.raw_render_image.take() {
             cx.drop_image(image, None);
         }

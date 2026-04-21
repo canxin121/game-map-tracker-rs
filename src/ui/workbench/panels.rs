@@ -1375,7 +1375,7 @@ fn page_header(
                     this.is_tracker_transition_pending(),
                     cx.listener(|this, _: &ClickEvent, _, cx| {
                         if this.is_tracking_active() {
-                            this.stop_tracker(false);
+                            this.stop_tracker(false, cx);
                         } else {
                             this.start_tracker(cx);
                         }
@@ -1395,28 +1395,6 @@ fn page_header(
                     },
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_tracker_pip_window(window, cx);
-                        cx.notify();
-                    }),
-                )
-                .into_any_element(),
-                toolbar_button_with_tooltip(
-                    "tracker-pip-topmost",
-                    tokens,
-                    if this.is_tracker_pip_always_on_top() {
-                        "T"
-                    } else {
-                        "^"
-                    },
-                    this.tracker_pip_topmost_label(),
-                    Some(this.tracker_pip_topmost_tooltip()),
-                    if this.is_tracker_pip_always_on_top() {
-                        ToolbarButtonTone::Primary
-                    } else {
-                        ToolbarButtonTone::Neutral
-                    },
-                    !this.is_tracker_pip_open(),
-                    cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.toggle_tracker_pip_always_on_top(cx);
                         cx.notify();
                     }),
                 )

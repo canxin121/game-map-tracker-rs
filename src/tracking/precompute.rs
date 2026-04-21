@@ -3,7 +3,7 @@ use std::{
     fs::{self, File},
     io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, Weak},
     time::UNIX_EPOCH,
 };
 
@@ -27,13 +27,13 @@ use crate::{
 
 const MATCH_PYRAMID_CACHE_VERSION: u32 = 3;
 const COLOR_PYRAMID_CACHE_VERSION: u32 = 1;
-const TENSOR_CACHE_FORMAT_VERSION: u32 = 1;
+const TENSOR_CACHE_FORMAT_VERSION: u32 = 2;
 const TRACKER_SOURCE_HASH_CACHE_VERSION: u32 = 1;
 const TENSOR_CACHE_MAGIC: [u8; 8] = *b"GMTRTC01";
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
-static COLOR_PYRAMID_MEMORY_CACHE: OnceLock<Mutex<HashMap<String, Arc<ColorMapPyramid>>>> =
+static COLOR_PYRAMID_MEMORY_CACHE: OnceLock<Mutex<HashMap<String, Weak<ColorMapPyramid>>>> =
     OnceLock::new();
 static TRACKER_SOURCE_HASH_MEMORY_CACHE: OnceLock<Mutex<HashMap<String, TrackerSourceHashes>>> =
     OnceLock::new();
@@ -63,7 +63,8 @@ struct PersistedTrackerSourceHashes {
 pub struct PersistedTensorCache {
     pub width: u32,
     pub height: u32,
-    pub channels: usize,
+    pub primary_channels: usize,
+    pub secondary_channels: usize,
     pub primary: Vec<f32>,
     pub secondary: Vec<f32>,
 }
@@ -72,30 +73,33 @@ impl PersistedTensorCache {
     pub fn from_parts(
         width: u32,
         height: u32,
-        channels: usize,
+        primary_channels: usize,
+        secondary_channels: usize,
         primary: Vec<f32>,
         secondary: Vec<f32>,
     ) -> Result<Self> {
-        let expected = element_count(width, height, channels)?;
-        if primary.len() != expected {
+        let expected_primary = element_count(width, height, primary_channels)?;
+        if primary.len() != expected_primary {
             crate::bail!(
                 "persisted tensor primary buffer length {} does not match expected {}",
                 primary.len(),
-                expected
+                expected_primary
             );
         }
-        if secondary.len() != expected {
+        let expected_secondary = element_count(width, height, secondary_channels)?;
+        if secondary.len() != expected_secondary {
             crate::bail!(
                 "persisted tensor secondary buffer length {} does not match expected {}",
                 secondary.len(),
-                expected
+                expected_secondary
             );
         }
 
         Ok(Self {
             width,
             height,
-            channels,
+            primary_channels,
+            secondary_channels,
             primary,
             secondary,
         })
@@ -208,11 +212,20 @@ pub fn load_or_build_color_map_pyramid(
     let cache_key = color_pyramid_cache_key(map_cache_key);
     let memory_key = workspace_memory_cache_key(workspace, "color-pyramids", &cache_key);
 
-    if let Some(pyramid) = color_pyramid_memory_cache()
-        .lock()
-        .get(&memory_key)
-        .cloned()
-    {
+    if let Some(pyramid) = {
+        let mut cache = color_pyramid_memory_cache().lock();
+        match cache
+            .get(&memory_key)
+            .cloned()
+            .and_then(|entry| entry.upgrade())
+        {
+            Some(pyramid) => Some(pyramid),
+            None => {
+                cache.remove(&memory_key);
+                None
+            }
+        }
+    } {
         return Ok(pyramid);
     }
 
@@ -226,7 +239,7 @@ pub fn load_or_build_color_map_pyramid(
         let pyramid = Arc::new(pyramid);
         color_pyramid_memory_cache()
             .lock()
-            .insert(memory_key, pyramid.clone());
+            .insert(memory_key, Arc::downgrade(&pyramid));
         return Ok(pyramid);
     }
 
@@ -272,7 +285,7 @@ pub fn load_or_build_color_map_pyramid(
     let pyramid = Arc::new(pyramid);
     color_pyramid_memory_cache()
         .lock()
-        .insert(memory_key, pyramid.clone());
+        .insert(memory_key, Arc::downgrade(&pyramid));
     Ok(pyramid)
 }
 
@@ -281,9 +294,26 @@ pub fn tracker_tensor_cache_path(
     prefix: &str,
     cache_key: &str,
 ) -> PathBuf {
-    tracker_cache_root(workspace).join("tensors").join(format!(
-        "{prefix}-tv{TENSOR_CACHE_FORMAT_VERSION}-{cache_key}.bin"
-    ))
+    tracker_tensor_cache_path_for_version(workspace, prefix, cache_key, TENSOR_CACHE_FORMAT_VERSION)
+}
+
+pub fn tracker_legacy_tensor_cache_path(
+    workspace: &WorkspaceSnapshot,
+    prefix: &str,
+    cache_key: &str,
+) -> PathBuf {
+    tracker_tensor_cache_path_for_version(workspace, prefix, cache_key, 1)
+}
+
+fn tracker_tensor_cache_path_for_version(
+    workspace: &WorkspaceSnapshot,
+    prefix: &str,
+    cache_key: &str,
+    format_version: u32,
+) -> PathBuf {
+    tracker_cache_root(workspace)
+        .join("tensors")
+        .join(format!("{prefix}-tv{format_version}-{cache_key}.bin"))
 }
 
 pub fn load_tensor_cache(path: &Path) -> Result<Option<PersistedTensorCache>> {
@@ -310,32 +340,62 @@ pub fn load_tensor_cache(path: &Path) -> Result<Option<PersistedTensorCache>> {
     }
 
     let version = read_u32(&mut reader)?;
-    if version != TENSOR_CACHE_FORMAT_VERSION {
-        crate::bail!(
-            "unsupported tracker tensor cache version {} in {}",
-            version,
-            path.display()
-        );
-    }
+    let cache = match version {
+        1 => {
+            let width = read_u32(&mut reader)?;
+            let height = read_u32(&mut reader)?;
+            let channels = read_u32(&mut reader)? as usize;
+            let primary_len = read_u64(&mut reader)? as usize;
+            let secondary_len = read_u64(&mut reader)? as usize;
+            let expected = element_count(width, height, channels)?;
+            if primary_len != expected || secondary_len != expected {
+                crate::bail!(
+                    "tracker tensor cache payload length mismatch in {}",
+                    path.display()
+                );
+            }
 
-    let width = read_u32(&mut reader)?;
-    let height = read_u32(&mut reader)?;
-    let channels = read_u32(&mut reader)? as usize;
-    let primary_len = read_u64(&mut reader)? as usize;
-    let secondary_len = read_u64(&mut reader)? as usize;
-    let expected = element_count(width, height, channels)?;
-    if primary_len != expected || secondary_len != expected {
-        crate::bail!(
-            "tracker tensor cache payload length mismatch in {}",
-            path.display()
-        );
-    }
+            let primary = read_f32_vec(&mut reader, primary_len)?;
+            let secondary = read_f32_vec(&mut reader, secondary_len)?;
+            PersistedTensorCache::from_parts(width, height, channels, channels, primary, secondary)?
+        }
+        2 => {
+            let width = read_u32(&mut reader)?;
+            let height = read_u32(&mut reader)?;
+            let primary_channels = read_u32(&mut reader)? as usize;
+            let secondary_channels = read_u32(&mut reader)? as usize;
+            let primary_len = read_u64(&mut reader)? as usize;
+            let secondary_len = read_u64(&mut reader)? as usize;
+            let expected_primary = element_count(width, height, primary_channels)?;
+            let expected_secondary = element_count(width, height, secondary_channels)?;
+            if primary_len != expected_primary || secondary_len != expected_secondary {
+                crate::bail!(
+                    "tracker tensor cache payload length mismatch in {}",
+                    path.display()
+                );
+            }
 
-    let primary = read_f32_vec(&mut reader, primary_len)?;
-    let secondary = read_f32_vec(&mut reader, secondary_len)?;
-    Ok(Some(PersistedTensorCache::from_parts(
-        width, height, channels, primary, secondary,
-    )?))
+            let primary = read_f32_vec(&mut reader, primary_len)?;
+            let secondary = read_f32_vec(&mut reader, secondary_len)?;
+            PersistedTensorCache::from_parts(
+                width,
+                height,
+                primary_channels,
+                secondary_channels,
+                primary,
+                secondary,
+            )?
+        }
+        _ => {
+            crate::bail!(
+                "unsupported tracker tensor cache version {} in {}",
+                version,
+                path.display()
+            );
+        }
+    };
+
+    Ok(Some(cache))
 }
 
 pub fn save_tensor_cache(path: &Path, cache: &PersistedTensorCache) -> Result<()> {
@@ -360,7 +420,8 @@ pub fn save_tensor_cache(path: &Path, cache: &PersistedTensorCache) -> Result<()
     write_u32(&mut writer, TENSOR_CACHE_FORMAT_VERSION)?;
     write_u32(&mut writer, cache.width)?;
     write_u32(&mut writer, cache.height)?;
-    write_u32(&mut writer, cache.channels as u32)?;
+    write_u32(&mut writer, cache.primary_channels as u32)?;
+    write_u32(&mut writer, cache.secondary_channels as u32)?;
     write_u64(&mut writer, cache.primary.len() as u64)?;
     write_u64(&mut writer, cache.secondary.len() as u64)?;
     write_f32_slice(&mut writer, &cache.primary)?;
@@ -961,7 +1022,7 @@ fn tracker_source_hash_memory_key(bwiki_cache_dir: &Path, zoom: u8) -> String {
     format!("{}::z{zoom}", bwiki_cache_dir.display())
 }
 
-fn color_pyramid_memory_cache() -> &'static Mutex<HashMap<String, Arc<ColorMapPyramid>>> {
+fn color_pyramid_memory_cache() -> &'static Mutex<HashMap<String, Weak<ColorMapPyramid>>> {
     COLOR_PYRAMID_MEMORY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -1057,13 +1118,63 @@ mod tests {
             3,
             2,
             2,
+            1,
             vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
-            vec![11.0, 10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0],
+            vec![11.0, 10.0, 9.0, 8.0, 7.0, 6.0],
         )?;
 
         save_tensor_cache(&path, &cache)?;
         let loaded = load_tensor_cache(&path)?.expect("tensor cache should exist");
         assert_eq!(loaded, cache);
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn tensor_cache_loads_legacy_v1_layout() -> Result<()> {
+        let root = env::temp_dir().join(format!(
+            "game-map-tracker-rs-precompute-legacy-{}",
+            Uuid::new_v4()
+        ));
+        let path = root.join("tensor-cache-v1.bin");
+        fs::create_dir_all(path.parent().expect("temp parent should exist"))?;
+
+        let file = File::create(&path)?;
+        let mut writer = BufWriter::new(file);
+        writer.write_all(&TENSOR_CACHE_MAGIC)?;
+        write_u32(&mut writer, 1)?;
+        write_u32(&mut writer, 2)?;
+        write_u32(&mut writer, 2)?;
+        write_u32(&mut writer, 3)?;
+        write_u64(&mut writer, 12)?;
+        write_u64(&mut writer, 12)?;
+        write_f32_slice(
+            &mut writer,
+            &[
+                0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0, 20.0, 21.0, 22.0, 23.0,
+            ],
+        )?;
+        write_f32_slice(
+            &mut writer,
+            &[
+                1.0, 2.0, 3.0, 4.0, 11.0, 12.0, 13.0, 14.0, 21.0, 22.0, 23.0, 24.0,
+            ],
+        )?;
+        writer.flush()?;
+        drop(writer);
+
+        let loaded = load_tensor_cache(&path)?.expect("legacy tensor cache should exist");
+        assert_eq!(loaded.width, 2);
+        assert_eq!(loaded.height, 2);
+        assert_eq!(loaded.primary_channels, 3);
+        assert_eq!(loaded.secondary_channels, 3);
+        assert_eq!(
+            loaded.secondary,
+            vec![
+                1.0, 2.0, 3.0, 4.0, 11.0, 12.0, 13.0, 14.0, 21.0, 22.0, 23.0, 24.0,
+            ]
+        );
 
         let _ = fs::remove_dir_all(root);
         Ok(())

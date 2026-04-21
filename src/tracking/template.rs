@@ -20,7 +20,7 @@ use crate::{
             PersistedTensorCache, clear_color_pyramid_caches, clear_match_pyramid_caches,
             clear_tensor_caches_by_prefix, clear_tracker_source_hash_caches,
             load_or_build_color_map_pyramid, load_tensor_cache, save_tensor_cache,
-            tracker_map_cache_key, tracker_tensor_cache_path,
+            tracker_legacy_tensor_cache_path, tracker_map_cache_key, tracker_tensor_cache_path,
         },
         presence::{MinimapPresenceDetector, MinimapPresenceSample},
         runtime::{TrackingStatus, TrackingTick, TrackingWorker},
@@ -47,7 +47,7 @@ use image::{GrayImage, Rgba, RgbaImage};
 use crate::tracking::burn_support::burn_device_label;
 use crate::tracking::burn_support::{
     BurnDeviceSelection, available_burn_backends, burn_score_map_capture_enabled,
-    select_burn_device,
+    cleanup_burn_device_selections, collect_allocator_memory, select_burn_device,
 };
 #[cfg(test)]
 use crate::tracking::vision::crop_search_region_rgba;
@@ -136,6 +136,9 @@ where
     coarse_search: SearchTensorCache<B>,
     local_search_patch_energy: Tensor<B, 4>,
     global_search_patch_energy: Tensor<B, 4>,
+    local_mask_energy: Tensor<B, 4>,
+    global_mask_energy: Tensor<B, 4>,
+    coarse_mask_energy: Tensor<B, 4>,
     global_mask_squared: Tensor<B, 4>,
     coarse_mask_squared: Tensor<B, 4>,
     coarse_search_patch_energy: Tensor<B, 4>,
@@ -148,7 +151,7 @@ where
     B: Backend<FloatElem = f32>,
 {
     image: Tensor<B, 4>,
-    squared: Tensor<B, 4>,
+    energy: Tensor<B, 4>,
     width: u32,
     height: u32,
 }
@@ -174,7 +177,7 @@ where
     B: Backend<FloatElem = f32>,
 {
     image: RgbaImage,
-    mask_squared: Tensor<B, 4>,
+    mask_energy: Tensor<B, 4>,
     weighted_template: Tensor<B, 4>,
     template_energy: f32,
 }
@@ -1036,6 +1039,10 @@ impl TemplateGlobalLocator {
         Ok(Self { matcher })
     }
 
+    pub(crate) fn cleanup_targets(&self) -> Vec<BurnDeviceSelection> {
+        self.matcher.cleanup_targets()
+    }
+
     pub(crate) fn locate_capture(
         &self,
         capture: &RgbaImage,
@@ -1078,13 +1085,17 @@ pub fn rebuild_template_engine_cache(workspace: &WorkspaceSnapshot) -> Result<()
         workspace.config.template.input_mode,
     )?;
     let masks = build_template_masks(&workspace.config);
-    let _ = TemplateMatcher::new_cached(
+    let matcher = TemplateMatcher::new_cached(
         workspace,
         &workspace.config.template,
         color_pyramid.as_ref(),
         &masks,
         cache_key.as_str(),
     )?;
+    let cleanup_targets = matcher.cleanup_targets();
+    drop(matcher);
+    cleanup_burn_device_selections(&cleanup_targets);
+    collect_allocator_memory();
 
     info!("rebuild of template tracker cache completed");
     Ok(())
@@ -1455,6 +1466,18 @@ impl TemplateMatcher {
         }
     }
 
+    fn cleanup_targets(&self) -> Vec<BurnDeviceSelection> {
+        vec![match self {
+            Self::NdArray(_) => BurnDeviceSelection::Cpu,
+            #[cfg(burn_cuda_backend)]
+            Self::Cuda(matcher) => BurnDeviceSelection::Cuda(matcher.device.clone()),
+            #[cfg(burn_vulkan_backend)]
+            Self::Vulkan(matcher) => BurnDeviceSelection::Vulkan(matcher.device.clone()),
+            #[cfg(burn_metal_backend)]
+            Self::Metal(matcher) => BurnDeviceSelection::Metal(matcher.device.clone()),
+        }]
+    }
+
     fn prepare_capture_templates(
         &self,
         captured: &RgbaImage,
@@ -1468,55 +1491,79 @@ impl TemplateMatcher {
         } = prepare_color_capture_templates(captured, config, pyramid);
         Ok(PreparedCaptureTemplates {
             local: match self {
-                Self::NdArray(matcher) => PreparedTemplate::NdArray(
-                    matcher.prepare_template(local, &matcher.local_mask_squared),
-                ),
+                Self::NdArray(matcher) => PreparedTemplate::NdArray(matcher.prepare_template(
+                    local,
+                    &matcher.local_mask_squared,
+                    &matcher.local_mask_energy,
+                )),
                 #[cfg(burn_cuda_backend)]
-                Self::Cuda(matcher) => PreparedTemplate::Cuda(
-                    matcher.prepare_template(local, &matcher.local_mask_squared),
-                ),
+                Self::Cuda(matcher) => PreparedTemplate::Cuda(matcher.prepare_template(
+                    local,
+                    &matcher.local_mask_squared,
+                    &matcher.local_mask_energy,
+                )),
                 #[cfg(burn_vulkan_backend)]
-                Self::Vulkan(matcher) => PreparedTemplate::Vulkan(
-                    matcher.prepare_template(local, &matcher.local_mask_squared),
-                ),
+                Self::Vulkan(matcher) => PreparedTemplate::Vulkan(matcher.prepare_template(
+                    local,
+                    &matcher.local_mask_squared,
+                    &matcher.local_mask_energy,
+                )),
                 #[cfg(burn_metal_backend)]
-                Self::Metal(matcher) => PreparedTemplate::Metal(
-                    matcher.prepare_template(local, &matcher.local_mask_squared),
-                ),
+                Self::Metal(matcher) => PreparedTemplate::Metal(matcher.prepare_template(
+                    local,
+                    &matcher.local_mask_squared,
+                    &matcher.local_mask_energy,
+                )),
             },
             global: match self {
-                Self::NdArray(matcher) => PreparedTemplate::NdArray(
-                    matcher.prepare_template(global, &matcher.global_mask_squared),
-                ),
+                Self::NdArray(matcher) => PreparedTemplate::NdArray(matcher.prepare_template(
+                    global,
+                    &matcher.global_mask_squared,
+                    &matcher.global_mask_energy,
+                )),
                 #[cfg(burn_cuda_backend)]
-                Self::Cuda(matcher) => PreparedTemplate::Cuda(
-                    matcher.prepare_template(global, &matcher.global_mask_squared),
-                ),
+                Self::Cuda(matcher) => PreparedTemplate::Cuda(matcher.prepare_template(
+                    global,
+                    &matcher.global_mask_squared,
+                    &matcher.global_mask_energy,
+                )),
                 #[cfg(burn_vulkan_backend)]
-                Self::Vulkan(matcher) => PreparedTemplate::Vulkan(
-                    matcher.prepare_template(global, &matcher.global_mask_squared),
-                ),
+                Self::Vulkan(matcher) => PreparedTemplate::Vulkan(matcher.prepare_template(
+                    global,
+                    &matcher.global_mask_squared,
+                    &matcher.global_mask_energy,
+                )),
                 #[cfg(burn_metal_backend)]
-                Self::Metal(matcher) => PreparedTemplate::Metal(
-                    matcher.prepare_template(global, &matcher.global_mask_squared),
-                ),
+                Self::Metal(matcher) => PreparedTemplate::Metal(matcher.prepare_template(
+                    global,
+                    &matcher.global_mask_squared,
+                    &matcher.global_mask_energy,
+                )),
             },
             coarse: match self {
-                Self::NdArray(matcher) => PreparedTemplate::NdArray(
-                    matcher.prepare_template(coarse, &matcher.coarse_mask_squared),
-                ),
+                Self::NdArray(matcher) => PreparedTemplate::NdArray(matcher.prepare_template(
+                    coarse,
+                    &matcher.coarse_mask_squared,
+                    &matcher.coarse_mask_energy,
+                )),
                 #[cfg(burn_cuda_backend)]
-                Self::Cuda(matcher) => PreparedTemplate::Cuda(
-                    matcher.prepare_template(coarse, &matcher.coarse_mask_squared),
-                ),
+                Self::Cuda(matcher) => PreparedTemplate::Cuda(matcher.prepare_template(
+                    coarse,
+                    &matcher.coarse_mask_squared,
+                    &matcher.coarse_mask_energy,
+                )),
                 #[cfg(burn_vulkan_backend)]
-                Self::Vulkan(matcher) => PreparedTemplate::Vulkan(
-                    matcher.prepare_template(coarse, &matcher.coarse_mask_squared),
-                ),
+                Self::Vulkan(matcher) => PreparedTemplate::Vulkan(matcher.prepare_template(
+                    coarse,
+                    &matcher.coarse_mask_squared,
+                    &matcher.coarse_mask_energy,
+                )),
                 #[cfg(burn_metal_backend)]
-                Self::Metal(matcher) => PreparedTemplate::Metal(
-                    matcher.prepare_template(coarse, &matcher.coarse_mask_squared),
-                ),
+                Self::Metal(matcher) => PreparedTemplate::Metal(matcher.prepare_template(
+                    coarse,
+                    &matcher.coarse_mask_squared,
+                    &matcher.coarse_mask_energy,
+                )),
             },
         })
     }
@@ -1769,21 +1816,24 @@ where
         let global_mask_squared = mask_squared_tensor::<B>(&masks.global, &device);
         let coarse_mask_squared = mask_squared_tensor::<B>(&masks.coarse, &device);
         let local_mask_squared = mask_squared_tensor::<B>(&masks.local, &device);
+        let global_mask_energy = mask_energy_tensor::<B>(&masks.global, &device);
+        let coarse_mask_energy = mask_energy_tensor::<B>(&masks.coarse, &device);
+        let local_mask_energy = mask_energy_tensor::<B>(&masks.local, &device);
         let local_search_patch_energy = conv2d(
-            local_search.squared.clone(),
-            local_mask_squared.clone(),
+            local_search.energy.clone(),
+            local_mask_energy.clone(),
             None::<Tensor<B, 1>>,
             ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
         );
         let global_search_patch_energy = conv2d(
-            global_search.squared.clone(),
-            global_mask_squared.clone(),
+            global_search.energy.clone(),
+            global_mask_energy.clone(),
             None::<Tensor<B, 1>>,
             ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
         );
         let coarse_search_patch_energy = conv2d(
-            coarse_search.squared.clone(),
-            coarse_mask_squared.clone(),
+            coarse_search.energy.clone(),
+            coarse_mask_energy.clone(),
             None::<Tensor<B, 1>>,
             ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
         );
@@ -1796,6 +1846,9 @@ where
             coarse_search,
             local_search_patch_energy,
             global_search_patch_energy,
+            local_mask_energy,
+            global_mask_energy,
+            coarse_mask_energy,
             global_mask_squared,
             coarse_mask_squared,
             coarse_search_patch_energy,
@@ -1812,6 +1865,7 @@ where
         &self,
         image: RgbaImage,
         mask_squared: &Tensor<B, 4>,
+        mask_energy: &Tensor<B, 4>,
     ) -> BurnPreparedTemplate<B> {
         let template_tensor = rgba_image_tensor::<B>(&image, &self.device);
         let weighted_template = template_tensor.clone() * mask_squared.clone();
@@ -1820,7 +1874,7 @@ where
             .into_scalar();
         BurnPreparedTemplate {
             image,
-            mask_squared: mask_squared.clone(),
+            mask_energy: mask_energy.clone(),
             weighted_template,
             template_energy,
         }
@@ -1835,7 +1889,11 @@ where
         origin_y: u32,
         scale: u32,
     ) -> Result<LocateResult> {
-        let prepared = self.prepare_template(template.clone(), &self.coarse_mask_squared);
+        let prepared = self.prepare_template(
+            template.clone(),
+            &self.coarse_mask_squared,
+            &self.coarse_mask_energy,
+        );
         self.locate_cached(
             &self.coarse_search,
             &prepared,
@@ -1878,7 +1936,11 @@ where
         origin_y: u32,
         scale: u32,
     ) -> Result<LocateResult> {
-        let prepared = self.prepare_template(template.clone(), &self.global_mask_squared);
+        let prepared = self.prepare_template(
+            template.clone(),
+            &self.global_mask_squared,
+            &self.global_mask_energy,
+        );
         self.locate_global_crop_prepared(image, &prepared, threshold, origin_x, origin_y, scale)
     }
 
@@ -1933,7 +1995,11 @@ where
         origin_y: u32,
         scale: u32,
     ) -> Result<LocateResult> {
-        let prepared = self.prepare_template(template.clone(), &self.local_mask_squared);
+        let prepared = self.prepare_template(
+            template.clone(),
+            &self.local_mask_squared,
+            &self.local_mask_energy,
+        );
         self.locate_local_prepared(image, &prepared, threshold, origin_x, origin_y, scale)
     }
 
@@ -2008,7 +2074,7 @@ where
             return locate_cached_in_chunks(
                 search,
                 &template.weighted_template,
-                &template.mask_squared,
+                &template.mask_energy,
                 precomputed_patch_energy,
                 template.template_energy,
                 capture_score_map,
@@ -2031,8 +2097,8 @@ where
         let search_patch_energy = match precomputed_patch_energy {
             Some(patch_energy) => patch_energy,
             None => conv2d(
-                search.squared.clone(),
-                template.mask_squared.clone(),
+                search.energy.clone(),
+                template.mask_energy.clone(),
                 None::<Tensor<B, 1>>,
                 ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
             ),
@@ -2079,49 +2145,62 @@ where
 {
     fn from_rgba_image(image: &RgbaImage, device: &B::Device) -> Result<Self> {
         let image_tensor = rgba_image_tensor::<B>(image, device);
-        let squared = image_tensor.clone().powi_scalar(2);
+        let energy = image_energy_tensor(image_tensor.clone());
         Ok(Self {
             image: image_tensor,
-            squared,
+            energy,
             width: image.width(),
             height: image.height(),
         })
     }
 
     fn from_persisted(cache: PersistedTensorCache, device: &B::Device) -> Result<Self> {
-        if cache.channels != 3 {
+        let PersistedTensorCache {
+            width,
+            height,
+            primary_channels,
+            secondary_channels,
+            primary,
+            secondary,
+        } = cache;
+
+        if primary_channels != 3 {
             crate::bail!(
                 "template search tensor cache channel count {} is invalid",
-                cache.channels
+                primary_channels
             );
         }
 
         let image = Tensor::<B, 4>::from_data(
-            TensorData::new(
-                cache.primary,
-                [1, 3, cache.height as usize, cache.width as usize],
-            ),
+            TensorData::new(primary, [1, 3, height as usize, width as usize]),
             device,
         );
-        let squared = Tensor::<B, 4>::from_data(
-            TensorData::new(
-                cache.secondary,
-                [1, 3, cache.height as usize, cache.width as usize],
-            ),
+        let energy_values = match secondary_channels {
+            1 => secondary,
+            3 => collapse_rgb_energy(width, height, secondary)?,
+            _ => {
+                crate::bail!(
+                    "template search tensor cache energy channel count {} is invalid",
+                    secondary_channels
+                );
+            }
+        };
+        let energy = Tensor::<B, 4>::from_data(
+            TensorData::new(energy_values, [1, 1, height as usize, width as usize]),
             device,
         );
         Ok(Self {
             image,
-            squared,
-            width: cache.width,
-            height: cache.height,
+            energy,
+            width,
+            height,
         })
     }
 
     fn to_persisted(&self) -> Result<PersistedTensorCache> {
         let image = tensor_to_flat_f32(self.image.clone())?;
-        let squared = tensor_to_flat_f32(self.squared.clone())?;
-        PersistedTensorCache::from_parts(self.width, self.height, 3, image, squared)
+        let energy = tensor_to_flat_f32(self.energy.clone())?;
+        PersistedTensorCache::from_parts(self.width, self.height, 3, 1, image, energy)
     }
 
     fn crop(&self, region: SearchRegion) -> Result<Self> {
@@ -2145,8 +2224,8 @@ where
                 .clone()
                 .narrow(2, region.origin_y as usize, region.height as usize)
                 .narrow(3, region.origin_x as usize, region.width as usize),
-            squared: self
-                .squared
+            energy: self
+                .energy
                 .clone()
                 .narrow(2, region.origin_y as usize, region.height as usize)
                 .narrow(3, region.origin_x as usize, region.width as usize),
@@ -2154,6 +2233,23 @@ where
             height: region.height,
         })
     }
+}
+
+fn collapse_rgb_energy(width: u32, height: u32, values: Vec<f32>) -> Result<Vec<f32>> {
+    let plane_len = width as usize * height as usize;
+    if values.len() != plane_len * 3 {
+        crate::bail!(
+            "template search tensor cache energy buffer length {} does not match expected {}",
+            values.len(),
+            plane_len * 3
+        );
+    }
+
+    let mut energy = Vec::with_capacity(plane_len);
+    for index in 0..plane_len {
+        energy.push(values[index] + values[index + plane_len] + values[index + plane_len * 2]);
+    }
+    Ok(energy)
 }
 
 fn cropped_patch_energy<B>(
@@ -2186,8 +2282,16 @@ where
     B: Backend<FloatElem = f32>,
 {
     let cache_path = tracker_tensor_cache_path(workspace, prefix, map_cache_key);
-    if let Ok(Some(cache)) = load_tensor_cache(&cache_path) {
-        if let Ok(search) = SearchTensorCache::<B>::from_persisted(cache, device) {
+    if let Some(search) = try_load_template_search_cache::<B>(&cache_path, device) {
+        return Ok(search);
+    }
+
+    let legacy_cache_path = tracker_legacy_tensor_cache_path(workspace, prefix, map_cache_key);
+    if legacy_cache_path != cache_path {
+        if let Some(search) = try_load_template_search_cache::<B>(&legacy_cache_path, device) {
+            if let Ok(persisted) = search.to_persisted() {
+                let _ = save_tensor_cache(&cache_path, &persisted);
+            }
             return Ok(search);
         }
     }
@@ -2197,6 +2301,17 @@ where
         let _ = save_tensor_cache(&cache_path, &persisted);
     }
     Ok(search)
+}
+
+fn try_load_template_search_cache<B>(
+    path: &std::path::Path,
+    device: &B::Device,
+) -> Option<SearchTensorCache<B>>
+where
+    B: Backend<FloatElem = f32>,
+{
+    let cache = load_tensor_cache(path).ok()??;
+    SearchTensorCache::<B>::from_persisted(cache, device).ok()
 }
 
 impl TrackingWorker for TemplateTrackerWorker {
@@ -2226,6 +2341,10 @@ impl TrackingWorker for TemplateTrackerWorker {
     fn engine_kind(&self) -> TrackerEngineKind {
         TrackerEngineKind::MultiScaleTemplateMatch
     }
+
+    fn cleanup_targets(&self) -> Vec<BurnDeviceSelection> {
+        self.matcher.cleanup_targets()
+    }
 }
 
 fn rgba_image_tensor<B>(image: &RgbaImage, device: &B::Device) -> Tensor<B, 4>
@@ -2241,6 +2360,15 @@ where
     )
 }
 
+fn image_energy_tensor<B>(image: Tensor<B, 4>) -> Tensor<B, 4>
+where
+    B: Backend<FloatElem = f32>,
+{
+    image.clone().narrow(1, 0, 1).powi_scalar(2)
+        + image.clone().narrow(1, 1, 1).powi_scalar(2)
+        + image.narrow(1, 2, 1).powi_scalar(2)
+}
+
 fn mask_squared_tensor<B>(mask: &GrayImage, device: &B::Device) -> Tensor<B, 4>
 where
     B: Backend<FloatElem = f32>,
@@ -2253,6 +2381,23 @@ where
         TensorData::new(
             values,
             [1, 3, mask.height() as usize, mask.width() as usize],
+        ),
+        device,
+    )
+}
+
+fn mask_energy_tensor<B>(mask: &GrayImage, device: &B::Device) -> Tensor<B, 4>
+where
+    B: Backend<FloatElem = f32>,
+{
+    let values = mask_as_unit_vec(mask, 1)
+        .into_iter()
+        .map(|value| value * value)
+        .collect::<Vec<_>>();
+    Tensor::<B, 4>::from_data(
+        TensorData::new(
+            values,
+            [1, 1, mask.height() as usize, mask.width() as usize],
         ),
         device,
     )
@@ -2295,7 +2440,7 @@ fn burn_match_chunk_rows(
 fn locate_cached_in_chunks<B>(
     search: &SearchTensorCache<B>,
     weighted_template: &Tensor<B, 4>,
-    mask_squared: &Tensor<B, 4>,
+    mask_energy: &Tensor<B, 4>,
     precomputed_patch_energy: Option<Tensor<B, 4>>,
     template_energy: f32,
     capture_score_map: bool,
@@ -2328,9 +2473,9 @@ where
                 .image
                 .clone()
                 .narrow(2, output_row as usize, slice_height as usize);
-        let squared_chunk =
+        let energy_chunk =
             search
-                .squared
+                .energy
                 .clone()
                 .narrow(2, output_row as usize, slice_height as usize);
         let numerator = conv2d(
@@ -2344,8 +2489,8 @@ where
                 .clone()
                 .narrow(2, output_row as usize, rows as usize),
             None => conv2d(
-                squared_chunk,
-                mask_squared.clone(),
+                energy_chunk,
+                mask_energy.clone(),
                 None::<Tensor<B, 1>>,
                 ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
             ),

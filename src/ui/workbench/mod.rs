@@ -21,9 +21,9 @@ use std::{
 };
 
 use gpui::{
-    AnyWindowHandle, AppContext, Bounds, Context, PathPromptOptions, Pixels, Render, RenderImage,
-    SharedString, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions, point, px, size,
+    AnyWindowHandle, App, AppContext, Bounds, Context, PathPromptOptions, Pixels, Render,
+    RenderImage, SharedString, Subscription, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowKind, WindowOptions, point, px, size,
 };
 use gpui_component::{Root, input::InputEvent};
 use tracing::{debug, error, info, warn};
@@ -106,10 +106,22 @@ pub(super) struct TrackerMapRenderSnapshot {
     pub(super) selected_point_id: Option<RoutePointId>,
     pub(super) follow_point: Option<WorldPoint>,
     pub(super) pip_always_on_top: bool,
+    pub(super) pip_tracker_toggle_state: TrackerPipToggleState,
+    pub(super) pip_tracker_status_tooltip: SharedString,
     pub(super) pip_probe_summary: SharedString,
     pub(super) pip_locate_summary: SharedString,
     pub(super) pip_test_case_capture_enabled: bool,
     pub(super) pip_capture_panel_expanded: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum TrackerPipToggleState {
+    #[default]
+    Start,
+    Starting,
+    Stop,
+    Stopping,
+    Restart,
 }
 
 const TRACKER_PIP_PROBE_IDLE_SUMMARY: &str = "未启动";
@@ -497,6 +509,10 @@ pub(crate) fn init(cx: &mut gpui::App) {
 
 impl TrackerWorkbench {
     pub fn new(project_root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.on_release(|this, cx| {
+            this.release_debug_snapshot_render_images_in_app(cx);
+        })
+        .detach();
         let config_form = ConfigFormInputs::new(window, cx);
         let group_form = GroupFormInputs::new(window, cx);
         let group_inline_edit = GroupInlineEditInputs::new(window, cx);
@@ -700,7 +716,7 @@ impl TrackerWorkbench {
                     confirming_delete_group_id: None,
                     confirming_delete_point_id: None,
                     active_page: WorkbenchPage::Map,
-                    map_page: MapPage::Tracker,
+                    map_page: MapPage::Bwiki,
                     settings_page: SettingsPage::default(),
                     settings_nav_expanded: false,
                     map_group_list: map_group_list.clone(),
@@ -834,7 +850,7 @@ impl TrackerWorkbench {
                     confirming_delete_group_id: None,
                     confirming_delete_point_id: None,
                     active_page: WorkbenchPage::Map,
-                    map_page: MapPage::Tracker,
+                    map_page: MapPage::Bwiki,
                     settings_page: SettingsPage::default(),
                     settings_nav_expanded: false,
                     map_group_list,
@@ -1275,6 +1291,7 @@ impl TrackerWorkbench {
             },
         ));
         workbench.sync_config_form_from_workspace(window, cx);
+        workbench.ensure_tracker_page_selected_point();
         workbench.sync_editor_from_selection(window, cx);
         workbench.request_center_on_current_point();
         workbench.sync_bwiki_visibility_defaults();
@@ -1676,10 +1693,6 @@ impl TrackerWorkbench {
         self.tracker_pip_pending_open
     }
 
-    pub(super) const fn is_tracker_pip_always_on_top(&self) -> bool {
-        self.tracker_pip_always_on_top
-    }
-
     pub(super) fn tracker_pip_toggle_label(&self) -> SharedString {
         if self.tracker_pip_pending_open {
             "打开中".into()
@@ -1687,26 +1700,6 @@ impl TrackerWorkbench {
             "关闭画中画".into()
         } else {
             "打开画中画".into()
-        }
-    }
-
-    pub(super) fn tracker_pip_topmost_label(&self) -> SharedString {
-        if self.tracker_pip_always_on_top {
-            "取消置顶".into()
-        } else {
-            "置顶".into()
-        }
-    }
-
-    pub(super) fn tracker_pip_topmost_tooltip(&self) -> SharedString {
-        if self.is_tracker_pip_open() {
-            if self.tracker_pip_always_on_top {
-                "追踪画中画当前会浮于其他窗口上方，点击可取消。".into()
-            } else {
-                "让追踪画中画浮于其他窗口上方。".into()
-            }
-        } else {
-            "请先打开追踪画中画窗口。".into()
         }
     }
 
@@ -1908,6 +1901,16 @@ impl TrackerWorkbench {
     }
 
     pub(super) fn tracker_map_render_snapshot(&self) -> TrackerMapRenderSnapshot {
+        let pip_tracker_toggle_state = match self.tracker_pending_action {
+            Some(TrackerPendingAction::Starting) => TrackerPipToggleState::Starting,
+            Some(TrackerPendingAction::Stopping) => TrackerPipToggleState::Stopping,
+            None if self.is_tracking_active() => TrackerPipToggleState::Stop,
+            None if self.tracker_lifecycle == TrackerLifecycle::Failed => {
+                TrackerPipToggleState::Restart
+            }
+            _ => TrackerPipToggleState::Start,
+        };
+
         TrackerMapRenderSnapshot {
             route_color_hex: self
                 .active_group()
@@ -1927,6 +1930,8 @@ impl TrackerWorkbench {
                 })
                 .flatten(),
             pip_always_on_top: self.tracker_pip_always_on_top,
+            pip_tracker_toggle_state,
+            pip_tracker_status_tooltip: self.tracker_status_tooltip(),
             pip_probe_summary: self.tracker_pip_probe_summary.clone(),
             pip_locate_summary: self.tracker_pip_locate_summary.clone(),
             pip_test_case_capture_enabled: self.test_case_capture_enabled,
@@ -2458,6 +2463,7 @@ impl TrackerWorkbench {
         self.map_point_insert_armed = false;
         self.clear_selected_point_move_state();
         if matches!(page, MapPage::Tracker) {
+            self.ensure_tracker_page_selected_point();
             self.request_center_on_current_point();
         }
         self.sync_tracker_debug_enabled();
@@ -3571,10 +3577,14 @@ impl TrackerWorkbench {
         });
     }
 
-    fn clear_debug_snapshot_render_images(&mut self, cx: &mut Context<Self>) {
+    fn release_debug_snapshot_render_images_in_app(&mut self, cx: &mut App) {
         for image in self.debug_snapshot_render_images.drain(..).flatten() {
             cx.drop_image(image, None);
         }
+    }
+
+    fn clear_debug_snapshot_render_images(&mut self, cx: &mut Context<Self>) {
+        self.release_debug_snapshot_render_images_in_app(cx);
     }
 
     fn clear_debug_snapshot(&mut self, cx: &mut Context<Self>) {
@@ -3626,14 +3636,20 @@ impl TrackerWorkbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let selected_point_id = self
+            .route_groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .and_then(|group| group.points.first())
+            .map(|point| point.id.clone());
         if self.confirming_delete_group_id.as_ref() != Some(&group_id) {
             self.confirming_delete_group_id = None;
         }
         self.clear_selected_point_move_state();
         self.selected_group_id = Some(group_id.clone());
-        self.selected_point_id = None;
+        self.selected_point_id = selected_point_id;
         self.confirming_delete_point_id = None;
-        self.preview_cursor = None;
+        self.preview_cursor = self.selected_point_index();
         self.route_editor_map_view.request_fit();
         if !self.is_tracking_active() {
             self.rebuild_preview();
@@ -4109,11 +4125,12 @@ impl TrackerWorkbench {
         }
     }
 
-    pub(super) fn stop_tracker(&mut self, preserve_preview: bool) {
+    pub(super) fn stop_tracker(&mut self, preserve_preview: bool, cx: &mut Context<Self>) {
         info!(preserve_preview, "stopping tracker session from workbench");
         self.tracker_pending_action = Some(TrackerPendingAction::Stopping);
         self.tracker_status_text = "正在停止追踪线程。".into();
         self.release_tracker_session();
+        self.clear_debug_snapshot(cx);
         self.tracker_pending_action = None;
         self.tracker_lifecycle = TrackerLifecycle::Idle;
         self.reset_tracker_pip_debug_summaries();
@@ -5328,44 +5345,6 @@ impl TrackerWorkbench {
             this.open_tracker_pip_window(window, cx);
             cx.notify();
         });
-    }
-
-    pub(super) fn toggle_tracker_pip_always_on_top(&mut self, cx: &mut Context<Self>) {
-        let always_on_top = !self.tracker_pip_always_on_top;
-        info!(
-            always_on_top,
-            "toggling tracker picture-in-picture always-on-top"
-        );
-
-        if let Some(handle) = self.tracker_pip_window {
-            match handle.update(cx, |_, pip_window, _| {
-                apply_window_topmost(pip_window, always_on_top)
-            }) {
-                Ok(Ok(())) => {
-                    self.tracker_pip_always_on_top = always_on_top;
-                    self.apply_tracker_pip_capture_panel_topmost(always_on_top, cx);
-                    self.status_text = if always_on_top {
-                        "追踪画中画已置顶。".into()
-                    } else {
-                        "追踪画中画已取消置顶。".into()
-                    };
-                }
-                Ok(Err(error)) => {
-                    self.status_text = format!("切换追踪画中画置顶失败：{error:#}").into();
-                }
-                Err(_) => {
-                    self.tracker_pip_window = None;
-                    self.status_text = "追踪画中画窗口已经关闭。".into();
-                }
-            }
-        } else {
-            self.tracker_pip_always_on_top = always_on_top;
-            self.status_text = if always_on_top {
-                "已记住追踪画中画置顶设置，下次打开时生效。".into()
-            } else {
-                "已关闭追踪画中画置顶设置。".into()
-            };
-        }
     }
 
     pub(super) fn set_tracker_pip_always_on_top_from_pip(
@@ -6585,6 +6564,36 @@ impl TrackerWorkbench {
         }
     }
 
+    fn ensure_tracker_page_selected_point(&mut self) {
+        let Some(group) = self.active_group() else {
+            self.selected_point_id = None;
+            self.preview_cursor = None;
+            return;
+        };
+
+        let Some(first_point) = group.points.first() else {
+            self.selected_point_id = None;
+            self.preview_cursor = None;
+            return;
+        };
+
+        let has_valid_selected_point = self
+            .selected_point_id
+            .as_ref()
+            .is_some_and(|point_id| group.find_point(point_id).is_some());
+
+        if !has_valid_selected_point {
+            self.selected_point_id = Some(first_point.id.clone());
+            self.preview_cursor = Some(0);
+            if !self.is_tracking_active() {
+                self.rebuild_preview();
+            }
+            return;
+        }
+
+        self.preview_cursor = self.selected_point_index();
+    }
+
     fn sync_visible_list_pages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let map_group_page = self
             .selected_group_id
@@ -6723,7 +6732,7 @@ impl TrackerWorkbench {
 
 impl Drop for TrackerWorkbench {
     fn drop(&mut self) {
-        self.stop_tracker(true);
+        self.release_tracker_session();
     }
 }
 

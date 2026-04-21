@@ -50,7 +50,10 @@ use crate::{
         load_logic_map_with_tracking_poi_scaled_rgba_image,
     },
     tracking::{
-        burn_support::{BurnDeviceSelection, available_burn_backends, select_burn_device},
+        burn_support::{
+            BurnDeviceSelection, available_burn_backends, cleanup_burn_device_selections,
+            collect_allocator_memory, select_burn_device,
+        },
         capture::{DesktopCapture, preprocess_capture},
         debug::{DebugField, TrackingDebugSnapshot},
         precompute::{
@@ -110,6 +113,7 @@ where
 {
     encoder: FixedFeatureEncoder<B>,
     local_mask: Tensor<B, 4>,
+    local_patch_mask: Tensor<B, 4>,
     chunk_budget_bytes: Option<usize>,
 }
 
@@ -132,7 +136,7 @@ where
     B: Backend<FloatElem = f32>,
 {
     features: Tensor<B, 4>,
-    squared: Tensor<B, 4>,
+    energy: Tensor<B, 4>,
     width: u32,
     height: u32,
     channels: usize,
@@ -157,7 +161,7 @@ where
     B: Backend<FloatElem = f32>,
 {
     image: RgbaImage,
-    mask: Tensor<B, 4>,
+    patch_mask: Tensor<B, 4>,
     weighted_template: Tensor<B, 4>,
     template_energy: f32,
 }
@@ -258,13 +262,22 @@ pub fn rebuild_convolution_engine_cache(workspace: &WorkspaceSnapshot) -> Result
     let map_cache_key = tracker_map_cache_key(workspace)?;
     let color_pyramid = load_or_build_color_map_pyramid(workspace, &map_cache_key)?;
     let masks = build_template_masks(&workspace.config);
-    let _ = BurnFeatureMatcher::new(workspace, &workspace.config.ai, &masks)?;
-    let _ = TemplateGlobalLocator::new_cached(
+    let matcher = BurnFeatureMatcher::new(workspace, &workspace.config.ai, &masks)?;
+    let template_global_locator = TemplateGlobalLocator::new_cached(
         workspace,
         &workspace.config,
         color_pyramid.as_ref(),
         &map_cache_key,
     )?;
+    let mut cleanup_targets = matcher.cleanup_targets();
+    push_cleanup_targets(
+        &mut cleanup_targets,
+        template_global_locator.cleanup_targets(),
+    );
+    drop(template_global_locator);
+    drop(matcher);
+    cleanup_burn_device_selections(&cleanup_targets);
+    collect_allocator_memory();
     info!("rebuild of convolution tracker cache completed");
     Ok(())
 }
@@ -1729,6 +1742,18 @@ impl BurnFeatureMatcher {
         }
     }
 
+    fn cleanup_targets(&self) -> Vec<BurnDeviceSelection> {
+        vec![match self {
+            Self::NdArray(_) => BurnDeviceSelection::Cpu,
+            #[cfg(burn_cuda_backend)]
+            Self::Cuda(matcher) => BurnDeviceSelection::Cuda(matcher.encoder.device.clone()),
+            #[cfg(burn_vulkan_backend)]
+            Self::Vulkan(matcher) => BurnDeviceSelection::Vulkan(matcher.encoder.device.clone()),
+            #[cfg(burn_metal_backend)]
+            Self::Metal(matcher) => BurnDeviceSelection::Metal(matcher.encoder.device.clone()),
+        }]
+    }
+
     fn prepare_capture_templates(
         &self,
         captured: &RgbaImage,
@@ -1745,21 +1770,29 @@ impl BurnFeatureMatcher {
         );
         Ok(PreparedCaptureTemplates {
             local: match self {
-                Self::NdArray(matcher) => {
-                    PreparedTemplate::NdArray(matcher.prepare_template(local, &matcher.local_mask)?)
-                }
+                Self::NdArray(matcher) => PreparedTemplate::NdArray(matcher.prepare_template(
+                    local,
+                    &matcher.local_mask,
+                    &matcher.local_patch_mask,
+                )?),
                 #[cfg(burn_cuda_backend)]
-                Self::Cuda(matcher) => {
-                    PreparedTemplate::Cuda(matcher.prepare_template(local, &matcher.local_mask)?)
-                }
+                Self::Cuda(matcher) => PreparedTemplate::Cuda(matcher.prepare_template(
+                    local,
+                    &matcher.local_mask,
+                    &matcher.local_patch_mask,
+                )?),
                 #[cfg(burn_vulkan_backend)]
-                Self::Vulkan(matcher) => {
-                    PreparedTemplate::Vulkan(matcher.prepare_template(local, &matcher.local_mask)?)
-                }
+                Self::Vulkan(matcher) => PreparedTemplate::Vulkan(matcher.prepare_template(
+                    local,
+                    &matcher.local_mask,
+                    &matcher.local_patch_mask,
+                )?),
                 #[cfg(burn_metal_backend)]
-                Self::Metal(matcher) => {
-                    PreparedTemplate::Metal(matcher.prepare_template(local, &matcher.local_mask)?)
-                }
+                Self::Metal(matcher) => PreparedTemplate::Metal(matcher.prepare_template(
+                    local,
+                    &matcher.local_mask,
+                    &matcher.local_patch_mask,
+                )?),
             },
         })
     }
@@ -1860,10 +1893,12 @@ where
     ) -> Result<Self> {
         let encoder = FixedFeatureEncoder::<B>::new(workspace, device, device_label)?;
         let local_mask = mask_tensor::<B>(&masks.local, encoder.output_channels(), &encoder.device);
+        let local_patch_mask = mask_single_tensor::<B>(&masks.local, &encoder.device);
 
         Ok(Self {
             encoder,
             local_mask,
+            local_patch_mask,
             chunk_budget_bytes,
         })
     }
@@ -1880,13 +1915,14 @@ where
         &self,
         image: RgbaImage,
         mask: &Tensor<B, 4>,
+        patch_mask: &Tensor<B, 4>,
     ) -> Result<BurnPreparedTemplate<B>> {
         let template_features = self.encoder.encode(&image)?;
         let weighted_template = template_features * mask.clone();
         let template_energy = weighted_template.clone().powi_scalar(2).sum().into_scalar();
         Ok(BurnPreparedTemplate {
             image,
-            mask: mask.clone(),
+            patch_mask: patch_mask.clone(),
             weighted_template,
             template_energy,
         })
@@ -1902,7 +1938,8 @@ where
         origin_y: u32,
         scale: u32,
     ) -> Result<LocateResult> {
-        let prepared = self.prepare_template(template.clone(), &self.local_mask)?;
+        let prepared =
+            self.prepare_template(template.clone(), &self.local_mask, &self.local_patch_mask)?;
         self.locate_local_prepared(image, &prepared, threshold, origin_x, origin_y, scale)
     }
 
@@ -1947,7 +1984,7 @@ where
             return locate_cached_in_chunks(
                 search,
                 &template.weighted_template,
-                &template.mask,
+                &template.patch_mask,
                 template.template_energy,
                 threshold,
                 origin_x,
@@ -1966,8 +2003,8 @@ where
             ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
         );
         let search_patch_energy = conv2d(
-            search.squared.clone(),
-            template.mask.clone(),
+            search.energy.clone(),
+            template.patch_mask.clone(),
             None::<Tensor<B, 1>>,
             ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
         );
@@ -1997,10 +2034,10 @@ where
     fn from_rgba_image(image: &RgbaImage, encoder: &FixedFeatureEncoder<B>) -> Result<Self> {
         let features = encoder.encode(image)?;
         let dims: [usize; 4] = features.shape().dims();
-        let squared = features.clone().powi_scalar(2);
+        let energy = feature_energy_tensor(features.clone());
         Ok(Self {
             features,
-            squared,
+            energy,
             width: dims[3] as u32,
             height: dims[2] as u32,
             channels: dims[1],
@@ -2019,6 +2056,26 @@ where
         ),
         device,
     )
+}
+
+fn mask_single_tensor<B>(mask: &GrayImage, device: &B::Device) -> Tensor<B, 4>
+where
+    B: Backend<FloatElem = f32>,
+{
+    Tensor::<B, 4>::from_data(
+        TensorData::new(
+            mask_as_unit_vec(mask, 1),
+            [1, 1, mask.height() as usize, mask.width() as usize],
+        ),
+        device,
+    )
+}
+
+fn feature_energy_tensor<B>(features: Tensor<B, 4>) -> Tensor<B, 4>
+where
+    B: Backend<FloatElem = f32>,
+{
+    features.powi_scalar(2).sum_dim(1)
 }
 
 fn burn_match_chunk_rows(
@@ -2058,7 +2115,7 @@ fn burn_match_chunk_rows(
 fn locate_cached_in_chunks<B>(
     search: &SearchTensorCache<B>,
     weighted_template: &Tensor<B, 4>,
-    mask: &Tensor<B, 4>,
+    patch_mask: &Tensor<B, 4>,
     template_energy: f32,
     threshold: f32,
     origin_x: u32,
@@ -2086,9 +2143,9 @@ where
                 .features
                 .clone()
                 .narrow(2, output_row as usize, slice_height as usize);
-        let squared_chunk =
+        let energy_chunk =
             search
-                .squared
+                .energy
                 .clone()
                 .narrow(2, output_row as usize, slice_height as usize);
         let numerator = conv2d(
@@ -2098,8 +2155,8 @@ where
             ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
         );
         let search_patch_energy = conv2d(
-            squared_chunk,
-            mask.clone(),
+            energy_chunk,
+            patch_mask.clone(),
             None::<Tensor<B, 1>>,
             ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
         );
@@ -2638,6 +2695,26 @@ impl TrackingWorker for BurnTrackerWorker {
     fn engine_kind(&self) -> TrackerEngineKind {
         TrackerEngineKind::ConvolutionFeatureMatch
     }
+
+    fn cleanup_targets(&self) -> Vec<BurnDeviceSelection> {
+        let mut targets = self.inner.matcher.cleanup_targets();
+        push_cleanup_targets(
+            &mut targets,
+            self.inner.template_global_locator.cleanup_targets(),
+        );
+        targets
+    }
+}
+
+fn push_cleanup_targets(
+    targets: &mut Vec<BurnDeviceSelection>,
+    additional: Vec<BurnDeviceSelection>,
+) {
+    for selection in additional {
+        if !targets.contains(&selection) {
+            targets.push(selection);
+        }
+    }
 }
 
 #[cfg(all(test, burn_vulkan_backend))]
@@ -2764,6 +2841,25 @@ mod tests {
         config.device_index = ordinal;
         BurnFeatureMatcher::new(&fixture.workspace, &config, &fixture.masks)
             .expect("failed to create Vulkan feature matcher")
+    }
+
+    #[test]
+    fn feature_energy_tensor_collapses_channel_energy() {
+        let device = NdArrayDevice::default();
+        let features = Tensor::<burn::backend::NdArray, 4>::from_data(
+            TensorData::new(
+                vec![
+                    1.0f32, 2.0, //
+                    3.0, 4.0, //
+                    5.0, 6.0,
+                ],
+                [1, 3, 1, 2],
+            ),
+            &device,
+        );
+
+        let energy = tensor4_to_flat_f32(feature_energy_tensor(features)).expect("energy tensor");
+        assert_eq!(energy, vec![35.0, 56.0]);
     }
 
     fn template_global_locator_for_vulkan(

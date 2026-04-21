@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use gpui::{
-    AppContext, Bounds, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, RenderImage,
-    ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, WindowControlArea, canvas, div, fill, prelude::FluentBuilder as _, px,
+    App, AppContext, Bounds, ClickEvent, Context, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
+    RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, WindowControlArea, canvas, div, fill,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, Sizable as _, Size, select::SelectItem, tooltip::Tooltip,
@@ -20,7 +21,7 @@ use crate::{
 };
 
 use super::{
-    TestCaseLabel, TrackerMapRenderSnapshot, TrackerWorkbench,
+    TestCaseLabel, TrackerMapRenderSnapshot, TrackerPipToggleState, TrackerWorkbench,
     capture_utils::capture_region_rgba,
     debug_images::{contained_image_bounds, render_image_from_debug_image},
     forms::{PipCapturePickerItem, PipCapturePickerTarget},
@@ -222,6 +223,25 @@ impl TrackerPipWindow {
         }
     }
 
+    fn toggle_tracker(&mut self, cx: &mut Context<Self>) {
+        let Some(workbench) = self.workbench.upgrade() else {
+            return;
+        };
+
+        let snapshot = workbench.update(cx, |this, cx| {
+            if this.is_tracking_active() {
+                this.stop_tracker(false, cx);
+            } else {
+                this.start_tracker(cx);
+            }
+            this.tracker_map_render_snapshot()
+        });
+
+        self.always_on_top = snapshot.pip_always_on_top;
+        self.snapshot = snapshot;
+        cx.notify();
+    }
+
     fn capture_picker_items() -> Vec<PipCapturePickerItem> {
         vec![
             PipCapturePickerItem::new(
@@ -350,6 +370,10 @@ impl TrackerPipCapturePanelWindow {
             capture_preview_error: None,
             _subscriptions: subscriptions,
         };
+        cx.on_release(|this, cx| {
+            this.release_capture_preview_image_in_app(cx);
+        })
+        .detach();
         this.refresh_capture_preview(cx);
         this
     }
@@ -381,6 +405,7 @@ impl TrackerPipCapturePanelWindow {
     }
 
     fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.release_capture_preview_image(cx);
         if let Some(workbench) = self.workbench.upgrade() {
             let _ = workbench.update(cx, |this, cx| {
                 this.handle_tracker_pip_capture_panel_window_closed(cx);
@@ -396,10 +421,18 @@ impl TrackerPipCapturePanelWindow {
         ]
     }
 
-    fn refresh_capture_preview(&mut self, cx: &mut Context<Self>) {
+    fn release_capture_preview_image(&mut self, cx: &mut Context<Self>) {
+        self.release_capture_preview_image_in_app(cx);
+    }
+
+    fn release_capture_preview_image_in_app(&mut self, cx: &mut App) {
         if let Some(image) = self.capture_preview_render_image.take() {
             cx.drop_image(image, None);
         }
+    }
+
+    fn refresh_capture_preview(&mut self, cx: &mut Context<Self>) {
+        self.release_capture_preview_image(cx);
 
         let Some(capture_region) = self.capture_region.as_ref() else {
             self.capture_preview_info = None;
@@ -590,6 +623,16 @@ fn pip_titlebar(
                     cx.stop_propagation();
                 })
                 .child(pip_capture_menu(this, tokens))
+                .child(pip_control_text_button(
+                    "tracker-pip-toggle-local",
+                    tokens,
+                    pip_tracker_toggle_label(this.snapshot.pip_tracker_toggle_state),
+                    this.snapshot.pip_tracker_status_tooltip.clone(),
+                    pip_tracker_toggle_tone(this.snapshot.pip_tracker_toggle_state),
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.toggle_tracker(cx);
+                    }),
+                ))
                 .child(pip_control_icon_button(
                     "tracker-pip-topmost-local",
                     tokens,
@@ -714,6 +757,26 @@ fn pip_debug_footer_item(
         )
 }
 
+fn pip_tracker_toggle_label(state: TrackerPipToggleState) -> &'static str {
+    match state {
+        TrackerPipToggleState::Start => "启动追踪",
+        TrackerPipToggleState::Starting => "启动中",
+        TrackerPipToggleState::Stop => "停止追踪",
+        TrackerPipToggleState::Stopping => "停止中",
+        TrackerPipToggleState::Restart => "重新启动",
+    }
+}
+
+fn pip_tracker_toggle_tone(state: TrackerPipToggleState) -> PipControlTone {
+    match state {
+        TrackerPipToggleState::Start | TrackerPipToggleState::Restart => {
+            PipControlTone::Toggle(false)
+        }
+        TrackerPipToggleState::Starting => PipControlTone::Toggle(true),
+        TrackerPipToggleState::Stop | TrackerPipToggleState::Stopping => PipControlTone::Danger,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum PipControlTone {
     Neutral,
@@ -819,11 +882,12 @@ fn pip_control_icon_button(
 fn pip_control_text_button(
     id: impl Into<SharedString>,
     tokens: WorkbenchThemeTokens,
-    label: &'static str,
+    label: impl Into<SharedString>,
     tooltip: impl Into<SharedString>,
     tone: PipControlTone,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
+    let label = label.into();
     let tooltip = tooltip.into();
     let (background, hover_background, border_color) = match tone {
         PipControlTone::Neutral => (

@@ -1,6 +1,7 @@
 use std::{env, sync::OnceLock};
 
 use crate::config::AiDevicePreference;
+use tracing::warn;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BurnDeviceDescriptor {
@@ -104,13 +105,15 @@ pub(crate) fn available_burn_device_descriptors(
 }
 
 #[cfg(any(burn_cuda_backend, burn_vulkan_backend, burn_metal_backend))]
-use burn::tensor::{Tensor, backend::Backend};
+use burn::tensor::Tensor;
+use burn::tensor::backend::Backend;
 
 #[cfg(any(burn_cuda_backend, burn_vulkan_backend, burn_metal_backend))]
 use cubecl_runtime::runtime::Runtime as CubeRuntime;
 
 use crate::{
-    config::{AiTrackingConfig, MinimapPresenceProbeConfig, TemplateTrackingConfig},
+    config::{AiTrackingConfig, AppConfig, MinimapPresenceProbeConfig, TemplateTrackingConfig},
+    domain::tracker::TrackerEngineKind,
     error::Result,
 };
 
@@ -185,6 +188,36 @@ pub(crate) fn select_burn_device(config: &impl BurnDeviceConfig) -> Result<BurnD
     }
 }
 
+pub(crate) fn planned_burn_cleanup_targets(
+    config: &AppConfig,
+    engine: TrackerEngineKind,
+) -> Vec<BurnDeviceSelection> {
+    let mut targets = Vec::new();
+    match engine {
+        TrackerEngineKind::MultiScaleTemplateMatch => {
+            push_cleanup_target(&mut targets, selection_without_probe(&config.template));
+        }
+        TrackerEngineKind::ConvolutionFeatureMatch => {
+            push_cleanup_target(&mut targets, selection_without_probe(&config.ai));
+            push_cleanup_target(&mut targets, selection_without_probe(&config.template));
+        }
+    }
+    targets
+}
+
+pub(crate) fn cleanup_burn_device_selections(selections: &[BurnDeviceSelection]) {
+    for selection in selections {
+        cleanup_burn_device_selection(selection);
+    }
+}
+
+pub(crate) fn collect_allocator_memory() {
+    // SAFETY: mimalloc is configured as the process global allocator in `main.rs`.
+    unsafe {
+        libmimalloc_sys::mi_collect(true);
+    }
+}
+
 #[cfg(any(burn_cuda_backend, burn_vulkan_backend, burn_metal_backend))]
 pub(crate) fn burn_device_label(device: &BurnDeviceSelection) -> String {
     match device {
@@ -195,6 +228,75 @@ pub(crate) fn burn_device_label(device: &BurnDeviceSelection) -> String {
         BurnDeviceSelection::Vulkan(device) => format!("Vulkan:{}", wgpu_device_label(device)),
         #[cfg(burn_metal_backend)]
         BurnDeviceSelection::Metal(device) => format!("Metal:{}", wgpu_device_label(device)),
+    }
+}
+
+fn push_cleanup_target(
+    targets: &mut Vec<BurnDeviceSelection>,
+    selection: Option<BurnDeviceSelection>,
+) {
+    let Some(selection) = selection else {
+        return;
+    };
+    if !targets.contains(&selection) {
+        targets.push(selection);
+    }
+}
+
+fn selection_without_probe(config: &impl BurnDeviceConfig) -> Option<BurnDeviceSelection> {
+    match config.device_preference() {
+        AiDevicePreference::Cpu => Some(BurnDeviceSelection::Cpu),
+        #[cfg(burn_cuda_backend)]
+        AiDevicePreference::Cuda => Some(BurnDeviceSelection::Cuda(CudaDevice {
+            index: config.device_index(),
+        })),
+        #[cfg(not(burn_cuda_backend))]
+        AiDevicePreference::Cuda => None,
+        #[cfg(burn_vulkan_backend)]
+        AiDevicePreference::Vulkan => available_vulkan_device_choices()
+            .iter()
+            .find(|choice| choice.descriptor.ordinal == config.device_index())
+            .map(|choice| BurnDeviceSelection::Vulkan(choice.device.clone())),
+        #[cfg(not(burn_vulkan_backend))]
+        AiDevicePreference::Vulkan => None,
+        #[cfg(burn_metal_backend)]
+        AiDevicePreference::Metal => available_metal_device_choices()
+            .iter()
+            .find(|choice| choice.descriptor.ordinal == config.device_index())
+            .map(|choice| BurnDeviceSelection::Metal(choice.device.clone())),
+        #[cfg(not(burn_metal_backend))]
+        AiDevicePreference::Metal => None,
+    }
+}
+
+fn cleanup_burn_device_selection(selection: &BurnDeviceSelection) {
+    match selection {
+        BurnDeviceSelection::Cpu => {}
+        #[cfg(burn_cuda_backend)]
+        BurnDeviceSelection::Cuda(device) => {
+            cleanup_backend_device::<burn::backend::Cuda>(device, "CUDA")
+        }
+        #[cfg(burn_vulkan_backend)]
+        BurnDeviceSelection::Vulkan(device) => {
+            cleanup_backend_device::<burn::backend::Vulkan>(device, "Vulkan")
+        }
+        #[cfg(burn_metal_backend)]
+        BurnDeviceSelection::Metal(device) => {
+            cleanup_backend_device::<burn::backend::Metal>(device, "Metal")
+        }
+    }
+}
+
+fn cleanup_backend_device<B>(device: &B::Device, label: &'static str)
+where
+    B: Backend,
+{
+    if let Err(error) = B::sync(device) {
+        warn!(device = label, error = %error, "failed to sync backend before memory cleanup");
+    }
+    B::memory_cleanup(device);
+    if let Err(error) = B::sync(device) {
+        warn!(device = label, error = %error, "failed to sync backend after memory cleanup");
     }
 }
 
@@ -411,4 +513,28 @@ where
     }))
     .map_err(|_| crate::app_error!("device probe failed"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+
+    #[test]
+    fn convolution_cleanup_targets_are_deduplicated() {
+        let config = AppConfig::default();
+        assert_eq!(
+            planned_burn_cleanup_targets(&config, TrackerEngineKind::ConvolutionFeatureMatch),
+            vec![BurnDeviceSelection::Cpu]
+        );
+    }
+
+    #[test]
+    fn template_cleanup_targets_match_template_engine() {
+        let config = AppConfig::default();
+        assert_eq!(
+            planned_burn_cleanup_targets(&config, TrackerEngineKind::MultiScaleTemplateMatch),
+            vec![BurnDeviceSelection::Cpu]
+        );
+    }
 }

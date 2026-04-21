@@ -1,6 +1,11 @@
 #[cfg(debug_assertions)]
 use std::ffi::OsStr;
 
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: MiMalloc = MiMalloc;
+
 fn main() -> game_map_tracker_rs::error::Result<()> {
     #[cfg(debug_assertions)]
     {
