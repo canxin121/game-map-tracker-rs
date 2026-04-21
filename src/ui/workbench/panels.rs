@@ -2850,21 +2850,144 @@ fn route_editor_map_panel(
         Some(
             toolbar_cluster(
                 vec![
-                    this.is_selected_point_move_armed().then(|| {
+                    (!this.is_route_editor_draw_mode()).then(|| {
                         toolbar_button(
-                            "group-map-pick-cancel",
+                            "route-editor-popup-toggle",
                             tokens,
-                            "x",
-                            "取消取点",
-                            ToolbarButtonTone::Neutral,
+                            "P",
+                            if this.is_tracker_point_popup_enabled() {
+                                "隐藏浮窗"
+                            } else {
+                                "显示浮窗"
+                            },
+                            if this.is_tracker_point_popup_enabled() {
+                                ToolbarButtonTone::Neutral
+                            } else {
+                                ToolbarButtonTone::Primary
+                            },
                             cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.toggle_selected_point_move_mode();
+                                this.set_tracker_point_popup_enabled(
+                                    !this.is_tracker_point_popup_enabled(),
+                                );
                                 cx.notify();
                             }),
                         )
                         .into_any_element()
                     }),
-                    Some(
+                    (!this.is_route_editor_draw_mode()).then(|| {
+                        toolbar_button_with_tooltip(
+                            "route-editor-edit-start",
+                            tokens,
+                            "E",
+                            "编辑连线",
+                            Some(
+                                "进入连线编辑后，才能多选节点、删除连线并按点击顺序重新连接".into(),
+                            ),
+                            ToolbarButtonTone::Primary,
+                            false,
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.start_route_editor_graph_edit(window, cx);
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    }),
+                    this.is_route_editor_draw_mode().then(|| {
+                        toolbar_button_with_tooltip(
+                            "route-editor-selection-clear",
+                            tokens,
+                            "C",
+                            "清空多选",
+                            Some("清空当前连线编辑里的多选节点".into()),
+                            ToolbarButtonTone::Neutral,
+                            this.route_editor_selected_count() == 0,
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.clear_route_editor_point_selection(window, cx);
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    }),
+                    this.is_route_editor_draw_mode().then(|| {
+                        toolbar_button_with_tooltip(
+                            "route-editor-remove-edges",
+                            tokens,
+                            "-",
+                            "移除连线",
+                            Some("移除当前多选节点之间已有的有向连线".into()),
+                            ToolbarButtonTone::Danger,
+                            !this.route_editor_can_remove_selected_edges(),
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.remove_route_editor_edges_between_selected(window, cx);
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    }),
+                    this.is_route_editor_draw_mode().then(|| {
+                        toolbar_button_with_tooltip(
+                            "route-editor-reset-graph",
+                            tokens,
+                            "R",
+                            "恢复已保存",
+                            Some("丢弃本次未保存的断边/重连结果，但继续停留在连线编辑模式".into()),
+                            ToolbarButtonTone::Neutral,
+                            !this.route_editor_has_graph_draft(),
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.reset_route_editor_graph_edit(window, cx);
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    }),
+                    this.is_route_editor_draw_mode().then(|| {
+                        toolbar_button_with_tooltip(
+                            "route-editor-edit-cancel",
+                            tokens,
+                            "x",
+                            "放弃编辑",
+                            Some("放弃本次连线编辑并退出，不保存草稿".into()),
+                            ToolbarButtonTone::Danger,
+                            false,
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.cancel_route_editor_graph_edit(window, cx);
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    }),
+                    this.is_route_editor_draw_mode().then(|| {
+                        toolbar_button_with_tooltip(
+                            "route-editor-edit-save",
+                            tokens,
+                            "S",
+                            "保存退出",
+                            Some("只有当前图形成完整单向单链时，才能保存并退出连线编辑".into()),
+                            ToolbarButtonTone::Primary,
+                            !this.route_editor_can_save_graph_edit(),
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.save_route_editor_graph_edit(window, cx);
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    }),
+                    (!this.is_route_editor_draw_mode() && this.is_selected_point_move_armed())
+                        .then(|| {
+                            toolbar_button(
+                                "group-map-pick-cancel",
+                                tokens,
+                                "x",
+                                "取消取点",
+                                ToolbarButtonTone::Neutral,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.toggle_selected_point_move_mode();
+                                    cx.notify();
+                                }),
+                            )
+                            .into_any_element()
+                        }),
+                    (!this.is_route_editor_draw_mode()).then(|| {
                         toolbar_button(
                             "group-map-add-toggle",
                             tokens,
@@ -2884,8 +3007,8 @@ fn route_editor_map_panel(
                                 cx.notify();
                             }),
                         )
-                        .into_any_element(),
-                    ),
+                        .into_any_element()
+                    }),
                 ]
                 .into_iter()
                 .flatten()
@@ -4060,10 +4183,12 @@ pub(super) fn paint_tracker_map_overlay_snapshot(
     let route_color_hex = snapshot.route_color_hex.clone();
     let trail = snapshot.trail.clone();
     let preview_position = snapshot.preview_position.clone();
-    let route_world = snapshot.route_world.clone();
+    let route_segments = snapshot.route_segments.clone();
     let point_visuals = snapshot.point_visuals.clone();
     let selected_group_id = snapshot.selected_group_id.clone();
     let selected_point_id = snapshot.selected_point_id.clone();
+    let selected_point_ids = snapshot.selected_point_ids.clone();
+    let route_editor_lasso_path = snapshot.route_editor_lasso_path.clone();
 
     window.paint_layer(bounds, |window| {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -4105,37 +4230,64 @@ pub(super) fn paint_tracker_map_overlay_snapshot(
 
             if let Some(route_color_hex) = route_color_hex.as_ref() {
                 let route_color = gpui::rgb(parse_hex_color(route_color_hex, 0xff6b6b));
-                if route_world.len() > 1 {
-                    let route_screen = screen_points(camera, &route_world);
-                    let route_canvas = route_screen
-                        .iter()
-                        .map(|screen_point| {
-                            point(
-                                bounds.origin.x + px(screen_point.x),
-                                bounds.origin.y + px(screen_point.y),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    let mut builder = PathBuilder::stroke(px(3.0));
-                    builder.move_to(route_canvas[0]);
-                    for canvas_point in route_canvas.iter().skip(1) {
-                        builder.line_to(*canvas_point);
-                    }
-                    if let Ok(path) = builder.build() {
-                        window.paint_path(path, route_color);
-                    }
+                if !route_segments.is_empty() {
+                    for segment in &route_segments {
+                        let from_screen = camera.world_to_screen(segment.from);
+                        let to_screen = camera.world_to_screen(segment.to);
+                        let from_canvas = point(
+                            bounds.origin.x + px(from_screen.x),
+                            bounds.origin.y + px(from_screen.y),
+                        );
+                        let to_canvas = point(
+                            bounds.origin.x + px(to_screen.x),
+                            bounds.origin.y + px(to_screen.y),
+                        );
 
-                    for segment in route_canvas.windows(2) {
-                        paint_route_arrow(window, segment[0], segment[1], route_color.into());
+                        let mut builder = PathBuilder::stroke(px(3.0));
+                        builder.move_to(from_canvas);
+                        builder.line_to(to_canvas);
+                        if let Ok(path) = builder.build() {
+                            window.paint_path(path, route_color);
+                        }
+
+                        paint_route_arrow(window, from_canvas, to_canvas, route_color.into());
+                        paint_route_segment_length(
+                            window,
+                            cx,
+                            segment.from,
+                            segment.to,
+                            from_canvas,
+                            to_canvas,
+                            tokens,
+                            route_color.into(),
+                        );
                     }
-                    paint_route_segment_lengths(
-                        window,
-                        cx,
-                        &route_world,
-                        &route_canvas,
-                        tokens,
-                        route_color.into(),
-                    );
+                }
+            }
+
+            if let Some(selection) = route_editor_lasso_path.as_ref()
+                && selection.len() > 1
+            {
+                let mut builder = PathBuilder::stroke(px(2.0));
+                let first = selection[0];
+                builder.move_to(point(
+                    bounds.origin.x + px(first.x),
+                    bounds.origin.y + px(first.y),
+                ));
+                for screen_point in selection.iter().skip(1) {
+                    builder.line_to(point(
+                        bounds.origin.x + px(screen_point.x),
+                        bounds.origin.y + px(screen_point.y),
+                    ));
+                }
+                if selection.len() > 2 {
+                    builder.line_to(point(
+                        bounds.origin.x + px(first.x),
+                        bounds.origin.y + px(first.y),
+                    ));
+                }
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, tokens.selected_marker_border);
                 }
             }
 
@@ -4143,7 +4295,8 @@ pub(super) fn paint_tracker_map_overlay_snapshot(
             for marker in point_visuals {
                 let screen = camera.world_to_screen(marker.world);
                 let highlighted = selected_group_id.as_ref() == Some(&marker.group_id)
-                    && selected_point_id.as_ref() == Some(&marker.point_id);
+                    && (selected_point_id.as_ref() == Some(&marker.point_id)
+                        || selected_point_ids.contains(&marker.point_id));
                 let anchor = point(
                     bounds.origin.x + px(screen.x),
                     bounds.origin.y + px(screen.y),
@@ -4729,6 +4882,9 @@ fn install_map_canvas_navigation_handlers(
             let bwiki_circle_mode = map_kind == MapCanvasKind::Bwiki
                 && event.modifiers.control
                 && entity.read(cx).is_bwiki_planner_active();
+            let route_editor_circle_mode = map_kind == MapCanvasKind::RouteEditor
+                && event.modifiers.control
+                && entity.read(cx).is_route_editor_draw_mode();
 
             _ = entity.update(cx, |this, _| {
                 let local_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
@@ -4744,6 +4900,10 @@ fn install_map_canvas_navigation_handlers(
                 }
                 if bwiki_circle_mode {
                     this.begin_bwiki_planner_lasso_selection(local_x, local_y);
+                    return;
+                }
+                if route_editor_circle_mode {
+                    this.begin_route_editor_lasso_selection(local_x, local_y);
                     return;
                 }
                 this.begin_map_drag(
@@ -4769,11 +4929,20 @@ fn install_map_canvas_navigation_handlers(
             let bwiki_circle_active = map_kind == MapCanvasKind::Bwiki
                 && event.pressed_button == Some(MouseButton::Left)
                 && entity.read(cx).bwiki_planner_lasso_selection.is_some();
+            let route_editor_circle_active = map_kind == MapCanvasKind::RouteEditor
+                && event.pressed_button == Some(MouseButton::Left)
+                && entity.read(cx).route_editor_lasso_selection.is_some();
             _ = entity.update(cx, |this, cx| {
                 let local_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
                 let local_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
                 if bwiki_circle_active
                     && this.update_bwiki_planner_lasso_selection(local_x, local_y)
+                {
+                    cx.notify();
+                    return;
+                }
+                if route_editor_circle_active
+                    && this.update_route_editor_lasso_selection(local_x, local_y)
                 {
                     cx.notify();
                     return;
@@ -4821,9 +4990,18 @@ fn install_map_canvas_navigation_handlers(
             let bwiki_circle_active = map_kind == MapCanvasKind::Bwiki
                 && event.button == MouseButton::Left
                 && entity.read(cx).bwiki_planner_lasso_selection.is_some();
+            let route_editor_circle_active = map_kind == MapCanvasKind::RouteEditor
+                && event.button == MouseButton::Left
+                && entity.read(cx).route_editor_lasso_selection.is_some();
             _ = entity.update(cx, |this, cx| {
                 if bwiki_circle_active {
                     if this.finish_bwiki_planner_lasso_selection(local_x, local_y) {
+                        cx.notify();
+                    }
+                    return;
+                }
+                if route_editor_circle_active {
+                    if this.finish_route_editor_lasso_selection(local_x, local_y, window, cx) {
                         cx.notify();
                     }
                     return;
@@ -5021,6 +5199,54 @@ fn paint_canvas_text_pill(
     );
 }
 
+fn paint_route_segment_length(
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+    from_world: crate::domain::geometry::WorldPoint,
+    to_world: crate::domain::geometry::WorldPoint,
+    from_canvas: gpui::Point<gpui::Pixels>,
+    to_canvas: gpui::Point<gpui::Pixels>,
+    tokens: WorkbenchThemeTokens,
+    accent: gpui::Hsla,
+) {
+    let from_x = f32::from(from_canvas.x);
+    let from_y = f32::from(from_canvas.y);
+    let to_x = f32::from(to_canvas.x);
+    let to_y = f32::from(to_canvas.y);
+    let dx = to_x - from_x;
+    let dy = to_y - from_y;
+    let screen_length = (dx * dx + dy * dy).sqrt();
+    if screen_length < 56.0 {
+        return;
+    }
+
+    let world_dx = to_world.x - from_world.x;
+    let world_dy = to_world.y - from_world.y;
+    let world_length = (world_dx * world_dx + world_dy * world_dy).sqrt();
+    let mut normal_x = -dy / screen_length;
+    let mut normal_y = dx / screen_length;
+    if normal_y > 0.0 {
+        normal_x = -normal_x;
+        normal_y = -normal_y;
+    }
+
+    paint_canvas_text_pill(
+        window,
+        cx,
+        point(
+            px((from_x + to_x) * 0.5 + normal_x * 14.0),
+            px((from_y + to_y) * 0.5 + normal_y * 14.0),
+        ),
+        &format_segment_length(world_length),
+        tokens.panel_bg.opacity(0.96),
+        tokens.app_fg,
+        accent.opacity(0.82),
+        10.0,
+        7.0,
+        2.0,
+    );
+}
+
 fn paint_route_segment_lengths(
     window: &mut gpui::Window,
     cx: &mut gpui::App,
@@ -5030,44 +5256,15 @@ fn paint_route_segment_lengths(
     accent: gpui::Hsla,
 ) {
     for (world_segment, canvas_segment) in world_points.windows(2).zip(canvas_points.windows(2)) {
-        let [from_world, to_world] = [world_segment[0], world_segment[1]];
-        let [from_canvas, to_canvas] = [canvas_segment[0], canvas_segment[1]];
-
-        let from_x = f32::from(from_canvas.x);
-        let from_y = f32::from(from_canvas.y);
-        let to_x = f32::from(to_canvas.x);
-        let to_y = f32::from(to_canvas.y);
-        let dx = to_x - from_x;
-        let dy = to_y - from_y;
-        let screen_length = (dx * dx + dy * dy).sqrt();
-        if screen_length < 56.0 {
-            continue;
-        }
-
-        let world_dx = to_world.x - from_world.x;
-        let world_dy = to_world.y - from_world.y;
-        let world_length = (world_dx * world_dx + world_dy * world_dy).sqrt();
-        let mut normal_x = -dy / screen_length;
-        let mut normal_y = dx / screen_length;
-        if normal_y > 0.0 {
-            normal_x = -normal_x;
-            normal_y = -normal_y;
-        }
-
-        paint_canvas_text_pill(
+        paint_route_segment_length(
             window,
             cx,
-            point(
-                px((from_x + to_x) * 0.5 + normal_x * 14.0),
-                px((from_y + to_y) * 0.5 + normal_y * 14.0),
-            ),
-            &format_segment_length(world_length),
-            tokens.panel_bg.opacity(0.96),
-            tokens.app_fg,
-            accent.opacity(0.82),
-            10.0,
-            7.0,
-            2.0,
+            world_segment[0],
+            world_segment[1],
+            canvas_segment[0],
+            canvas_segment[1],
+            tokens,
+            accent,
         );
     }
 }

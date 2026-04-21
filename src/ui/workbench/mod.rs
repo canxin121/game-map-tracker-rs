@@ -95,15 +95,23 @@ pub(super) struct MapPointRenderItem {
     is_end: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct RouteSegmentRenderItem {
+    pub(super) from: WorldPoint,
+    pub(super) to: WorldPoint,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct TrackerMapRenderSnapshot {
     pub(super) route_color_hex: Option<String>,
     pub(super) trail: Vec<WorldPoint>,
     pub(super) preview_position: Option<PositionEstimate>,
-    pub(super) route_world: Vec<WorldPoint>,
+    pub(super) route_segments: Vec<RouteSegmentRenderItem>,
     pub(super) point_visuals: Vec<MapPointRenderItem>,
     pub(super) selected_group_id: Option<RouteId>,
     pub(super) selected_point_id: Option<RoutePointId>,
+    pub(super) selected_point_ids: HashSet<RoutePointId>,
+    pub(super) route_editor_lasso_path: Option<Vec<WorldPoint>>,
     pub(super) follow_point: Option<WorldPoint>,
     pub(super) pip_always_on_top: bool,
     pub(super) pip_tracker_toggle_state: TrackerPipToggleState,
@@ -198,6 +206,48 @@ impl BwikiPlannerLassoSelection {
             })
             .sum()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RouteGraphEdge {
+    from: RoutePointId,
+    to: RoutePointId,
+}
+
+impl RouteGraphEdge {
+    fn new(from: RoutePointId, to: RoutePointId) -> Self {
+        Self { from, to }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RouteGraphEditState {
+    group_id: RouteId,
+    point_ids: HashSet<RoutePointId>,
+    edges: HashSet<RouteGraphEdge>,
+}
+
+impl RouteGraphEditState {
+    fn from_group(group: &RouteDocument) -> Self {
+        Self {
+            group_id: group.id.clone(),
+            point_ids: route_point_id_set(&group.points),
+            edges: route_graph_edges_from_points(&group.points),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RouteGraphRenderState {
+    segments: Vec<RouteSegmentRenderItem>,
+    start_ids: HashSet<RoutePointId>,
+    end_ids: HashSet<RoutePointId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteGraphInsertOutcome {
+    Unchanged,
+    Added { replaced_edges: usize },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -435,6 +485,11 @@ pub struct TrackerWorkbench {
     pub(super) map_point_insert_armed: bool,
     moving_point_id: Option<RoutePointId>,
     moving_point_preview: Option<WorldPoint>,
+    route_editor_selected_point_ids: HashSet<RoutePointId>,
+    route_editor_lasso_selection: Option<BwikiPlannerLassoSelection>,
+    route_editor_graph_state: Option<RouteGraphEditState>,
+    route_editor_draw_mode: bool,
+    route_editor_draw_sequence: Vec<RoutePointId>,
     ignore_next_tracker_mouse_up: bool,
     suspend_group_autosave: bool,
     suspend_point_autosave: bool,
@@ -708,6 +763,11 @@ impl TrackerWorkbench {
                     map_point_insert_armed: false,
                     moving_point_id: None,
                     moving_point_preview: None,
+                    route_editor_selected_point_ids: HashSet::new(),
+                    route_editor_lasso_selection: None,
+                    route_editor_graph_state: None,
+                    route_editor_draw_mode: false,
+                    route_editor_draw_sequence: Vec::new(),
                     ignore_next_tracker_mouse_up: false,
                     suspend_group_autosave: false,
                     suspend_point_autosave: false,
@@ -842,6 +902,11 @@ impl TrackerWorkbench {
                     map_point_insert_armed: false,
                     moving_point_id: None,
                     moving_point_preview: None,
+                    route_editor_selected_point_ids: HashSet::new(),
+                    route_editor_lasso_selection: None,
+                    route_editor_graph_state: None,
+                    route_editor_draw_mode: false,
+                    route_editor_draw_sequence: Vec::new(),
                     ignore_next_tracker_mouse_up: false,
                     suspend_group_autosave: false,
                     suspend_point_autosave: false,
@@ -1789,6 +1854,70 @@ impl TrackerWorkbench {
         self.map_point_insert_armed
     }
 
+    pub(super) const fn is_route_editor_draw_mode(&self) -> bool {
+        self.route_editor_draw_mode
+    }
+
+    fn effective_route_editor_selected_point_ids(&self) -> HashSet<RoutePointId> {
+        if !self.route_editor_selected_point_ids.is_empty() {
+            return self.route_editor_selected_point_ids.clone();
+        }
+
+        self.selected_point_id
+            .as_ref()
+            .cloned()
+            .into_iter()
+            .collect()
+    }
+
+    pub(super) fn route_editor_selected_count(&self) -> usize {
+        self.effective_route_editor_selected_point_ids().len()
+    }
+
+    fn route_editor_graph_state_matches_group(&self, group: &RouteDocument) -> bool {
+        self.route_editor_graph_state.as_ref().is_some_and(|state| {
+            state.group_id == group.id && state.point_ids == route_point_id_set(&group.points)
+        })
+    }
+
+    pub(super) fn route_editor_has_graph_draft(&self) -> bool {
+        if !self.route_editor_draw_mode {
+            return false;
+        }
+        let Some(group) = self.active_group() else {
+            return false;
+        };
+        let Some(state) = self.route_editor_graph_state.as_ref() else {
+            return false;
+        };
+        if !self.route_editor_graph_state_matches_group(group) {
+            return false;
+        }
+
+        state.edges != route_graph_edges_from_points(&group.points)
+    }
+
+    pub(super) fn route_editor_can_remove_selected_edges(&self) -> bool {
+        if !self.route_editor_draw_mode {
+            return false;
+        }
+        let Some(group) = self.active_group() else {
+            return false;
+        };
+        let selected = self.effective_route_editor_selected_point_ids();
+        if selected.len() < 2 {
+            return false;
+        }
+
+        self.route_graph_edges_for_group(group, true)
+            .into_iter()
+            .any(|edge| selected.contains(&edge.from) && selected.contains(&edge.to))
+    }
+
+    pub(super) fn route_editor_can_save_graph_edit(&self) -> bool {
+        self.route_editor_resolved_order().is_some()
+    }
+
     pub(super) fn is_selected_point_move_armed(&self) -> bool {
         self.selected_point_id
             .as_ref()
@@ -1819,23 +1948,107 @@ impl TrackerWorkbench {
             .position(|point| &point.id == point_id)
     }
 
-    fn active_group_points(&self) -> Vec<MapPointRenderItem> {
+    fn route_graph_edges_for_group(
+        &self,
+        group: &RouteDocument,
+        use_graph_edit_state: bool,
+    ) -> HashSet<RouteGraphEdge> {
+        if use_graph_edit_state && self.route_editor_graph_state_matches_group(group) {
+            return self
+                .route_editor_graph_state
+                .as_ref()
+                .map(|state| state.edges.clone())
+                .unwrap_or_default();
+        }
+
+        route_graph_edges_from_points(&group.points)
+    }
+
+    fn active_route_graph_render_state(&self, use_graph_edit_state: bool) -> RouteGraphRenderState {
+        let Some(group) = self.active_group() else {
+            return RouteGraphRenderState::default();
+        };
+        let edges = self.route_graph_edges_for_group(group, use_graph_edit_state);
+
+        let point_lookup = group
+            .points
+            .iter()
+            .map(|point| {
+                (
+                    point.id.clone(),
+                    self.moving_point_preview_world(&point.id)
+                        .unwrap_or_else(|| point.world()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut incoming = group
+            .points
+            .iter()
+            .map(|point| (point.id.clone(), 0usize))
+            .collect::<HashMap<_, _>>();
+        let mut outgoing = incoming.clone();
+        let mut segments = edges
+            .iter()
+            .filter_map(|edge| {
+                let from = point_lookup.get(&edge.from).copied()?;
+                let to = point_lookup.get(&edge.to).copied()?;
+                *incoming.entry(edge.to.clone()).or_default() += 1;
+                *outgoing.entry(edge.from.clone()).or_default() += 1;
+                Some(RouteSegmentRenderItem { from, to })
+            })
+            .collect::<Vec<_>>();
+        segments.sort_by(|left, right| {
+            left.from
+                .x
+                .total_cmp(&right.from.x)
+                .then_with(|| left.from.y.total_cmp(&right.from.y))
+                .then_with(|| left.to.x.total_cmp(&right.to.x))
+                .then_with(|| left.to.y.total_cmp(&right.to.y))
+        });
+
+        let (start_ids, end_ids) = if use_graph_edit_state {
+            // While the user is editing edges, the draft graph can be incomplete or mid-gesture.
+            // Hide start/end badges entirely until the edit is saved back as an ordered route.
+            (HashSet::new(), HashSet::new())
+        } else {
+            let mut start_ids = HashSet::new();
+            let mut end_ids = HashSet::new();
+            for point in &group.points {
+                let in_degree = incoming.get(&point.id).copied().unwrap_or(0);
+                let out_degree = outgoing.get(&point.id).copied().unwrap_or(0);
+                if in_degree == 0 {
+                    start_ids.insert(point.id.clone());
+                }
+                if out_degree == 0 {
+                    end_ids.insert(point.id.clone());
+                }
+            }
+            (start_ids, end_ids)
+        };
+
+        RouteGraphRenderState {
+            segments,
+            start_ids,
+            end_ids,
+        }
+    }
+
+    fn active_group_points(&self, use_graph_edit_state: bool) -> Vec<MapPointRenderItem> {
+        let render_state = self.active_route_graph_render_state(use_graph_edit_state);
         self.active_group()
             .map(|group| {
-                let last_index = group.points.len().saturating_sub(1);
                 group
                     .points
                     .iter()
-                    .enumerate()
-                    .map(|(index, point)| MapPointRenderItem {
+                    .map(|point| MapPointRenderItem {
                         group_id: group.id.clone(),
                         point_id: point.id.clone(),
                         world: self
                             .moving_point_preview_world(&point.id)
                             .unwrap_or_else(|| point.world()),
                         style: group.effective_style(point),
-                        is_start: index == 0,
-                        is_end: index == last_index,
+                        is_start: render_state.start_ids.contains(&point.id),
+                        is_end: render_state.end_ids.contains(&point.id),
                     })
                     .collect()
             })
@@ -1885,22 +2098,10 @@ impl TrackerWorkbench {
         });
     }
 
-    fn active_group_route_worlds(&self) -> Vec<WorldPoint> {
-        self.active_group()
-            .map(|group| {
-                group
-                    .points
-                    .iter()
-                    .map(|point| {
-                        self.moving_point_preview_world(&point.id)
-                            .unwrap_or_else(|| point.world())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     pub(super) fn tracker_map_render_snapshot(&self) -> TrackerMapRenderSnapshot {
+        let use_graph_edit_state =
+            self.active_page == WorkbenchPage::Markers && self.route_editor_draw_mode;
+        let render_state = self.active_route_graph_render_state(use_graph_edit_state);
         let pip_tracker_toggle_state = match self.tracker_pending_action {
             Some(TrackerPendingAction::Starting) => TrackerPipToggleState::Starting,
             Some(TrackerPendingAction::Stopping) => TrackerPipToggleState::Stopping,
@@ -1917,10 +2118,15 @@ impl TrackerWorkbench {
                 .map(|group| group.default_style.color_hex.clone()),
             trail: self.trail.clone(),
             preview_position: self.preview_position.clone(),
-            route_world: self.active_group_route_worlds(),
-            point_visuals: self.active_group_points(),
+            route_segments: render_state.segments,
+            point_visuals: self.active_group_points(use_graph_edit_state),
             selected_group_id: self.selected_group_id.clone(),
             selected_point_id: self.selected_point_id.clone(),
+            selected_point_ids: self.effective_route_editor_selected_point_ids(),
+            route_editor_lasso_path: self
+                .route_editor_lasso_selection
+                .as_ref()
+                .map(|selection| selection.path.clone()),
             follow_point: self
                 .auto_focus_enabled
                 .then(|| {
@@ -1957,9 +2163,11 @@ impl TrackerWorkbench {
         if self.is_selected_point_move_armed() {
             return None;
         }
-        if self.active_page == WorkbenchPage::Map
-            && self.map_page == MapPage::Tracker
-            && !self.tracker_point_popup_enabled
+        if !self.tracker_point_popup_enabled {
+            return None;
+        }
+        if self.active_page == WorkbenchPage::Markers
+            && (self.route_editor_selected_count() != 1 || self.route_editor_draw_mode)
         {
             return None;
         }
@@ -2041,6 +2249,422 @@ impl TrackerWorkbench {
         self.ignore_next_tracker_mouse_up = true;
     }
 
+    fn set_route_editor_selected_points(
+        &mut self,
+        selected: HashSet<RoutePointId>,
+        preferred_primary: Option<RoutePointId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.route_editor_selected_point_ids = selected;
+        self.selected_point_id = preferred_primary
+            .filter(|point_id| self.route_editor_selected_point_ids.contains(point_id))
+            .or_else(|| {
+                self.selected_point_id
+                    .clone()
+                    .filter(|point_id| self.route_editor_selected_point_ids.contains(point_id))
+            })
+            .or_else(|| self.route_editor_selected_point_ids.iter().next().cloned());
+        self.confirming_delete_point_id = None;
+        if self.route_editor_selected_point_ids.len() != 1 {
+            self.clear_selected_point_move_state();
+        }
+        self.sync_editor_from_selection(window, cx);
+    }
+
+    fn reset_route_editor_draw_state(&mut self) {
+        self.route_editor_draw_mode = false;
+        self.route_editor_draw_sequence.clear();
+        self.route_editor_lasso_selection = None;
+    }
+
+    fn reset_route_editor_graph_state(&mut self) {
+        self.route_editor_graph_state = None;
+        self.reset_route_editor_draw_state();
+    }
+
+    fn ensure_route_editor_graph_state(&mut self) -> Option<&mut RouteGraphEditState> {
+        let group = self.active_group()?.clone();
+        if !self.route_editor_graph_state_matches_group(&group) {
+            self.route_editor_graph_state = Some(RouteGraphEditState::from_group(&group));
+        }
+        self.route_editor_graph_state.as_mut()
+    }
+
+    fn route_editor_points_in_lasso(&self, lasso_path: &[WorldPoint]) -> Vec<RoutePointId> {
+        if lasso_path.len() < 3 {
+            return Vec::new();
+        }
+
+        let camera = self.route_editor_map_view.camera;
+        self.active_group_points(true)
+            .into_iter()
+            .filter_map(|point| {
+                let screen = camera.world_to_screen(point.world);
+                point_in_polygon(screen, lasso_path).then_some(point.point_id)
+            })
+            .collect()
+    }
+
+    fn toggle_route_editor_point_selection(
+        &mut self,
+        point_id: RoutePointId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut selected = self.effective_route_editor_selected_point_ids();
+        if !selected.remove(&point_id) {
+            selected.insert(point_id.clone());
+        }
+        self.set_route_editor_selected_points(selected, Some(point_id.clone()), window, cx);
+        self.status_text = if self.route_editor_selected_count() == 0 {
+            "已清空路线编辑多选。".into()
+        } else {
+            format!(
+                "已切换节点多选，当前共选中 {} 个节点。",
+                self.route_editor_selected_count()
+            )
+            .into()
+        };
+    }
+
+    pub(super) fn clear_route_editor_point_selection(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.route_editor_selected_point_ids.clear();
+        self.selected_point_id = None;
+        self.confirming_delete_point_id = None;
+        self.clear_selected_point_move_state();
+        self.sync_editor_from_selection(window, cx);
+        self.status_text = "已清空路线编辑选中节点。".into();
+    }
+
+    pub(super) fn begin_route_editor_lasso_selection(&mut self, screen_x: f32, screen_y: f32) {
+        self.route_editor_lasso_selection = Some(BwikiPlannerLassoSelection::new(WorldPoint::new(
+            screen_x, screen_y,
+        )));
+    }
+
+    pub(super) fn update_route_editor_lasso_selection(
+        &mut self,
+        screen_x: f32,
+        screen_y: f32,
+    ) -> bool {
+        let Some(selection) = self.route_editor_lasso_selection.as_mut() else {
+            return false;
+        };
+        selection.push_point(WorldPoint::new(screen_x, screen_y))
+    }
+
+    pub(super) fn finish_route_editor_lasso_selection(
+        &mut self,
+        screen_x: f32,
+        screen_y: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(mut selection) = self.route_editor_lasso_selection.take() else {
+            return false;
+        };
+        selection.push_point(WorldPoint::new(screen_x, screen_y));
+        if selection.travel_distance() < MAP_CLICK_DRAG_THRESHOLD {
+            if let Some(point_id) =
+                self.point_hit_test(MapCanvasKind::RouteEditor, screen_x, screen_y)
+            {
+                self.toggle_route_editor_point_selection(point_id, window, cx);
+                return true;
+            }
+            self.status_text = "当前点击位置没有可切换的节点。".into();
+            return false;
+        }
+
+        let affected = self.route_editor_points_in_lasso(&selection.path);
+        if affected.is_empty() {
+            self.status_text = "当前圈选范围内没有可切换的节点。".into();
+            return false;
+        }
+
+        let mut selected = self.effective_route_editor_selected_point_ids();
+        for point_id in &affected {
+            if !selected.remove(point_id) {
+                selected.insert(point_id.clone());
+            }
+        }
+        let preferred_primary = affected.last().cloned();
+        self.set_route_editor_selected_points(selected, preferred_primary, window, cx);
+        self.status_text = format!(
+            "已反选 {} 个节点，当前共选中 {} 个节点。",
+            affected.len(),
+            self.route_editor_selected_count()
+        )
+        .into();
+        true
+    }
+
+    fn route_editor_resolved_order(&self) -> Option<Vec<RoutePointId>> {
+        if !self.route_editor_draw_mode {
+            return None;
+        }
+        let group = self.active_group()?;
+        let state = self.route_editor_graph_state.as_ref()?;
+        if !self.route_editor_graph_state_matches_group(group) {
+            return None;
+        }
+
+        resolve_route_graph_order(&group.points, &state.edges)
+    }
+
+    pub(super) fn start_route_editor_graph_edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.route_editor_draw_mode {
+            self.status_text = "当前已经处于连线编辑模式。".into();
+            return;
+        }
+
+        let Some(group) = self.active_group().cloned() else {
+            self.status_text = "请先选择一条路线。".into();
+            return;
+        };
+        if group.points.len() < 2 {
+            self.status_text = "当前路线至少需要 2 个节点，才能编辑连线。".into();
+            return;
+        }
+
+        self.map_point_insert_armed = false;
+        self.confirming_delete_point_id = None;
+        self.clear_selected_point_move_state();
+        self.route_editor_draw_mode = true;
+        self.route_editor_draw_sequence.clear();
+        self.route_editor_lasso_selection = None;
+        self.route_editor_graph_state = Some(RouteGraphEditState::from_group(&group));
+        self.route_editor_selected_point_ids = self
+            .selected_point_id
+            .as_ref()
+            .cloned()
+            .into_iter()
+            .collect();
+        self.sync_editor_from_selection(window, cx);
+        self.status_text = "连线编辑已开启：点击节点按顺序重连，按 Ctrl+点击或框选多选节点后可删除连线，完成后点击“保存退出”。".into();
+    }
+
+    pub(super) fn cancel_route_editor_graph_edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.route_editor_draw_mode {
+            self.status_text = "当前不在连线编辑模式。".into();
+            return;
+        }
+
+        self.reset_route_editor_graph_state();
+        self.route_editor_selected_point_ids = self
+            .selected_point_id
+            .as_ref()
+            .cloned()
+            .into_iter()
+            .collect();
+        self.sync_editor_from_selection(window, cx);
+        self.status_text = "已放弃本次连线编辑，恢复为已保存路线。".into();
+    }
+
+    pub(super) fn reset_route_editor_graph_edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.route_editor_draw_mode {
+            self.status_text = "请先进入连线编辑模式。".into();
+            return;
+        }
+
+        let Some(group) = self.active_group().cloned() else {
+            self.status_text = "请先选择一条路线。".into();
+            return;
+        };
+
+        self.route_editor_graph_state = Some(RouteGraphEditState::from_group(&group));
+        self.route_editor_draw_sequence.clear();
+        self.route_editor_lasso_selection = None;
+        self.route_editor_selected_point_ids = self
+            .selected_point_id
+            .as_ref()
+            .cloned()
+            .into_iter()
+            .collect();
+        self.sync_editor_from_selection(window, cx);
+        self.status_text = "已恢复为已保存连线，当前仍处于连线编辑模式。".into();
+    }
+
+    fn route_editor_insert_edge(
+        &mut self,
+        from: RoutePointId,
+        to: RoutePointId,
+    ) -> std::result::Result<RouteGraphInsertOutcome, String> {
+        let Some(state) = self.ensure_route_editor_graph_state() else {
+            return Err("请先选择一条路线。".to_owned());
+        };
+        route_graph_insert_edge(&mut state.edges, from, to)
+    }
+
+    pub(super) fn save_route_editor_graph_edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.route_editor_draw_mode {
+            self.status_text = "请先进入连线编辑模式。".into();
+            return;
+        }
+        let Some(group_id) = self.selected_group_id.clone() else {
+            self.status_text = "请先选择一条路线。".into();
+            return;
+        };
+        let Some(order) = self.route_editor_resolved_order() else {
+            self.status_text = "当前连线还没有形成完整的单向单链，无法保存退出。".into();
+            return;
+        };
+
+        if let Some(group) = self
+            .route_groups
+            .iter_mut()
+            .find(|group| group.id == group_id)
+        {
+            let mut points_by_id = group
+                .points
+                .drain(..)
+                .map(|point| (point.id.clone(), point))
+                .collect::<HashMap<_, _>>();
+            group.points = order
+                .iter()
+                .filter_map(|point_id| points_by_id.remove(point_id))
+                .collect();
+        }
+
+        self.reset_route_editor_graph_state();
+        self.route_editor_selected_point_ids = self
+            .selected_point_id
+            .as_ref()
+            .cloned()
+            .into_iter()
+            .collect();
+        self.preview_cursor = self.selected_point_index();
+        if !self.is_tracking_active() {
+            self.rebuild_preview();
+        }
+        if self.persist_group(&group_id, "连线编辑已保存") {
+            self.sync_editor_from_selection(window, cx);
+        }
+    }
+
+    fn route_editor_append_draw_point(
+        &mut self,
+        point_id: RoutePointId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let point_label = self
+            .active_group()
+            .and_then(|group| group.find_point(&point_id))
+            .map(|point| point.display_label().to_owned())
+            .unwrap_or_else(|| point_id.0.clone());
+        self.set_route_editor_selected_points(
+            [point_id.clone()].into_iter().collect(),
+            Some(point_id.clone()),
+            window,
+            cx,
+        );
+
+        let Some(previous) = self.route_editor_draw_sequence.last().cloned() else {
+            self.route_editor_draw_sequence.push(point_id.clone());
+            self.status_text = format!("已选择连线起点「{}」。", point_label).into();
+            return true;
+        };
+        if previous == point_id {
+            self.status_text = "当前节点已经是上一条连线的终点。".into();
+            return true;
+        }
+
+        match self.route_editor_insert_edge(previous.clone(), point_id.clone()) {
+            Ok(RouteGraphInsertOutcome::Unchanged) => {
+                self.route_editor_draw_sequence.push(point_id);
+                self.status_text = "这条有向线已存在，已将当前节点设为新的连线起点。".into();
+                true
+            }
+            Ok(RouteGraphInsertOutcome::Added { replaced_edges }) => {
+                self.route_editor_draw_sequence.push(point_id.clone());
+                let graph_ready = self.route_editor_can_save_graph_edit();
+                self.status_text = if graph_ready {
+                    if replaced_edges == 0 {
+                        "已新增一条有向线，当前图已形成可保存的单向单链，请点击“保存退出”。".into()
+                    } else {
+                        format!(
+                            "已重连 1 条线并替换 {} 条冲突连线，当前图已形成可保存的单向单链，请点击“保存退出”。",
+                            replaced_edges
+                        )
+                        .into()
+                    }
+                } else if replaced_edges == 0 {
+                    "已新增一条有向线，当前图尚未形成可保存的单向单链。".into()
+                } else {
+                    format!(
+                        "已重连 1 条线并替换 {} 条冲突连线，当前图尚未形成可保存的单向单链。",
+                        replaced_edges
+                    )
+                    .into()
+                };
+                true
+            }
+            Err(message) => {
+                self.status_text = message.into();
+                true
+            }
+        }
+    }
+
+    pub(super) fn remove_route_editor_edges_between_selected(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.route_editor_draw_mode {
+            self.status_text = "请先进入连线编辑模式。".into();
+            return;
+        }
+        let selected = self.effective_route_editor_selected_point_ids();
+        if selected.len() < 2 {
+            self.status_text = "请至少多选 2 个节点，再移除它们之间的线。".into();
+            return;
+        }
+
+        let Some(state) = self.ensure_route_editor_graph_state() else {
+            self.status_text = "请先选择一条路线。".into();
+            return;
+        };
+        let before = state.edges.len();
+        state
+            .edges
+            .retain(|edge| !(selected.contains(&edge.from) && selected.contains(&edge.to)));
+        let removed = before.saturating_sub(state.edges.len());
+        self.route_editor_draw_sequence.clear();
+        if removed == 0 {
+            self.status_text = "当前选中节点之间没有可移除的连线。".into();
+            return;
+        }
+
+        self.clear_route_editor_point_selection(window, cx);
+        self.status_text = format!(
+            "已移除 {} 条连线，并自动清空节点选中。请继续点击节点按顺序重连，直到重新形成单向单链后再保存退出。",
+            removed
+        )
+        .into();
+    }
+
     fn point_hit_test(
         &self,
         map_kind: MapCanvasKind,
@@ -2055,7 +2679,7 @@ impl TrackerWorkbench {
         }
 
         let camera = self.map_view(map_kind).camera;
-        self.active_group_points()
+        self.active_group_points(map_kind == MapCanvasKind::RouteEditor)
             .into_iter()
             .filter_map(|marker| {
                 let screen = camera.world_to_screen(marker.world);
@@ -2341,15 +2965,21 @@ impl TrackerWorkbench {
         }
 
         if let Some(point_id) = self.point_hit_test(map_kind, screen_x, screen_y) {
+            if map_kind == MapCanvasKind::RouteEditor && self.route_editor_draw_mode {
+                return self.route_editor_append_draw_point(point_id, window, cx);
+            }
             self.select_point(point_id, window, cx);
             return true;
         }
 
+        if map_kind == MapCanvasKind::RouteEditor && self.route_editor_draw_mode {
+            self.route_editor_draw_sequence.clear();
+            self.status_text = "已清除当前连线起点，请重新点击节点开始连线。".into();
+            return true;
+        }
+
         if !self.map_point_insert_armed && self.selected_point_id.is_some() {
-            self.selected_point_id = None;
-            self.confirming_delete_point_id = None;
-            self.clear_selected_point_move_state();
-            self.sync_editor_from_selection(window, cx);
+            self.clear_route_editor_point_selection(window, cx);
             self.status_text = "已取消节点选中。".into();
             return true;
         }
@@ -2374,6 +3004,10 @@ impl TrackerWorkbench {
     }
 
     pub(super) fn toggle_selected_point_move_mode(&mut self) {
+        if self.route_editor_draw_mode {
+            self.status_text = "连线编辑进行中，请先保存退出或放弃编辑。".into();
+            return;
+        }
         if self.is_selected_point_move_armed() {
             self.clear_selected_point_move_state();
             self.status_text = "已取消取点。".into();
@@ -2390,6 +3024,7 @@ impl TrackerWorkbench {
         }
 
         self.map_point_insert_armed = false;
+        self.reset_route_editor_draw_state();
         self.confirming_delete_point_id = None;
         self.moving_point_id = Some(point_id);
         self.moving_point_preview = None;
@@ -2458,9 +3093,15 @@ impl TrackerWorkbench {
     }
 
     fn select_map_page(&mut self, page: MapPage) {
+        if self.route_editor_draw_mode {
+            self.status_text = "连线编辑进行中，请先保存退出或放弃编辑。".into();
+            return;
+        }
         self.active_page = WorkbenchPage::Map;
         self.map_page = page;
         self.map_point_insert_armed = false;
+        self.reset_route_editor_draw_state();
+        self.route_editor_selected_point_ids.clear();
         self.clear_selected_point_move_state();
         if matches!(page, MapPage::Tracker) {
             self.ensure_tracker_page_selected_point();
@@ -2471,17 +3112,33 @@ impl TrackerWorkbench {
     }
 
     pub(super) fn select_routes_page(&mut self) {
+        if self.route_editor_draw_mode {
+            self.status_text = "当前已经处于连线编辑模式。".into();
+            return;
+        }
         self.active_page = WorkbenchPage::Markers;
+        self.route_editor_selected_point_ids = self
+            .selected_point_id
+            .as_ref()
+            .cloned()
+            .into_iter()
+            .collect();
         self.route_editor_map_view.request_fit();
         self.sync_tracker_debug_enabled();
         self.status_text = "已切换到路线管理。".into();
     }
 
     fn select_settings_page(&mut self, page: SettingsPage) {
+        if self.route_editor_draw_mode {
+            self.status_text = "连线编辑进行中，请先保存退出或放弃编辑。".into();
+            return;
+        }
         self.active_page = WorkbenchPage::Settings;
         self.settings_page = page;
         self.settings_nav_expanded = true;
         self.map_point_insert_armed = false;
+        self.reset_route_editor_draw_state();
+        self.route_editor_selected_point_ids.clear();
         self.clear_selected_point_move_state();
         self.sync_tracker_debug_enabled();
         info!(page = %page, "selected settings page");
@@ -2489,6 +3146,10 @@ impl TrackerWorkbench {
     }
 
     pub(super) fn toggle_map_point_insert_mode(&mut self) {
+        if self.route_editor_draw_mode {
+            self.status_text = "连线编辑进行中，请先保存退出或放弃编辑。".into();
+            return;
+        }
         if self.selected_group_id.is_none() {
             self.status_text = "请先选择一条路线，再开启添加节点。".into();
             return;
@@ -2496,7 +3157,9 @@ impl TrackerWorkbench {
 
         self.map_point_insert_armed = !self.map_point_insert_armed;
         if self.map_point_insert_armed {
+            self.reset_route_editor_draw_state();
             self.clear_selected_point_move_state();
+            self.route_editor_selected_point_ids.clear();
             self.selected_point_id = None;
             self.confirming_delete_point_id = None;
         }
@@ -2509,6 +3172,10 @@ impl TrackerWorkbench {
 
     fn toggle_settings_navigation(&mut self) {
         if self.active_page != WorkbenchPage::Settings {
+            if self.route_editor_draw_mode {
+                self.status_text = "连线编辑进行中，请先保存退出或放弃编辑。".into();
+                return;
+            }
             self.active_page = WorkbenchPage::Settings;
             self.settings_nav_expanded = true;
             self.sync_tracker_debug_enabled();
@@ -3636,6 +4303,10 @@ impl TrackerWorkbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.route_editor_draw_mode {
+            self.status_text = "连线编辑进行中，请先保存退出或放弃编辑。".into();
+            return;
+        }
         let selected_point_id = self
             .route_groups
             .iter()
@@ -3646,8 +4317,15 @@ impl TrackerWorkbench {
             self.confirming_delete_group_id = None;
         }
         self.clear_selected_point_move_state();
+        self.reset_route_editor_graph_state();
         self.selected_group_id = Some(group_id.clone());
         self.selected_point_id = selected_point_id;
+        self.route_editor_selected_point_ids = self
+            .selected_point_id
+            .as_ref()
+            .cloned()
+            .into_iter()
+            .collect();
         self.confirming_delete_point_id = None;
         self.preview_cursor = self.selected_point_index();
         self.route_editor_map_view.request_fit();
@@ -3677,6 +4355,7 @@ impl TrackerWorkbench {
         }
         self.confirming_delete_point_id = None;
         self.selected_point_id = Some(point_id.clone());
+        self.route_editor_selected_point_ids = [point_id.clone()].into_iter().collect();
         self.preview_cursor = self.selected_point_index();
         if !self.is_tracking_active() {
             self.rebuild_preview();
@@ -3737,7 +4416,14 @@ impl TrackerWorkbench {
             return;
         };
 
+        self.reset_route_editor_graph_state();
         self.selected_point_id = Some(point_id);
+        self.route_editor_selected_point_ids = self
+            .selected_point_id
+            .as_ref()
+            .cloned()
+            .into_iter()
+            .collect();
         self.confirming_delete_point_id = None;
         self.preview_cursor = Some(bounded_index);
         self.map_point_insert_armed = false;
@@ -3877,7 +4563,14 @@ impl TrackerWorkbench {
             return;
         };
 
+        self.reset_route_editor_graph_state();
         self.selected_point_id = Some(point_id);
+        self.route_editor_selected_point_ids = self
+            .selected_point_id
+            .as_ref()
+            .cloned()
+            .into_iter()
+            .collect();
         self.confirming_delete_point_id = None;
         self.preview_cursor = Some(next_index);
         if !self.is_tracking_active() {
@@ -3969,7 +4662,14 @@ impl TrackerWorkbench {
             return;
         };
 
+        self.reset_route_editor_graph_state();
         self.selected_point_id = Some(point_id);
+        self.route_editor_selected_point_ids = self
+            .selected_point_id
+            .as_ref()
+            .cloned()
+            .into_iter()
+            .collect();
         self.confirming_delete_point_id = None;
         self.preview_cursor = Some(next_index);
         if !self.is_tracking_active() {
@@ -4045,6 +4745,7 @@ impl TrackerWorkbench {
         if let Some(point) = group.points.get(next) {
             self.confirming_delete_point_id = None;
             self.selected_point_id = Some(point.id.clone());
+            self.route_editor_selected_point_ids = [point.id.clone()].into_iter().collect();
         }
         self.rebuild_preview();
         self.request_center_on_current_point();
@@ -4311,6 +5012,21 @@ impl TrackerWorkbench {
             self.clear_selected_point_move_state();
         }
 
+        let active_point_ids = self
+            .active_group()
+            .map(|group| route_point_id_set(&group.points))
+            .unwrap_or_default();
+        self.route_editor_selected_point_ids
+            .retain(|point_id| active_point_ids.contains(point_id));
+        if let Some(group) = self.active_group() {
+            if !self.route_editor_graph_state_matches_group(group) {
+                self.reset_route_editor_graph_state();
+            }
+        } else {
+            self.route_editor_selected_point_ids.clear();
+            self.reset_route_editor_graph_state();
+        }
+
         if let Some(group_id) = self.selected_group_id.clone() {
             let point_exists = self.selected_point_id.as_ref().is_some_and(|point_id| {
                 self.route_groups
@@ -4324,6 +5040,14 @@ impl TrackerWorkbench {
             }
         } else {
             self.selected_point_id = None;
+            self.clear_selected_point_move_state();
+        }
+        if let Some(point_id) = self.selected_point_id.clone() {
+            self.route_editor_selected_point_ids.insert(point_id);
+        } else if let Some(point_id) = self.route_editor_selected_point_ids.iter().next().cloned() {
+            self.selected_point_id = Some(point_id);
+        }
+        if self.route_editor_selected_point_ids.len() != 1 {
             self.clear_selected_point_move_state();
         }
         if self.confirming_delete_point_id.as_ref() != self.selected_point_id.as_ref() {
@@ -4811,6 +5535,8 @@ impl TrackerWorkbench {
             return;
         };
 
+        self.reset_route_editor_graph_state();
+        self.route_editor_selected_point_ids.clear();
         self.selected_point_id = None;
         self.confirming_delete_point_id = None;
         self.clear_selected_point_move_state();
@@ -4838,6 +5564,8 @@ impl TrackerWorkbench {
                     .filter(|group_id| self.route_groups.iter().any(|group| &group.id == group_id))
             })
             .or_else(|| self.route_groups.first().map(|group| group.id.clone()));
+        self.reset_route_editor_graph_state();
+        self.route_editor_selected_point_ids.clear();
         self.selected_point_id = None;
         self.confirming_delete_point_id = None;
         self.preview_cursor = None;
@@ -6565,14 +7293,16 @@ impl TrackerWorkbench {
     }
 
     fn ensure_tracker_page_selected_point(&mut self) {
-        let Some(group) = self.active_group() else {
+        let Some(group) = self.active_group().cloned() else {
             self.selected_point_id = None;
+            self.route_editor_selected_point_ids.clear();
             self.preview_cursor = None;
             return;
         };
 
-        let Some(first_point) = group.points.first() else {
+        let Some(first_point_id) = group.points.first().map(|point| point.id.clone()) else {
             self.selected_point_id = None;
+            self.route_editor_selected_point_ids.clear();
             self.preview_cursor = None;
             return;
         };
@@ -6583,7 +7313,8 @@ impl TrackerWorkbench {
             .is_some_and(|point_id| group.find_point(point_id).is_some());
 
         if !has_valid_selected_point {
-            self.selected_point_id = Some(first_point.id.clone());
+            self.selected_point_id = Some(first_point_id.clone());
+            self.route_editor_selected_point_ids = [first_point_id].into_iter().collect();
             self.preview_cursor = Some(0);
             if !self.is_tracking_active() {
                 self.rebuild_preview();
@@ -6591,6 +7322,9 @@ impl TrackerWorkbench {
             return;
         }
 
+        if let Some(point_id) = self.selected_point_id.clone() {
+            self.route_editor_selected_point_ids = [point_id].into_iter().collect();
+        }
         self.preview_cursor = self.selected_point_index();
     }
 
@@ -6734,6 +7468,146 @@ impl Drop for TrackerWorkbench {
     fn drop(&mut self) {
         self.release_tracker_session();
     }
+}
+
+fn route_point_id_set(points: &[RoutePoint]) -> HashSet<RoutePointId> {
+    points.iter().map(|point| point.id.clone()).collect()
+}
+
+fn route_graph_edges_from_points(points: &[RoutePoint]) -> HashSet<RouteGraphEdge> {
+    points
+        .windows(2)
+        .map(|segment| RouteGraphEdge::new(segment[0].id.clone(), segment[1].id.clone()))
+        .collect()
+}
+
+fn route_graph_insert_edge(
+    edges: &mut HashSet<RouteGraphEdge>,
+    from: RoutePointId,
+    to: RoutePointId,
+) -> std::result::Result<RouteGraphInsertOutcome, String> {
+    if from == to {
+        return Err("不能把节点连到自己。".to_owned());
+    }
+
+    let edge = RouteGraphEdge::new(from.clone(), to.clone());
+    if edges.contains(&edge) {
+        return Ok(RouteGraphInsertOutcome::Unchanged);
+    }
+
+    let removed_edges = edges
+        .iter()
+        .filter(|current| {
+            (current.from == from && current.to != to) || (current.to == to && current.from != from)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for current in &removed_edges {
+        edges.remove(current);
+    }
+
+    if route_graph_would_create_cycle(edges, &from, &to) {
+        for current in removed_edges {
+            edges.insert(current);
+        }
+        return Err("这条线会形成环路，请调整点击顺序。".to_owned());
+    }
+
+    edges.insert(edge);
+    Ok(RouteGraphInsertOutcome::Added {
+        replaced_edges: removed_edges.len(),
+    })
+}
+
+fn resolve_route_graph_order(
+    points: &[RoutePoint],
+    edges: &HashSet<RouteGraphEdge>,
+) -> Option<Vec<RoutePointId>> {
+    if points.is_empty() {
+        return Some(Vec::new());
+    }
+    if points.len() == 1 {
+        return edges.is_empty().then(|| vec![points[0].id.clone()]);
+    }
+    if edges.len() != points.len().saturating_sub(1) {
+        return None;
+    }
+
+    let point_ids = route_point_id_set(points);
+    let mut incoming = points
+        .iter()
+        .map(|point| (point.id.clone(), 0usize))
+        .collect::<HashMap<_, _>>();
+    let mut outgoing = HashMap::<RoutePointId, RoutePointId>::new();
+    for edge in edges {
+        if edge.from == edge.to
+            || !point_ids.contains(&edge.from)
+            || !point_ids.contains(&edge.to)
+            || outgoing
+                .insert(edge.from.clone(), edge.to.clone())
+                .is_some()
+        {
+            return None;
+        }
+        let entry = incoming.entry(edge.to.clone()).or_default();
+        *entry += 1;
+        if *entry > 1 {
+            return None;
+        }
+    }
+
+    let starts = points
+        .iter()
+        .filter_map(|point| {
+            (incoming.get(&point.id).copied().unwrap_or(0) == 0).then_some(point.id.clone())
+        })
+        .collect::<Vec<_>>();
+    let ends = points
+        .iter()
+        .filter_map(|point| (!outgoing.contains_key(&point.id)).then_some(point.id.clone()))
+        .collect::<Vec<_>>();
+    if starts.len() != 1 || ends.len() != 1 {
+        return None;
+    }
+
+    let mut order = Vec::with_capacity(points.len());
+    let mut seen = HashSet::with_capacity(points.len());
+    let mut current = starts[0].clone();
+    loop {
+        if !seen.insert(current.clone()) {
+            return None;
+        }
+        order.push(current.clone());
+        let Some(next) = outgoing.get(&current).cloned() else {
+            break;
+        };
+        current = next;
+    }
+
+    (order.len() == points.len()).then_some(order)
+}
+
+fn route_graph_would_create_cycle(
+    edges: &HashSet<RouteGraphEdge>,
+    from: &RoutePointId,
+    to: &RoutePointId,
+) -> bool {
+    let outgoing = edges
+        .iter()
+        .map(|edge| (edge.from.clone(), edge.to.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut current = to.clone();
+    let mut seen = HashSet::new();
+    while seen.insert(current.clone()) {
+        if &current == from {
+            return true;
+        }
+        let Some(next) = outgoing.get(&current).cloned() else {
+            return false;
+        };
+        current = next;
+    }
+    true
 }
 
 fn point_in_polygon(point: WorldPoint, polygon: &[WorldPoint]) -> bool {
@@ -8465,6 +9339,16 @@ fn normalize_tracking_heading_degrees(degrees: f32) -> f32 {
 mod tests {
     use super::*;
 
+    fn route_test_points(labels: &[&str]) -> Vec<RoutePoint> {
+        labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                RoutePoint::new(*label, WorldPoint::new(index as f32 * 10.0, 0.0))
+            })
+            .collect()
+    }
+
     fn planner_point(mark_type: u32, id: &str, x: f32, y: f32) -> BwikiPlannerResolvedPoint {
         let record = BwikiPointRecord {
             mark_type,
@@ -8709,6 +9593,85 @@ mod tests {
         improve_bwiki_planner_order_full_2opt(&mut order, &costs, 1);
 
         assert_eq!(order, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn route_graph_order_accepts_simple_directed_chain() {
+        let points = route_test_points(&["a", "b", "c", "d"]);
+        let edges = HashSet::from([
+            RouteGraphEdge::new(points[0].id.clone(), points[1].id.clone()),
+            RouteGraphEdge::new(points[1].id.clone(), points[2].id.clone()),
+            RouteGraphEdge::new(points[2].id.clone(), points[3].id.clone()),
+        ]);
+
+        let order = resolve_route_graph_order(&points, &edges).expect("graph should be valid");
+
+        assert_eq!(
+            order,
+            points
+                .iter()
+                .map(|point| point.id.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn route_graph_order_rejects_branching_and_cycle() {
+        let points = route_test_points(&["a", "b", "c"]);
+        let branching_edges = HashSet::from([
+            RouteGraphEdge::new(points[0].id.clone(), points[1].id.clone()),
+            RouteGraphEdge::new(points[0].id.clone(), points[2].id.clone()),
+        ]);
+        let cycle_edges = HashSet::from([
+            RouteGraphEdge::new(points[0].id.clone(), points[1].id.clone()),
+            RouteGraphEdge::new(points[1].id.clone(), points[2].id.clone()),
+            RouteGraphEdge::new(points[2].id.clone(), points[0].id.clone()),
+        ]);
+
+        assert!(resolve_route_graph_order(&points, &branching_edges).is_none());
+        assert!(resolve_route_graph_order(&points, &cycle_edges).is_none());
+    }
+
+    #[test]
+    fn route_graph_cycle_check_detects_back_edge() {
+        let points = route_test_points(&["a", "b", "c"]);
+        let edges = HashSet::from([
+            RouteGraphEdge::new(points[0].id.clone(), points[1].id.clone()),
+            RouteGraphEdge::new(points[1].id.clone(), points[2].id.clone()),
+        ]);
+
+        assert!(route_graph_would_create_cycle(
+            &edges,
+            &points[2].id,
+            &points[0].id
+        ));
+        assert!(!route_graph_would_create_cycle(
+            &edges,
+            &points[0].id,
+            &points[2].id
+        ));
+    }
+
+    #[test]
+    fn route_graph_insert_edge_treats_existing_edge_as_noop() {
+        let points = route_test_points(&["a", "b", "c"]);
+        let mut edges = HashSet::from([
+            RouteGraphEdge::new(points[0].id.clone(), points[1].id.clone()),
+            RouteGraphEdge::new(points[1].id.clone(), points[2].id.clone()),
+        ]);
+
+        let outcome =
+            route_graph_insert_edge(&mut edges, points[0].id.clone(), points[1].id.clone())
+                .expect("existing edge should not error");
+
+        assert_eq!(outcome, RouteGraphInsertOutcome::Unchanged);
+        assert_eq!(
+            edges,
+            HashSet::from([
+                RouteGraphEdge::new(points[0].id.clone(), points[1].id.clone()),
+                RouteGraphEdge::new(points[1].id.clone(), points[2].id.clone()),
+            ])
+        );
     }
 
     #[test]
