@@ -17,8 +17,10 @@ use crate::{
         capture::{DesktopCapture, preprocess_capture},
         debug::{DebugField, TrackingDebugSnapshot},
         precompute::{
-            PersistedTensorCache, clear_match_pyramid_caches, clear_tensor_caches_by_prefix,
-            load_tensor_cache, save_tensor_cache, tracker_map_cache_key, tracker_tensor_cache_path,
+            PersistedTensorCache, clear_color_pyramid_caches, clear_match_pyramid_caches,
+            clear_tensor_caches_by_prefix, clear_tracker_source_hash_caches,
+            load_or_build_color_map_pyramid, load_tensor_cache, save_tensor_cache,
+            tracker_map_cache_key, tracker_tensor_cache_path,
         },
         presence::{MinimapPresenceDetector, MinimapPresenceSample},
         runtime::{TrackingStatus, TrackingTick, TrackingWorker},
@@ -27,10 +29,9 @@ use crate::{
             MaskSet, MatchCandidate, ScaledColorMap, SearchRegion, SearchStage, TrackerState,
             build_debug_snapshot, build_mask, capture_template_inner_square,
             capture_template_inner_square_rgba, center_to_scaled, coarse_global_downscale,
-            load_logic_color_map_pyramid, local_candidate_decision, mask_as_unit_vec,
-            prepare_color_capture_template, preview_image, rgba_image_as_unit_vec,
-            scaled_color_score, scaled_dimension, scaled_luma_score, search_region_around_center,
-            top_score_peaks,
+            local_candidate_decision, mask_as_unit_vec, prepare_color_capture_template,
+            preview_image, rgba_image_as_unit_vec, scaled_color_score, scaled_dimension,
+            scaled_luma_score, search_region_around_center, top_score_peaks,
         },
     },
 };
@@ -107,7 +108,7 @@ pub struct TemplateTrackerWorker {
     config: AppConfig,
     capture: DesktopCapture,
     presence_detector: Option<MinimapPresenceDetector>,
-    color_pyramid: ColorMapPyramid,
+    color_pyramid: Arc<ColorMapPyramid>,
     state: TrackerState,
     debug_enabled: bool,
     matcher: TemplateMatcher,
@@ -212,17 +213,18 @@ impl TemplateTrackerWorker {
         }
         let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
         let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
-        let cache_key = template_mode_cache_key(
-            &tracker_map_cache_key(workspace.as_ref())?,
+        let map_cache_key = tracker_map_cache_key(workspace.as_ref())?;
+        let cache_key = template_mode_cache_key(&map_cache_key, config.template.input_mode);
+        let color_pyramid = prepare_template_color_map_pyramid(
+            workspace.as_ref(),
+            &map_cache_key,
             config.template.input_mode,
-        );
-        let color_pyramid =
-            prepare_template_color_map_pyramid(workspace.as_ref(), config.template.input_mode)?;
+        )?;
         let masks = build_template_masks(&config);
         let matcher = TemplateMatcher::new_cached(
             workspace.as_ref(),
             &config.template,
-            &color_pyramid,
+            color_pyramid.as_ref(),
             &masks,
             cache_key.as_str(),
         )?;
@@ -1062,21 +1064,24 @@ pub fn rebuild_template_engine_cache(workspace: &WorkspaceSnapshot) -> Result<()
         device_index = workspace.config.template.device_index,
         "rebuilding template tracker cache"
     );
+    clear_tracker_source_hash_caches(workspace)?;
     clear_match_pyramid_caches(workspace)?;
+    clear_color_pyramid_caches(workspace)?;
     clear_tensor_caches_by_prefix(workspace, "template-local-search")?;
     clear_tensor_caches_by_prefix(workspace, "template-global-search")?;
     clear_tensor_caches_by_prefix(workspace, "template-coarse-search")?;
-    let cache_key = template_mode_cache_key(
-        &tracker_map_cache_key(workspace)?,
+    let map_cache_key = tracker_map_cache_key(workspace)?;
+    let cache_key = template_mode_cache_key(&map_cache_key, workspace.config.template.input_mode);
+    let color_pyramid = prepare_template_color_map_pyramid(
+        workspace,
+        &map_cache_key,
         workspace.config.template.input_mode,
-    );
-    let color_pyramid =
-        prepare_template_color_map_pyramid(workspace, workspace.config.template.input_mode)?;
+    )?;
     let masks = build_template_masks(&workspace.config);
     let _ = TemplateMatcher::new_cached(
         workspace,
         &workspace.config.template,
-        &color_pyramid,
+        color_pyramid.as_ref(),
         &masks,
         cache_key.as_str(),
     )?;
@@ -1154,12 +1159,13 @@ fn prepare_template_capture_input(captured: &RgbaImage, mode: TemplateInputMode)
 
 fn prepare_template_color_map_pyramid(
     workspace: &WorkspaceSnapshot,
+    map_cache_key: &str,
     mode: TemplateInputMode,
-) -> Result<ColorMapPyramid> {
-    let pyramid = load_logic_color_map_pyramid(workspace)?;
+) -> Result<Arc<ColorMapPyramid>> {
+    let pyramid = load_or_build_color_map_pyramid(workspace, map_cache_key)?;
     match mode {
         TemplateInputMode::Color => Ok(pyramid),
-        TemplateInputMode::Grayscale => Ok(ColorMapPyramid {
+        TemplateInputMode::Grayscale => Ok(Arc::new(ColorMapPyramid {
             local: ScaledColorMap {
                 scale: pyramid.local.scale,
                 image: rgba_to_luma_rgba(&pyramid.local.image),
@@ -1172,7 +1178,7 @@ fn prepare_template_color_map_pyramid(
                 scale: pyramid.coarse.scale,
                 image: rgba_to_luma_rgba(&pyramid.coarse.image),
             },
-        }),
+        })),
     }
 }
 
@@ -2636,13 +2642,16 @@ mod tests {
                 )
                 .expect("failed to assemble augmented z8 color logic map");
                 let map = imageproc::contrast::equalize_histogram(&raw_map);
-                let color_pyramid =
-                    prepare_template_color_map_pyramid(&workspace, config.template.input_mode)
-                        .expect("failed to build template input pyramid");
-                let map_cache_key = template_mode_cache_key(
-                    &tracker_map_cache_key(&workspace).expect("failed to compute map cache key"),
+                let map_cache_key =
+                    tracker_map_cache_key(&workspace).expect("failed to compute map cache key");
+                let color_pyramid = prepare_template_color_map_pyramid(
+                    &workspace,
+                    &map_cache_key,
                     config.template.input_mode,
-                );
+                )
+                .expect("failed to build template input pyramid");
+                let map_cache_key =
+                    template_mode_cache_key(&map_cache_key, config.template.input_mode);
                 let masks = build_template_masks(&config);
 
                 TestFixture {
@@ -2651,7 +2660,7 @@ mod tests {
                     map_cache_key,
                     map,
                     color_map,
-                    color_pyramid,
+                    color_pyramid: color_pyramid.as_ref().clone(),
                     masks,
                 }
             });

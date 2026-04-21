@@ -1,34 +1,62 @@
 use std::{
+    collections::HashMap,
     fs::{self, File},
     io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
     time::UNIX_EPOCH,
 };
 
-use image::GrayImage;
+use image::{GrayImage, RgbaImage};
 use imageproc::contrast::equalize_histogram;
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{ContextExt as _, Result},
     resources::{
         BWIKI_WORLD_ZOOM, BwikiCachePaths, WorkspaceSnapshot,
-        load_logic_map_with_tracking_poi_scaled_image, zoom_world_bounds,
+        load_logic_map_with_tracking_poi_scaled_image,
+        load_logic_map_with_tracking_poi_scaled_rgba_image, zoom_world_bounds,
     },
     tracking::vision::{
-        MapPyramid, ScaledMap, build_match_representation, coarse_global_downscale, downscale_gray,
+        ColorMapPyramid, MapPyramid, ScaledColorMap, ScaledMap, build_match_representation,
+        coarse_global_downscale, downscale_gray, downscale_rgba,
     },
 };
 
 const MATCH_PYRAMID_CACHE_VERSION: u32 = 3;
+const COLOR_PYRAMID_CACHE_VERSION: u32 = 1;
 const TENSOR_CACHE_FORMAT_VERSION: u32 = 1;
+const TRACKER_SOURCE_HASH_CACHE_VERSION: u32 = 1;
 const TENSOR_CACHE_MAGIC: [u8; 8] = *b"GMTRTC01";
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
+
+static COLOR_PYRAMID_MEMORY_CACHE: OnceLock<Mutex<HashMap<String, Arc<ColorMapPyramid>>>> =
+    OnceLock::new();
+static TRACKER_SOURCE_HASH_MEMORY_CACHE: OnceLock<Mutex<HashMap<String, TrackerSourceHashes>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct PreparedMatchPyramid {
     pub cache_key: String,
     pub pyramid: MapPyramid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackerSourceHashes {
+    fast_fingerprint: String,
+    tile_hash: String,
+    poi_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedTrackerSourceHashes {
+    version: u32,
+    fast_fingerprint: String,
+    tile_hash: String,
+    poi_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -166,6 +194,88 @@ pub fn tracker_map_cache_key(workspace: &WorkspaceSnapshot) -> Result<String> {
     )
 }
 
+pub fn color_pyramid_cache_key(map_cache_key: &str) -> String {
+    format!("cv{COLOR_PYRAMID_CACHE_VERSION}-{map_cache_key}")
+}
+
+pub fn load_or_build_color_map_pyramid(
+    workspace: &WorkspaceSnapshot,
+    map_cache_key: &str,
+) -> Result<Arc<ColorMapPyramid>> {
+    let local_scale = workspace.config.template.local_downscale.max(1);
+    let global_scale = workspace.config.template.global_downscale.max(local_scale);
+    let coarse_scale = coarse_global_downscale(&workspace.config);
+    let cache_key = color_pyramid_cache_key(map_cache_key);
+    let memory_key = workspace_memory_cache_key(workspace, "color-pyramids", &cache_key);
+
+    if let Some(pyramid) = color_pyramid_memory_cache()
+        .lock()
+        .get(&memory_key)
+        .cloned()
+    {
+        return Ok(pyramid);
+    }
+
+    if let Ok(Some(pyramid)) = load_cached_color_map_pyramid(
+        workspace,
+        &cache_key,
+        local_scale,
+        global_scale,
+        coarse_scale,
+    ) {
+        let pyramid = Arc::new(pyramid);
+        color_pyramid_memory_cache()
+            .lock()
+            .insert(memory_key, pyramid.clone());
+        return Ok(pyramid);
+    }
+
+    let base_map = load_logic_map_with_tracking_poi_scaled_rgba_image(
+        &workspace.assets.bwiki_cache_dir,
+        1,
+        workspace.config.view_size,
+    )
+    .with_context(|| {
+        format!(
+            "failed to load augmented color BWiki logic tiles from {}",
+            workspace.assets.bwiki_cache_dir.display()
+        )
+    })?;
+    let local_map = downscale_rgba(&base_map, local_scale);
+    let global_map = if global_scale == local_scale {
+        local_map.clone()
+    } else {
+        downscale_rgba(&base_map, global_scale)
+    };
+    let coarse_map = if coarse_scale == global_scale {
+        global_map.clone()
+    } else {
+        downscale_rgba(&base_map, coarse_scale)
+    };
+
+    let pyramid = ColorMapPyramid {
+        local: ScaledColorMap {
+            scale: local_scale,
+            image: local_map,
+        },
+        global: ScaledColorMap {
+            scale: global_scale,
+            image: global_map,
+        },
+        coarse: ScaledColorMap {
+            scale: coarse_scale,
+            image: coarse_map,
+        },
+    };
+
+    let _ = persist_color_map_pyramid(workspace, &cache_key, &pyramid);
+    let pyramid = Arc::new(pyramid);
+    color_pyramid_memory_cache()
+        .lock()
+        .insert(memory_key, pyramid.clone());
+    Ok(pyramid)
+}
+
 pub fn tracker_tensor_cache_path(
     workspace: &WorkspaceSnapshot,
     prefix: &str,
@@ -282,6 +392,18 @@ pub fn clear_match_pyramid_caches(workspace: &WorkspaceSnapshot) -> Result<()> {
     remove_cache_dir_if_exists(&path)
 }
 
+pub fn clear_color_pyramid_caches(workspace: &WorkspaceSnapshot) -> Result<()> {
+    prune_color_pyramid_memory_cache(workspace);
+    let path = tracker_cache_root(workspace).join("color-pyramids");
+    remove_cache_dir_if_exists(&path)
+}
+
+pub fn clear_tracker_source_hash_caches(workspace: &WorkspaceSnapshot) -> Result<()> {
+    prune_tracker_source_hash_memory_cache(&workspace.assets.bwiki_cache_dir);
+    let path = tracker_cache_root(workspace).join("source-hashes");
+    remove_cache_dir_if_exists(&path)
+}
+
 pub fn clear_tensor_caches_by_prefix(workspace: &WorkspaceSnapshot, prefix: &str) -> Result<usize> {
     let directory = tracker_cache_root(workspace).join("tensors");
     if !directory.is_dir() {
@@ -376,6 +498,62 @@ fn load_cached_match_pyramid(
     }))
 }
 
+fn load_cached_color_map_pyramid(
+    workspace: &WorkspaceSnapshot,
+    cache_key: &str,
+    local_scale: u32,
+    global_scale: u32,
+    coarse_scale: u32,
+) -> Result<Option<ColorMapPyramid>> {
+    let cache_dir = color_pyramid_cache_dir(workspace, cache_key);
+    let local_path = cache_dir.join("local.png");
+    let global_path = cache_dir.join("global.png");
+    let coarse_path = cache_dir.join("coarse.png");
+    if !local_path.is_file() || !global_path.is_file() || !coarse_path.is_file() {
+        return Ok(None);
+    }
+
+    let local_image = image::open(&local_path)
+        .with_context(|| {
+            format!(
+                "failed to open tracker local color pyramid {}",
+                local_path.display()
+            )
+        })?
+        .to_rgba8();
+    let global_image = image::open(&global_path)
+        .with_context(|| {
+            format!(
+                "failed to open tracker global color pyramid {}",
+                global_path.display()
+            )
+        })?
+        .to_rgba8();
+    let coarse_image = image::open(&coarse_path)
+        .with_context(|| {
+            format!(
+                "failed to open tracker coarse color pyramid {}",
+                coarse_path.display()
+            )
+        })?
+        .to_rgba8();
+
+    Ok(Some(ColorMapPyramid {
+        local: ScaledColorMap {
+            scale: local_scale,
+            image: local_image,
+        },
+        global: ScaledColorMap {
+            scale: global_scale,
+            image: global_image,
+        },
+        coarse: ScaledColorMap {
+            scale: coarse_scale,
+            image: coarse_image,
+        },
+    }))
+}
+
 fn persist_match_pyramid(
     workspace: &WorkspaceSnapshot,
     cache_key: &str,
@@ -394,7 +572,46 @@ fn persist_match_pyramid(
     Ok(())
 }
 
+fn persist_color_map_pyramid(
+    workspace: &WorkspaceSnapshot,
+    cache_key: &str,
+    pyramid: &ColorMapPyramid,
+) -> Result<()> {
+    let cache_dir = color_pyramid_cache_dir(workspace, cache_key);
+    fs::create_dir_all(&cache_dir).with_context(|| {
+        format!(
+            "failed to create tracker color pyramid cache directory {}",
+            cache_dir.display()
+        )
+    })?;
+    save_rgba_image(&cache_dir.join("local.png"), &pyramid.local.image)?;
+    save_rgba_image(&cache_dir.join("global.png"), &pyramid.global.image)?;
+    save_rgba_image(&cache_dir.join("coarse.png"), &pyramid.coarse.image)?;
+    Ok(())
+}
+
 fn save_gray_image(path: &Path, image: &GrayImage) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create tracker cache directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let temp_path = cache_temp_path(path);
+    image.save(&temp_path).with_context(|| {
+        format!(
+            "failed to write tracker cache image {}",
+            temp_path.display()
+        )
+    })?;
+    replace_cache_file(&temp_path, path)?;
+    Ok(())
+}
+
+fn save_rgba_image(path: &Path, image: &RgbaImage) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -469,6 +686,12 @@ fn match_pyramid_cache_dir(workspace: &WorkspaceSnapshot, cache_key: &str) -> Pa
         .join(cache_key)
 }
 
+fn color_pyramid_cache_dir(workspace: &WorkspaceSnapshot, cache_key: &str) -> PathBuf {
+    tracker_cache_root(workspace)
+        .join("color-pyramids")
+        .join(cache_key)
+}
+
 fn match_pyramid_cache_key(
     bwiki_cache_dir: &Path,
     view_size: u32,
@@ -478,19 +701,165 @@ fn match_pyramid_cache_key(
 ) -> Result<String> {
     let range = zoom_world_bounds(BWIKI_WORLD_ZOOM)
         .ok_or_else(|| crate::app_error!("missing BWiki zoom metadata for tracker precompute"))?;
-    let tile_hash = logic_tile_revision_hash(
-        bwiki_cache_dir,
-        range.zoom,
-        range.min_x,
-        range.max_x,
-        range.min_y,
-        range.max_y,
-    )?;
-    let poi_hash = tracking_poi_revision_hash(bwiki_cache_dir)?;
+    let source_hashes = load_or_compute_tracker_source_hashes(bwiki_cache_dir, range.zoom)?;
     Ok(format!(
-        "mv{MATCH_PYRAMID_CACHE_VERSION}-z{}-{tile_hash}-poi{poi_hash}-v{}-l{}-g{}-c{}",
-        range.zoom, view_size, local_scale, global_scale, coarse_scale
+        "mv{MATCH_PYRAMID_CACHE_VERSION}-z{}-{}-poi{}-v{}-l{}-g{}-c{}",
+        range.zoom,
+        source_hashes.tile_hash,
+        source_hashes.poi_hash,
+        view_size,
+        local_scale,
+        global_scale,
+        coarse_scale
     ))
+}
+
+fn load_or_compute_tracker_source_hashes(
+    bwiki_cache_dir: &Path,
+    zoom: u8,
+) -> Result<TrackerSourceHashes> {
+    let fast_fingerprint = tracker_source_fast_fingerprint(bwiki_cache_dir, zoom)?;
+    let memory_key = tracker_source_hash_memory_key(bwiki_cache_dir, zoom);
+
+    if let Some(cached) = tracker_source_hash_memory_cache()
+        .lock()
+        .get(&memory_key)
+        .cloned()
+        .filter(|cached| cached.fast_fingerprint == fast_fingerprint)
+    {
+        return Ok(cached);
+    }
+
+    let cache_path = tracker_source_hash_cache_path(bwiki_cache_dir, zoom);
+    if let Ok(Some(cached)) = load_tracker_source_hash_cache(&cache_path) {
+        if cached.fast_fingerprint == fast_fingerprint {
+            tracker_source_hash_memory_cache()
+                .lock()
+                .insert(memory_key, cached.clone());
+            return Ok(cached);
+        }
+    }
+
+    let range = zoom_world_bounds(zoom)
+        .ok_or_else(|| crate::app_error!("missing BWiki zoom metadata for tracker precompute"))?;
+    let computed = TrackerSourceHashes {
+        fast_fingerprint,
+        tile_hash: logic_tile_revision_hash(
+            bwiki_cache_dir,
+            range.zoom,
+            range.min_x,
+            range.max_x,
+            range.min_y,
+            range.max_y,
+        )?,
+        poi_hash: tracking_poi_revision_hash(bwiki_cache_dir)?,
+    };
+    let _ = save_tracker_source_hash_cache(&cache_path, &computed);
+    tracker_source_hash_memory_cache()
+        .lock()
+        .insert(memory_key, computed.clone());
+    Ok(computed)
+}
+
+fn tracker_source_fast_fingerprint(bwiki_cache_dir: &Path, zoom: u8) -> Result<String> {
+    let cache = BwikiCachePaths::new(bwiki_cache_dir.to_path_buf());
+    cache.ensure_directories()?;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    update_hash_u64(&mut hash, u64::from(TRACKER_SOURCE_HASH_CACHE_VERSION));
+    update_hash_u64(&mut hash, u64::from(zoom));
+    update_hash_bytes(&mut hash, bwiki_cache_dir.to_string_lossy().as_bytes());
+
+    for path in [
+        cache.data_dir.join("dataset.json"),
+        cache.icons_dir.clone(),
+        cache.tiles_dir.clone(),
+        cache.tiles_dir.join(zoom.to_string()),
+    ] {
+        update_hash_bytes(&mut hash, path.to_string_lossy().as_bytes());
+        update_hash_bytes(&mut hash, maybe_metadata_fingerprint(&path).as_bytes());
+    }
+
+    Ok(format!("{hash:016x}"))
+}
+
+fn tracker_source_hash_cache_path(bwiki_cache_dir: &Path, zoom: u8) -> PathBuf {
+    tracker_cache_root_from_bwiki_cache_dir(bwiki_cache_dir)
+        .join("source-hashes")
+        .join(format!(
+            "z{zoom}-sv{TRACKER_SOURCE_HASH_CACHE_VERSION}.json"
+        ))
+}
+
+fn tracker_cache_root_from_bwiki_cache_dir(bwiki_cache_dir: &Path) -> PathBuf {
+    bwiki_cache_dir.parent().map_or_else(
+        || PathBuf::from("cache").join("tracking"),
+        |cache_root| cache_root.join("tracking"),
+    )
+}
+
+fn load_tracker_source_hash_cache(path: &Path) -> Result<Option<TrackerSourceHashes>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let file = File::open(path).with_context(|| {
+        format!(
+            "failed to open tracker source hash cache {}",
+            path.display()
+        )
+    })?;
+    let reader = BufReader::new(file);
+    let Ok(persisted) = serde_json::from_reader::<_, PersistedTrackerSourceHashes>(reader) else {
+        return Ok(None);
+    };
+    if persisted.version != TRACKER_SOURCE_HASH_CACHE_VERSION {
+        return Ok(None);
+    }
+
+    Ok(Some(TrackerSourceHashes {
+        fast_fingerprint: persisted.fast_fingerprint,
+        tile_hash: persisted.tile_hash,
+        poi_hash: persisted.poi_hash,
+    }))
+}
+
+fn save_tracker_source_hash_cache(path: &Path, hashes: &TrackerSourceHashes) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create tracker source hash cache directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let temp_path = cache_temp_path(path);
+    let file = File::create(&temp_path).with_context(|| {
+        format!(
+            "failed to create tracker source hash temp cache {}",
+            temp_path.display()
+        )
+    })?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer(
+        &mut writer,
+        &PersistedTrackerSourceHashes {
+            version: TRACKER_SOURCE_HASH_CACHE_VERSION,
+            fast_fingerprint: hashes.fast_fingerprint.clone(),
+            tile_hash: hashes.tile_hash.clone(),
+            poi_hash: hashes.poi_hash.clone(),
+        },
+    )?;
+    writer.flush()?;
+    drop(writer);
+
+    replace_cache_file(&temp_path, path)?;
+    Ok(())
+}
+
+fn maybe_metadata_fingerprint(path: &Path) -> String {
+    metadata_fingerprint(path).unwrap_or_else(|_| "missing".to_owned())
 }
 
 fn logic_tile_revision_hash(
@@ -577,6 +946,43 @@ fn hash_file_metadata(hash: &mut u64, path: &Path) {
     }
 }
 
+fn workspace_memory_cache_key(
+    workspace: &WorkspaceSnapshot,
+    category: &str,
+    cache_key: &str,
+) -> String {
+    format!(
+        "{}::{category}::{cache_key}",
+        workspace.project_root.display()
+    )
+}
+
+fn tracker_source_hash_memory_key(bwiki_cache_dir: &Path, zoom: u8) -> String {
+    format!("{}::z{zoom}", bwiki_cache_dir.display())
+}
+
+fn color_pyramid_memory_cache() -> &'static Mutex<HashMap<String, Arc<ColorMapPyramid>>> {
+    COLOR_PYRAMID_MEMORY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn tracker_source_hash_memory_cache() -> &'static Mutex<HashMap<String, TrackerSourceHashes>> {
+    TRACKER_SOURCE_HASH_MEMORY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn prune_color_pyramid_memory_cache(workspace: &WorkspaceSnapshot) {
+    let prefix = format!("{}::", workspace.project_root.display());
+    color_pyramid_memory_cache()
+        .lock()
+        .retain(|key, _| !key.starts_with(&prefix));
+}
+
+fn prune_tracker_source_hash_memory_cache(bwiki_cache_dir: &Path) {
+    let prefix = format!("{}::", bwiki_cache_dir.display());
+    tracker_source_hash_memory_cache()
+        .lock()
+        .retain(|key, _| !key.starts_with(&prefix));
+}
+
 fn element_count(width: u32, height: u32, channels: usize) -> Result<usize> {
     let channels = channels.max(1);
     (width as usize)
@@ -658,6 +1064,28 @@ mod tests {
         save_tensor_cache(&path, &cache)?;
         let loaded = load_tensor_cache(&path)?.expect("tensor cache should exist");
         assert_eq!(loaded, cache);
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn tracker_source_hash_cache_roundtrip_preserves_values() -> Result<()> {
+        let root = env::temp_dir().join(format!(
+            "game-map-tracker-rs-source-hash-{}",
+            Uuid::new_v4()
+        ));
+        let path = root.join("source-hashes").join("z8-sv1.json");
+        let hashes = TrackerSourceHashes {
+            fast_fingerprint: "fast-fingerprint".to_owned(),
+            tile_hash: "tile-hash".to_owned(),
+            poi_hash: "poi-hash".to_owned(),
+        };
+
+        save_tracker_source_hash_cache(&path, &hashes)?;
+        let loaded =
+            load_tracker_source_hash_cache(&path)?.expect("source hash cache should exist");
+        assert_eq!(loaded, hashes);
 
         let _ = fs::remove_dir_all(root);
         Ok(())

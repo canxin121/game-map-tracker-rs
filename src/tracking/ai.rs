@@ -54,7 +54,9 @@ use crate::{
         capture::{DesktopCapture, preprocess_capture},
         debug::{DebugField, TrackingDebugSnapshot},
         precompute::{
-            clear_match_pyramid_caches, clear_tensor_caches_by_prefix, tracker_map_cache_key,
+            clear_color_pyramid_caches, clear_match_pyramid_caches, clear_tensor_caches_by_prefix,
+            clear_tracker_source_hash_caches, load_or_build_color_map_pyramid,
+            tracker_map_cache_key,
         },
         presence::{MinimapPresenceDetector, MinimapPresenceSample},
         vision::{
@@ -84,7 +86,7 @@ struct BurnTrackerInner {
     config: AppConfig,
     capture: DesktopCapture,
     presence_detector: Option<MinimapPresenceDetector>,
-    color_pyramid: ColorMapPyramid,
+    color_pyramid: Arc<ColorMapPyramid>,
     state: TrackerState,
     debug_enabled: bool,
     matcher: BurnFeatureMatcher,
@@ -215,12 +217,12 @@ impl BurnTrackerWorker {
         let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
         let map_cache_key = tracker_map_cache_key(workspace.as_ref())?;
         let masks = build_template_masks(&config);
-        let color_pyramid = load_logic_color_map_pyramid(workspace.as_ref())?;
+        let color_pyramid = load_or_build_color_map_pyramid(workspace.as_ref(), &map_cache_key)?;
         let matcher = BurnFeatureMatcher::new(workspace.as_ref(), &config.ai, &masks)?;
         let template_global_locator = TemplateGlobalLocator::new_cached(
             workspace.as_ref(),
             &config,
-            &color_pyramid,
+            color_pyramid.as_ref(),
             &map_cache_key,
         )?;
 
@@ -246,13 +248,23 @@ pub fn rebuild_convolution_engine_cache(workspace: &WorkspaceSnapshot) -> Result
         device_index = workspace.config.ai.device_index,
         "rebuilding convolution tracker cache"
     );
+    clear_tracker_source_hash_caches(workspace)?;
     clear_match_pyramid_caches(workspace)?;
+    clear_color_pyramid_caches(workspace)?;
     clear_tensor_caches_by_prefix(workspace, "feature-local-search")?;
     clear_tensor_caches_by_prefix(workspace, "feature-global-search")?;
     clear_tensor_caches_by_prefix(workspace, "feature-coarse-search")?;
 
+    let map_cache_key = tracker_map_cache_key(workspace)?;
+    let color_pyramid = load_or_build_color_map_pyramid(workspace, &map_cache_key)?;
     let masks = build_template_masks(&workspace.config);
     let _ = BurnFeatureMatcher::new(workspace, &workspace.config.ai, &masks)?;
+    let _ = TemplateGlobalLocator::new_cached(
+        workspace,
+        &workspace.config,
+        color_pyramid.as_ref(),
+        &map_cache_key,
+    )?;
     info!("rebuild of convolution tracker cache completed");
     Ok(())
 }
