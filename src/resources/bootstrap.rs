@@ -3,12 +3,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context as _, Result, anyhow};
 use directories::ProjectDirs;
 use tracing::{debug, info};
 
 use crate::{
     config::{AppConfig, CONFIG_FILE_NAME},
+    error::{ContextExt as _, Result},
     resources::{BwikiCachePaths, RouteRepository},
 };
 
@@ -50,13 +50,13 @@ fn data_dir_override_path() -> Result<Option<PathBuf>> {
             Ok(Some(path))
         }
         Err(env::VarError::NotPresent) => Ok(None),
-        Err(error) => Err(anyhow!("failed to read {DATA_DIR_ENV}: {error}")),
+        Err(error) => Err(crate::app_error!("failed to read {DATA_DIR_ENV}: {error}")),
     }
 }
 
 fn default_workspace_root() -> Result<PathBuf> {
     let dirs = ProjectDirs::from(APP_QUALIFIER, APP_ORGANIZATION, APP_NAME)
-        .ok_or_else(|| anyhow!("failed to resolve project directories"))?;
+        .ok_or_else(|| crate::app_error!("failed to resolve project directories"))?;
     Ok(dirs.data_local_dir().to_path_buf())
 }
 

@@ -3,12 +3,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context as _, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-use crate::domain::theme::ThemePreference;
+use crate::{
+    domain::theme::ThemePreference,
+    error::{ContextExt as _, Result},
+};
 
 const UI_PREFERENCES_FILE_NAME: &str = ".game-map-tracker-rs.toml";
 

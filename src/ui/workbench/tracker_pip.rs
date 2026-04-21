@@ -13,6 +13,7 @@ use gpui_component::{
 use crate::{
     config::CaptureRegion,
     domain::geometry::{MapCamera, WorldPoint},
+    error::Result,
     resources::BwikiResourceManager,
     tracking::debug::{DebugImage, DebugImageFormat, DebugImageKind},
     ui::{map_canvas::MapViewportState, tile_cache::TileImageCache},
@@ -1032,10 +1033,9 @@ fn install_tracker_pip_navigation_handlers(
     });
 }
 
-pub(super) fn apply_window_topmost(window: &mut Window, always_on_top: bool) -> anyhow::Result<()> {
+pub(super) fn apply_window_topmost(window: &mut Window, always_on_top: bool) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use anyhow::{anyhow, ensure};
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
@@ -1043,11 +1043,13 @@ pub(super) fn apply_window_topmost(window: &mut Window, always_on_top: bool) -> 
 
         let handle = window
             .window_handle()
-            .map_err(|error| anyhow!("无法获取追踪画中画窗口句柄：{error:?}"))?;
+            .map_err(|error| crate::app_error!("无法获取追踪画中画窗口句柄：{error:?}"))?;
         let hwnd = match handle.as_raw() {
             RawWindowHandle::Win32(handle) => handle.hwnd.get() as _,
             other => {
-                return Err(anyhow!("当前平台窗口句柄不支持置顶切换：{other:?}"));
+                return Err(crate::app_error!(
+                    "当前平台窗口句柄不支持置顶切换：{other:?}"
+                ));
             }
         };
         let insert_after = if always_on_top {
@@ -1057,7 +1059,7 @@ pub(super) fn apply_window_topmost(window: &mut Window, always_on_top: bool) -> 
         };
         let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
         let result = unsafe { SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags) };
-        ensure!(
+        crate::ensure!(
             result != 0,
             "SetWindowPos 失败：{}",
             std::io::Error::last_os_error()
@@ -1072,23 +1074,21 @@ pub(super) fn apply_window_topmost(window: &mut Window, always_on_top: bool) -> 
     Ok(())
 }
 
-pub(super) fn apply_window_bounds(
-    window: &mut Window,
-    bounds: Bounds<Pixels>,
-) -> anyhow::Result<()> {
+pub(super) fn apply_window_bounds(window: &mut Window, bounds: Bounds<Pixels>) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use anyhow::{anyhow, ensure};
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         use windows_sys::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SetWindowPos};
 
         let handle = window
             .window_handle()
-            .map_err(|error| anyhow!("无法获取窗口句柄：{error:?}"))?;
+            .map_err(|error| crate::app_error!("无法获取窗口句柄：{error:?}"))?;
         let hwnd = match handle.as_raw() {
             RawWindowHandle::Win32(handle) => handle.hwnd.get() as _,
             other => {
-                return Err(anyhow!("当前平台窗口句柄不支持移动窗口：{other:?}"));
+                return Err(crate::app_error!(
+                    "当前平台窗口句柄不支持移动窗口：{other:?}"
+                ));
             }
         };
         let result = unsafe {
@@ -1102,7 +1102,7 @@ pub(super) fn apply_window_bounds(
                 SWP_NOACTIVATE,
             )
         };
-        ensure!(
+        crate::ensure!(
             result != 0,
             "SetWindowPos 失败：{}",
             std::io::Error::last_os_error()

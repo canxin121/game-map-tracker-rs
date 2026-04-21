@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 
-use anyhow::Result;
 use gpui::{
     AppContext, Application, AssetSource, Bounds, SharedString, WindowBounds, WindowOptions, px,
     size,
@@ -15,6 +14,7 @@ use tracing_subscriber::{
 
 use crate::{
     embedded_assets,
+    error::Result,
     logging::{DebugLogLayer, install_debug_log_store},
     resources::WorkspaceBootstrap,
     ui::{self, TrackerWorkbench},
@@ -104,11 +104,11 @@ pub fn init_tracing() {
 pub struct EmbeddedAssetSource;
 
 impl AssetSource for EmbeddedAssetSource {
-    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         Ok(embedded_assets::asset_bytes(path).map(Cow::Borrowed))
     }
 
-    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
         let mut entries = embedded_assets::runtime_asset_paths(path)
             .into_iter()
             .map(SharedString::from)

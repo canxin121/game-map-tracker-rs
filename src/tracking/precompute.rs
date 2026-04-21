@@ -5,11 +5,11 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use anyhow::{Context as _, Result, anyhow, bail};
 use image::GrayImage;
 use imageproc::contrast::equalize_histogram;
 
 use crate::{
+    error::{ContextExt as _, Result},
     resources::{
         BWIKI_WORLD_ZOOM, BwikiCachePaths, WorkspaceSnapshot,
         load_logic_map_with_tracking_poi_scaled_image, zoom_world_bounds,
@@ -50,14 +50,14 @@ impl PersistedTensorCache {
     ) -> Result<Self> {
         let expected = element_count(width, height, channels)?;
         if primary.len() != expected {
-            bail!(
+            crate::bail!(
                 "persisted tensor primary buffer length {} does not match expected {}",
                 primary.len(),
                 expected
             );
         }
         if secondary.len() != expected {
-            bail!(
+            crate::bail!(
                 "persisted tensor secondary buffer length {} does not match expected {}",
                 secondary.len(),
                 expected
@@ -193,7 +193,7 @@ pub fn load_tensor_cache(path: &Path) -> Result<Option<PersistedTensorCache>> {
         )
     })?;
     if magic != TENSOR_CACHE_MAGIC {
-        bail!(
+        crate::bail!(
             "unsupported tracker tensor cache magic in {}",
             path.display()
         );
@@ -201,7 +201,7 @@ pub fn load_tensor_cache(path: &Path) -> Result<Option<PersistedTensorCache>> {
 
     let version = read_u32(&mut reader)?;
     if version != TENSOR_CACHE_FORMAT_VERSION {
-        bail!(
+        crate::bail!(
             "unsupported tracker tensor cache version {} in {}",
             version,
             path.display()
@@ -215,7 +215,7 @@ pub fn load_tensor_cache(path: &Path) -> Result<Option<PersistedTensorCache>> {
     let secondary_len = read_u64(&mut reader)? as usize;
     let expected = element_count(width, height, channels)?;
     if primary_len != expected || secondary_len != expected {
-        bail!(
+        crate::bail!(
             "tracker tensor cache payload length mismatch in {}",
             path.display()
         );
@@ -477,7 +477,7 @@ fn match_pyramid_cache_key(
     coarse_scale: u32,
 ) -> Result<String> {
     let range = zoom_world_bounds(BWIKI_WORLD_ZOOM)
-        .ok_or_else(|| anyhow!("missing BWiki zoom metadata for tracker precompute"))?;
+        .ok_or_else(|| crate::app_error!("missing BWiki zoom metadata for tracker precompute"))?;
     let tile_hash = logic_tile_revision_hash(
         bwiki_cache_dir,
         range.zoom,
@@ -582,7 +582,7 @@ fn element_count(width: u32, height: u32, channels: usize) -> Result<usize> {
     (width as usize)
         .checked_mul(height as usize)
         .and_then(|value| value.checked_mul(channels))
-        .ok_or_else(|| anyhow!("tracker tensor cache dimensions overflow"))
+        .ok_or_else(|| crate::app_error!("tracker tensor cache dimensions overflow"))
 }
 
 fn update_hash_bytes(hash: &mut u64, bytes: &[u8]) {

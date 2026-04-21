@@ -103,15 +103,16 @@ pub(crate) fn available_burn_device_descriptors(
     }
 }
 
-use anyhow::Result;
-
 #[cfg(any(burn_cuda_backend, burn_vulkan_backend, burn_metal_backend))]
 use burn::tensor::{Tensor, backend::Backend};
 
 #[cfg(any(burn_cuda_backend, burn_vulkan_backend, burn_metal_backend))]
 use cubecl_runtime::runtime::Runtime as CubeRuntime;
 
-use crate::config::{AiTrackingConfig, MinimapPresenceProbeConfig, TemplateTrackingConfig};
+use crate::{
+    config::{AiTrackingConfig, MinimapPresenceProbeConfig, TemplateTrackingConfig},
+    error::Result,
+};
 
 #[cfg(burn_cuda_backend)]
 use burn::backend::cuda::CudaDevice;
@@ -203,7 +204,7 @@ fn build_cuda_device(ordinal: usize) -> Result<BurnDeviceSelection> {
         .iter()
         .any(|descriptor| descriptor.ordinal == ordinal)
     {
-        anyhow::bail!("CUDA 设备序号 {ordinal} 不存在");
+        crate::bail!("CUDA 设备序号 {ordinal} 不存在");
     }
 
     let device = CudaDevice { index: ordinal };
@@ -213,7 +214,7 @@ fn build_cuda_device(ordinal: usize) -> Result<BurnDeviceSelection> {
 
 #[cfg(not(burn_cuda_backend))]
 fn build_cuda_device(_ordinal: usize) -> Result<BurnDeviceSelection> {
-    anyhow::bail!("配置选择了 CUDA 设备，但当前二进制未包含 CUDA 后端；Windows 默认构建会包含 CUDA")
+    crate::bail!("配置选择了 CUDA 设备，但当前二进制未包含 CUDA 后端；Windows 默认构建会包含 CUDA")
 }
 
 #[cfg(burn_vulkan_backend)]
@@ -222,14 +223,14 @@ fn build_vulkan_device(ordinal: usize) -> Result<BurnDeviceSelection> {
         .iter()
         .find(|choice| choice.descriptor.ordinal == ordinal)
         .map(|choice| choice.device.clone())
-        .ok_or_else(|| anyhow::anyhow!("Vulkan 设备序号 {ordinal} 不存在"))?;
+        .ok_or_else(|| crate::app_error!("Vulkan 设备序号 {ordinal} 不存在"))?;
     probe_device::<burn::backend::Vulkan>(&device)?;
     Ok(BurnDeviceSelection::Vulkan(device))
 }
 
 #[cfg(not(burn_vulkan_backend))]
 fn build_vulkan_device(_ordinal: usize) -> Result<BurnDeviceSelection> {
-    anyhow::bail!(
+    crate::bail!(
         "配置选择了 Vulkan 设备，但当前二进制未包含 Vulkan 后端；Windows / Linux 默认构建会包含 Vulkan"
     )
 }
@@ -240,16 +241,14 @@ fn build_metal_device(ordinal: usize) -> Result<BurnDeviceSelection> {
         .iter()
         .find(|choice| choice.descriptor.ordinal == ordinal)
         .map(|choice| choice.device.clone())
-        .ok_or_else(|| anyhow::anyhow!("Metal 设备序号 {ordinal} 不存在"))?;
+        .ok_or_else(|| crate::app_error!("Metal 设备序号 {ordinal} 不存在"))?;
     probe_device::<burn::backend::Metal>(&device)?;
     Ok(BurnDeviceSelection::Metal(device))
 }
 
 #[cfg(not(burn_metal_backend))]
 fn build_metal_device(_ordinal: usize) -> Result<BurnDeviceSelection> {
-    anyhow::bail!(
-        "配置选择了 Metal 设备，但当前二进制未包含 Metal 后端；macOS 默认构建会包含 Metal"
-    )
+    crate::bail!("配置选择了 Metal 设备，但当前二进制未包含 Metal 后端；macOS 默认构建会包含 Metal")
 }
 
 #[cfg(burn_cuda_backend)]
@@ -410,6 +409,6 @@ where
             let _ = Tensor::<B, 1>::from_data([0.0f32], &device).into_data();
         }
     }))
-    .map_err(|_| anyhow::anyhow!("device probe failed"))?;
+    .map_err(|_| crate::app_error!("device probe failed"))?;
     Ok(())
 }

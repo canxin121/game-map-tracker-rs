@@ -4,7 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context as _, Result, bail};
 use image::{
     DynamicImage, GrayImage, Luma, Rgba, RgbaImage,
     imageops::{FilterType, crop_imm, resize},
@@ -21,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::CaptureRegion,
+    error::{ContextExt as _, Result},
     resources::WorkspaceSnapshot,
     tracking::{
         capture::DesktopCapture,
@@ -83,10 +83,10 @@ impl ProbeBox {
 
     fn validate_in_bounds(&self, image_width: u32, image_height: u32) -> Result<()> {
         if self.w == 0 || self.h == 0 {
-            bail!("检测槽位尺寸不能为 0");
+            crate::bail!("检测槽位尺寸不能为 0");
         }
         if self.x2() > image_width || self.y2() > image_height {
-            bail!(
+            crate::bail!(
                 "检测槽位 ({}, {}, {}, {}) 超出了目标图尺寸 {}x{}",
                 self.x,
                 self.y,
@@ -256,7 +256,7 @@ impl MinimapPresenceDetector {
         }
 
         let region = probe.capture_region().ok_or_else(|| {
-            anyhow::anyhow!(
+            crate::app_error!(
                 "minimap_presence_probe 已启用，但 top/left/width/height 还没有完整配置"
             )
         })?;
@@ -301,7 +301,7 @@ pub fn build_minimap_presence_probe_model(
     region: &CaptureRegion,
 ) -> Result<MinimapPresenceModelBuild> {
     if region.width < 12 || region.height < 12 {
-        bail!("F1-P 标签区域过小，至少需要 12x12");
+        crate::bail!("F1-P 标签区域过小，至少需要 12x12");
     }
 
     let capture = DesktopCapture::from_absolute_region(region)?;
@@ -313,7 +313,7 @@ pub fn build_minimap_presence_model_from_image(
     image: &RgbaImage,
 ) -> Result<MinimapPresenceModelBuild> {
     if image.width() < 12 || image.height() < 12 {
-        bail!("F1-P 标签建模输入过小，至少需要 12x12");
+        crate::bail!("F1-P 标签建模输入过小，至少需要 12x12");
     }
 
     let anchors = canonical_anchor_boxes(image.width(), image.height());
@@ -337,7 +337,7 @@ pub fn build_minimap_presence_model_from_image(
     let sample = prepared.sample_image(image)?;
 
     if !sample.present {
-        bail!(
+        crate::bail!(
             "当前选区未通过 F1-P 模型自检，均值 {:.3}，最低 {:.3}",
             sample.mean_raw_score,
             sample.min_raw_score
@@ -351,13 +351,13 @@ pub fn build_minimap_presence_model_from_images(
     images: &[RgbaImage],
 ) -> Result<MinimapPresenceModelBuild> {
     if images.is_empty() {
-        bail!("F1-P 标签建模输入不能为空");
+        crate::bail!("F1-P 标签建模输入不能为空");
     }
 
     let target_width = images[0].width();
     let target_height = images[0].height();
     if target_width < 12 || target_height < 12 {
-        bail!("F1-P 标签建模输入过小，至少需要 12x12");
+        crate::bail!("F1-P 标签建模输入过小，至少需要 12x12");
     }
 
     let normalized_images = images
@@ -385,7 +385,7 @@ pub fn build_minimap_presence_model_from_images(
     let sample = prepared.sample_image(&normalized_images[0])?;
 
     if !sample.present {
-        bail!(
+        crate::bail!(
             "当前选区未通过 F1-P 模型自检，均值 {:.3}，最低 {:.3}",
             sample.mean_raw_score,
             sample.min_raw_score
@@ -460,17 +460,17 @@ pub fn delete_minimap_presence_model(project_root: &Path) -> Result<bool> {
 
 fn validate_model(model: &MinimapPresenceModel) -> Result<()> {
     if model.target_width == 0 || model.target_height == 0 {
-        bail!("F1-P 模型尺寸无效");
+        crate::bail!("F1-P 模型尺寸无效");
     }
     if model.anchors.len() != EXPECTED_LABEL_COUNT {
-        bail!(
+        crate::bail!(
             "F1-P 模型槽位数量无效，期望 {}，实际 {}",
             EXPECTED_LABEL_COUNT,
             model.anchors.len()
         );
     }
     if model.raw_templates.len() != EXPECTED_LABEL_COUNT {
-        bail!(
+        crate::bail!(
             "F1-P 模板数量无效，期望 {}，实际 {}",
             EXPECTED_LABEL_COUNT,
             model.raw_templates.len()
@@ -481,14 +481,14 @@ fn validate_model(model: &MinimapPresenceModel) -> Result<()> {
     }
     for (index, bank) in model.raw_templates.iter().enumerate() {
         if bank.is_empty() {
-            bail!(
+            crate::bail!(
                 "F1-P 模板 {} 为空，至少需要一个槽位模板",
                 TAG_NAMES.get(index).copied().unwrap_or("?")
             );
         }
         for raw in bank {
             if raw.len() != RAW_TEMPLATE_AREA {
-                bail!(
+                crate::bail!(
                     "F1-P 模板 {} 大小无效，期望 {} 字节，实际 {} 字节",
                     TAG_NAMES.get(index).copied().unwrap_or("?"),
                     RAW_TEMPLATE_AREA,
@@ -506,7 +506,7 @@ fn anchor_boxes_from_seed_images(images: &[RgbaImage]) -> Result<Vec<ProbeBox>> 
         .filter_map(|image| seed_boxes_from_image(image).ok())
         .collect::<Vec<_>>();
     if seed_sets.is_empty() {
-        bail!("当前样本中没有任何一张成功提取到稳定的 F1-P 锚框");
+        crate::bail!("当前样本中没有任何一张成功提取到稳定的 F1-P 锚框");
     }
 
     let mut anchors = Vec::with_capacity(EXPECTED_LABEL_COUNT);
@@ -568,7 +568,7 @@ fn seed_boxes_from_image(image: &RgbaImage) -> Result<Vec<ProbeBox>> {
     let support_mask = detect_support_mask(image, &palette);
     let components = filter_components(&support_mask);
     if components.len() != EXPECTED_LABEL_COUNT {
-        bail!(
+        crate::bail!(
             "当前选区只提取到了 {} 个标签候选，需要准确提取到 6 个标签；请只框住 F1 到 P 这排标签，不要包含上方图标",
             components.len()
         );
@@ -702,7 +702,7 @@ fn filter_components(mask: &GrayImage) -> Vec<ProbeBox> {
 
 fn validate_anchor_layout(boxes: &[ProbeBox], image_width: u32, image_height: u32) -> Result<()> {
     if boxes.len() != EXPECTED_LABEL_COUNT {
-        bail!("F1-P 标签槽位数量不正确");
+        crate::bail!("F1-P 标签槽位数量不正确");
     }
 
     let y_centers = boxes.iter().map(ProbeBox::center_y).collect::<Vec<_>>();
@@ -717,7 +717,7 @@ fn validate_anchor_layout(boxes: &[ProbeBox], image_width: u32, image_height: u3
         / y_centers.len() as f32;
     let y_center_deviation = y_center_variance.sqrt() / image_height.max(1) as f32;
     if y_center_deviation > 0.08 {
-        bail!("当前选区中的标签没有稳定落在同一行，请只框住 F1 到 P 标签带");
+        crate::bail!("当前选区中的标签没有稳定落在同一行，请只框住 F1 到 P 标签带");
     }
 
     let gaps = boxes
@@ -725,24 +725,24 @@ fn validate_anchor_layout(boxes: &[ProbeBox], image_width: u32, image_height: u3
         .map(|pair| pair[1].x as f32 - pair[0].x2() as f32)
         .collect::<Vec<_>>();
     if gaps.iter().any(|gap| *gap < 4.0) {
-        bail!("当前选区中的标签间隔异常，疑似框入了错误区域");
+        crate::bail!("当前选区中的标签间隔异常，疑似框入了错误区域");
     }
 
     let gap_cv = coefficient_of_variation(&gaps);
     if gap_cv > 0.45 {
-        bail!("当前选区中的标签间隔不稳定，请重新框选仅包含整排标签的区域");
+        crate::bail!("当前选区中的标签间隔不稳定，请重新框选仅包含整排标签的区域");
     }
 
     let widths = boxes.iter().map(|item| item.w as f32).collect::<Vec<_>>();
     if coefficient_of_variation(&widths) > 0.25 {
-        bail!("当前选区中的标签宽度波动过大，疑似不是标准 F1-P 标签带");
+        crate::bail!("当前选区中的标签宽度波动过大，疑似不是标准 F1-P 标签带");
     }
 
     let span_ratio = (boxes.last().map(ProbeBox::x2).unwrap_or(0)
         - boxes.first().map(|item| item.x).unwrap_or(0)) as f32
         / image_width.max(1) as f32;
     if !(0.45..=0.99).contains(&span_ratio) {
-        bail!("当前选区中的标签横向覆盖范围异常，请重新框选");
+        crate::bail!("当前选区中的标签横向覆盖范围异常，请重新框选");
     }
 
     Ok(())
@@ -760,7 +760,7 @@ fn preprocess_raw_crop(gray_crop: &GrayImage) -> GrayImage {
 
 fn prepare_centered_template(raw: &[u8]) -> Result<Vec<f32>> {
     if raw.len() != RAW_TEMPLATE_AREA {
-        bail!(
+        crate::bail!(
             "F1-P 槽位模板大小不正确，期望 {} 字节，实际 {} 字节",
             RAW_TEMPLATE_AREA,
             raw.len()
@@ -781,7 +781,7 @@ fn prepare_centered_template(raw: &[u8]) -> Result<Vec<f32>> {
         .sum::<f32>()
         .sqrt();
     if norm <= 1e-6 {
-        bail!("F1-P 槽位模板对比度过低，无法建立稳定模板");
+        crate::bail!("F1-P 槽位模板对比度过低，无法建立稳定模板");
     }
     for value in &mut normalized {
         *value /= norm;

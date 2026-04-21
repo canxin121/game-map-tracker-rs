@@ -40,6 +40,7 @@ use crate::{
         theme::ThemePreference,
         tracker::{PositionEstimate, TrackerEngineKind, TrackerLifecycle, TrackingSource},
     },
+    error::{ContextExt as _, Result},
     logging,
     resources::{
         AssetManifest, BwikiPointRecord, BwikiResourceManager, BwikiTypeDefinition,
@@ -4807,7 +4808,7 @@ impl TrackerWorkbench {
         preferred_group_id: Option<&RouteId>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         self.route_groups = RouteRepository::load_all(&self.workspace.assets.routes_dir)?;
         self.sync_workspace_routes_snapshot();
 
@@ -5967,17 +5968,17 @@ impl TrackerWorkbench {
         self.resolve_minimap_picker_display(window, cx)
     }
 
-    fn current_probe_capture_region(&self) -> anyhow::Result<CaptureRegion> {
+    fn current_probe_capture_region(&self) -> Result<CaptureRegion> {
         self.workspace
             .config
             .minimap_presence_probe
             .capture_region()
             .ok_or_else(|| {
-                anyhow::anyhow!("F1-P 标签探针区域尚未完整配置，请先设置 top/left/width/height")
+                crate::app_error!("F1-P 标签探针区域尚未完整配置，请先设置 top/left/width/height")
             })
     }
 
-    fn capture_test_case_inner(&self, label: TestCaseLabel) -> anyhow::Result<PathBuf> {
+    fn capture_test_case_inner(&self, label: TestCaseLabel) -> Result<PathBuf> {
         let output_dir = self.resolve_test_case_output_dir()?;
         let base_name = self.next_test_case_base_name(label);
         let output_path = output_dir.join(format!("{base_name}.png"));
@@ -5986,9 +5987,7 @@ impl TrackerWorkbench {
         Ok(output_path)
     }
 
-    fn resolve_test_case_output_dir(&self) -> anyhow::Result<PathBuf> {
-        use anyhow::Context as _;
-
+    fn resolve_test_case_output_dir(&self) -> Result<PathBuf> {
         let output_dir = self.find_assets_test_dir();
         fs::create_dir_all(&output_dir).with_context(|| {
             format!(

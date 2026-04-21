@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, Result};
+use crate::error::{ContextExt as _, Result};
 
 use burn::{
     backend::{Autodiff, ndarray::NdArrayDevice},
@@ -50,16 +50,11 @@ use crate::{
         load_logic_map_with_tracking_poi_scaled_rgba_image,
     },
     tracking::{
-        burn_support::{
-            BurnDeviceSelection, available_burn_backends, burn_score_map_capture_enabled,
-            select_burn_device,
-        },
+        burn_support::{BurnDeviceSelection, available_burn_backends, select_burn_device},
         capture::{DesktopCapture, preprocess_capture},
         debug::{DebugField, TrackingDebugSnapshot},
         precompute::{
-            PersistedTensorCache, clear_match_pyramid_caches, clear_tensor_caches_by_prefix,
-            load_tensor_cache, metadata_fingerprint, save_tensor_cache, tracker_map_cache_key,
-            tracker_tensor_cache_path,
+            clear_match_pyramid_caches, clear_tensor_caches_by_prefix, tracker_map_cache_key,
         },
         presence::{MinimapPresenceDetector, MinimapPresenceSample},
         vision::{
@@ -78,9 +73,6 @@ use crate::{
 #[derive(Debug, Clone)]
 struct LocateResult {
     best_score: f32,
-    score_width: u32,
-    score_height: u32,
-    score_map: Option<Vec<f32>>,
     accepted: Option<MatchCandidate>,
 }
 
@@ -206,8 +198,6 @@ const CUDA_CONV_IM2COL_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 #[cfg(any(burn_vulkan_backend, burn_metal_backend))]
 const WGPU_CONV_IM2COL_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
-const FEATURE_ENCODER_CACHE_VERSION: u32 = 2;
-
 impl BurnTrackerWorker {
     pub fn new(workspace: Arc<WorkspaceSnapshot>) -> Result<Self> {
         info!(
@@ -219,20 +209,14 @@ impl BurnTrackerWorker {
         );
         let config = workspace.config.clone();
         if !config.minimap.is_configured() {
-            anyhow::bail!("小地图区域尚未配置，请先完成小地图取区");
+            crate::bail!("小地图区域尚未配置，请先完成小地图取区");
         }
         let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
         let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
         let map_cache_key = tracker_map_cache_key(workspace.as_ref())?;
         let masks = build_template_masks(&config);
         let color_pyramid = load_logic_color_map_pyramid(workspace.as_ref())?;
-        let matcher = BurnFeatureMatcher::new(
-            workspace.as_ref(),
-            &config.ai,
-            &color_pyramid,
-            &masks,
-            &map_cache_key,
-        )?;
+        let matcher = BurnFeatureMatcher::new(workspace.as_ref(), &config.ai, &masks)?;
         let template_global_locator = TemplateGlobalLocator::new_cached(
             workspace.as_ref(),
             &config,
@@ -267,16 +251,8 @@ pub fn rebuild_convolution_engine_cache(workspace: &WorkspaceSnapshot) -> Result
     clear_tensor_caches_by_prefix(workspace, "feature-global-search")?;
     clear_tensor_caches_by_prefix(workspace, "feature-coarse-search")?;
 
-    let map_cache_key = tracker_map_cache_key(workspace)?;
-    let color_pyramid = load_logic_color_map_pyramid(workspace)?;
     let masks = build_template_masks(&workspace.config);
-    let _ = BurnFeatureMatcher::new(
-        workspace,
-        &workspace.config.ai,
-        &color_pyramid,
-        &masks,
-        &map_cache_key,
-    )?;
+    let _ = BurnFeatureMatcher::new(workspace, &workspace.config.ai, &masks)?;
     info!("rebuild of convolution tracker cache completed");
     Ok(())
 }
@@ -396,7 +372,7 @@ where
         let weight_view = tensors.tensor(weight_name)?;
         let shape = weight_view.shape();
         if shape.len() != 4 || shape[1] != 3 || shape[2] != shape[3] {
-            anyhow::bail!(
+            crate::bail!(
                 "unsupported encoder kernel shape {:?} in {}",
                 shape,
                 source_label
@@ -425,7 +401,7 @@ where
         .map(|name| {
             let view = tensors.tensor(name)?;
             if view.shape().len() != 1 || view.shape()[0] != out_channels {
-                anyhow::bail!(
+                crate::bail!(
                     "unsupported encoder bias shape {:?} in {}",
                     view.shape(),
                     source_label
@@ -459,28 +435,6 @@ where
 
     fn output_channels(&self) -> usize {
         self.output_channels
-    }
-
-    fn cache_key(&self) -> Result<String> {
-        let key = match &self.source {
-            EncoderSource::BuiltIn => {
-                format!(
-                    "ev{FEATURE_ENCODER_CACHE_VERSION}-builtin-c{}",
-                    self.output_channels
-                )
-            }
-            EncoderSource::EmbeddedPretrained => format!(
-                "ev{FEATURE_ENCODER_CACHE_VERSION}-embedded-{}-c{}",
-                embedded_encoder_cache_fingerprint(embedded_tracker_encoder_bytes()),
-                self.output_channels
-            ),
-            EncoderSource::Safetensors(path) => format!(
-                "ev{FEATURE_ENCODER_CACHE_VERSION}-sf-{}-c{}",
-                metadata_fingerprint(path)?,
-                self.output_channels
-            ),
-        };
-        Ok(key)
     }
 
     fn encode(&self, image: &RgbaImage) -> Result<Tensor<B, 4>> {
@@ -534,26 +488,17 @@ fn dedupe_paths(paths: &mut Vec<PathBuf>) {
     paths.retain(|path| seen.insert(path.clone()));
 }
 
-fn embedded_encoder_cache_fingerprint(bytes: &[u8]) -> String {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{hash:016x}")
-}
-
 fn find_safetensor_name<'a>(tensors: &SafeTensors<'a>, names: &[&'a str]) -> Result<&'a str> {
     names
         .iter()
         .copied()
         .find(|name| tensors.tensor(name).is_ok())
-        .ok_or_else(|| anyhow::anyhow!("failed to resolve encoder tensor names: {:?}", names))
+        .ok_or_else(|| crate::app_error!("failed to resolve encoder tensor names: {:?}", names))
 }
 
 fn safetensor_view_f32_vec(view: &safetensors::tensor::TensorView<'_>) -> Result<Vec<f32>> {
     if view.dtype() != safetensors::Dtype::F32 {
-        anyhow::bail!(
+        crate::bail!(
             "unsupported safetensors dtype {:?}, only f32 is supported",
             view.dtype()
         );
@@ -561,7 +506,7 @@ fn safetensor_view_f32_vec(view: &safetensors::tensor::TensorView<'_>) -> Result
 
     let data = view.data();
     if data.len() % std::mem::size_of::<f32>() != 0 {
-        anyhow::bail!("invalid safetensors payload length {}", data.len());
+        crate::bail!("invalid safetensors payload length {}", data.len());
     }
 
     Ok(data
@@ -827,11 +772,11 @@ fn parse_encoder_training_args(args: Vec<OsString>) -> Result<EncoderTrainingCon
             "--seed" => config.seed = next_value("--seed")?.parse()?,
             "--fresh" => config.resume = false,
             value if value.starts_with("--") => {
-                anyhow::bail!("unknown train-encoder option: {value}")
+                crate::bail!("unknown train-encoder option: {value}")
             }
             value => {
                 if config.workspace_root.is_some() {
-                    anyhow::bail!("unexpected positional argument: {value}");
+                    crate::bail!("unexpected positional argument: {value}");
                 }
                 config.workspace_root = Some(PathBuf::from(value));
             }
@@ -846,16 +791,16 @@ fn parse_encoder_training_args(args: Vec<OsString>) -> Result<EncoderTrainingCon
         || config.checkpoint_every == 0
         || config.hard_negative_candidates == 0
     {
-        anyhow::bail!("train-encoder numeric options must be > 0");
+        crate::bail!("train-encoder numeric options must be > 0");
     }
     if !config.learning_rate.is_finite() || config.learning_rate <= 0.0 {
-        anyhow::bail!("--learning-rate must be a finite positive number");
+        crate::bail!("--learning-rate must be a finite positive number");
     }
     if !config.margin.is_finite() || config.margin <= 0.0 {
-        anyhow::bail!("--margin must be a finite positive number");
+        crate::bail!("--margin must be a finite positive number");
     }
     if !config.weight_decay.is_finite() || config.weight_decay < 0.0 {
-        anyhow::bail!("--weight-decay must be a finite non-negative number");
+        crate::bail!("--weight-decay must be a finite non-negative number");
     }
 
     Ok(config)
@@ -1041,7 +986,7 @@ fn crop_centered_training_patch(
     height: u32,
 ) -> Result<RgbaImage> {
     if image.width() < width || image.height() < height {
-        anyhow::bail!("search image is smaller than the requested patch");
+        crate::bail!("search image is smaller than the requested patch");
     }
 
     let left = center
@@ -1220,11 +1165,11 @@ where
     let values = tensor
         .into_data()
         .to_vec::<f32>()
-        .map_err(|error| anyhow::anyhow!("failed to convert tensor into f32 scalar: {error}"))?;
+        .map_err(|error| crate::app_error!("failed to convert tensor into f32 scalar: {error}"))?;
     values
         .into_iter()
         .next()
-        .ok_or_else(|| anyhow::anyhow!("tensor scalar conversion returned an empty buffer"))
+        .ok_or_else(|| crate::app_error!("tensor scalar conversion returned an empty buffer"))
 }
 
 fn ranking_loss<B>(
@@ -1399,7 +1344,7 @@ fn apply_training_step(
     let kernel_grad = encoder
         .edge_kernels
         .grad(grads)
-        .ok_or_else(|| anyhow::anyhow!("failed to read encoder kernel gradients"))?;
+        .ok_or_else(|| crate::app_error!("failed to read encoder kernel gradients"))?;
     let updated_kernel = encoder.edge_kernels.clone().inner() - kernel_grad * learning_rate;
     encoder.edge_kernels = Tensor::<TrainingBackend, 4>::from_inner(updated_kernel).require_grad();
 
@@ -1471,7 +1416,7 @@ where
     B::Device: Clone + Send + Sync + 'static,
 {
     let Some(parent) = path.parent() else {
-        anyhow::bail!("invalid encoder weight path {}", path.display());
+        crate::bail!("invalid encoder weight path {}", path.display());
     };
     fs::create_dir_all(parent)?;
 
@@ -1480,7 +1425,7 @@ where
         .edge_kernels
         .to_data()
         .to_vec::<f32>()
-        .map_err(|error| anyhow::anyhow!("failed to serialize encoder kernels: {error}"))?;
+        .map_err(|error| crate::app_error!("failed to serialize encoder kernels: {error}"))?;
     let weight_bytes = serialize_f32(&weight_values);
     let weight_view = TensorView::new(Dtype::F32, weight_shape.to_vec(), &weight_bytes)?;
 
@@ -1489,7 +1434,7 @@ where
         let bias_values = bias
             .to_data()
             .to_vec::<f32>()
-            .map_err(|error| anyhow::anyhow!("failed to serialize encoder bias: {error}"))?;
+            .map_err(|error| crate::app_error!("failed to serialize encoder bias: {error}"))?;
         let bias_bytes = serialize_f32(&bias_values);
         let bias_view = TensorView::new(Dtype::F32, bias_shape.to_vec(), &bias_bytes)?;
         serialize_to_file(
@@ -1694,20 +1639,16 @@ impl BurnFeatureMatcher {
     fn new(
         workspace: &WorkspaceSnapshot,
         config: &AiTrackingConfig,
-        pyramid: &ColorMapPyramid,
         masks: &MaskSet,
-        map_cache_key: &str,
     ) -> Result<Self> {
         let selection = select_burn_device(config)?;
-        Self::from_selection(workspace, selection, pyramid, masks, map_cache_key)
+        Self::from_selection(workspace, selection, masks)
     }
 
     fn from_selection(
         workspace: &WorkspaceSnapshot,
         selection: BurnDeviceSelection,
-        pyramid: &ColorMapPyramid,
         masks: &MaskSet,
-        map_cache_key: &str,
     ) -> Result<Self> {
         match selection {
             BurnDeviceSelection::Cpu => Ok(Self::NdArray(BurnFeatureMatcherBackend::<
@@ -1717,9 +1658,7 @@ impl BurnFeatureMatcher {
                 NdArrayDevice::Cpu,
                 "CPU".to_owned(),
                 None,
-                pyramid,
                 masks,
-                map_cache_key,
             )?)),
             #[cfg(burn_cuda_backend)]
             BurnDeviceSelection::Cuda(device) => Ok(Self::Cuda(BurnFeatureMatcherBackend::<
@@ -1729,9 +1668,7 @@ impl BurnFeatureMatcher {
                 device.clone(),
                 burn_device_label(&BurnDeviceSelection::Cuda(device)),
                 Some(CUDA_CONV_IM2COL_BUDGET_BYTES),
-                pyramid,
                 masks,
-                map_cache_key,
             )?)),
             #[cfg(burn_vulkan_backend)]
             BurnDeviceSelection::Vulkan(device) => Ok(Self::Vulkan(BurnFeatureMatcherBackend::<
@@ -1741,9 +1678,7 @@ impl BurnFeatureMatcher {
                 device.clone(),
                 burn_device_label(&BurnDeviceSelection::Vulkan(device)),
                 Some(WGPU_CONV_IM2COL_BUDGET_BYTES),
-                pyramid,
                 masks,
-                map_cache_key,
             )?)),
             #[cfg(burn_metal_backend)]
             BurnDeviceSelection::Metal(device) => Ok(Self::Metal(BurnFeatureMatcherBackend::<
@@ -1753,9 +1688,7 @@ impl BurnFeatureMatcher {
                 device.clone(),
                 burn_device_label(&BurnDeviceSelection::Metal(device)),
                 Some(WGPU_CONV_IM2COL_BUDGET_BYTES),
-                pyramid,
                 masks,
-                map_cache_key,
             )?)),
         }
     }
@@ -1874,7 +1807,7 @@ impl BurnFeatureMatcher {
             (Self::Metal(matcher), PreparedTemplate::Metal(template)) => {
                 matcher.locate_local_prepared(image, template, threshold, origin_x, origin_y, scale)
             }
-            _ => anyhow::bail!("prepared template backend does not match matcher backend"),
+            _ => crate::bail!("prepared template backend does not match matcher backend"),
         }
     }
 }
@@ -1911,9 +1844,7 @@ where
         device: B::Device,
         device_label: String,
         chunk_budget_bytes: Option<usize>,
-        pyramid: &ColorMapPyramid,
         masks: &MaskSet,
-        map_cache_key: &str,
     ) -> Result<Self> {
         let encoder = FixedFeatureEncoder::<B>::new(workspace, device, device_label)?;
         let local_mask = mask_tensor::<B>(&masks.local, encoder.output_channels(), &encoder.device);
@@ -1973,17 +1904,13 @@ where
         scale: u32,
     ) -> Result<LocateResult> {
         let search = SearchTensorCache::<B>::from_rgba_image(image, &self.encoder)?;
-        self.locate_cached(
-            &search, template, None, false, threshold, origin_x, origin_y, scale,
-        )
+        self.locate_cached(&search, template, threshold, origin_x, origin_y, scale)
     }
 
     fn locate_cached(
         &self,
         search: &SearchTensorCache<B>,
         template: &BurnPreparedTemplate<B>,
-        precomputed_patch_energy: Option<Tensor<B, 4>>,
-        capture_score_map: bool,
         threshold: f32,
         origin_x: u32,
         origin_y: u32,
@@ -2009,9 +1936,7 @@ where
                 search,
                 &template.weighted_template,
                 &template.mask,
-                precomputed_patch_energy,
                 template.template_energy,
-                capture_score_map,
                 threshold,
                 origin_x,
                 origin_y,
@@ -2028,31 +1953,13 @@ where
             None::<Tensor<B, 1>>,
             ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
         );
-        let search_patch_energy = match precomputed_patch_energy {
-            Some(patch_energy) => patch_energy,
-            None => conv2d(
-                search.squared.clone(),
-                template.mask.clone(),
-                None::<Tensor<B, 1>>,
-                ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
-            ),
-        };
+        let search_patch_energy = conv2d(
+            search.squared.clone(),
+            template.mask.clone(),
+            None::<Tensor<B, 1>>,
+            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
+        );
         let normalized = numerator / (search_patch_energy * template.template_energy + 1e-6).sqrt();
-
-        if capture_score_map || burn_score_map_capture_enabled() {
-            let score_map = tensor4_to_flat_f32(normalized)?;
-            return Ok(locate_result_from_flat_scores(
-                score_map,
-                score_width,
-                score_height,
-                threshold,
-                origin_x,
-                origin_y,
-                scale,
-                template.width(),
-                template.height(),
-            ));
-        }
 
         let (best_score, best_left, best_top) =
             tensor_best_match(normalized, score_width, score_height)?;
@@ -2060,15 +1967,12 @@ where
             best_score,
             best_left,
             best_top,
-            score_width,
-            score_height,
             threshold,
             origin_x,
             origin_y,
             scale,
             template.width(),
             template.height(),
-            None,
         ))
     }
 }
@@ -2090,83 +1994,6 @@ where
             channels: dims[1],
         })
     }
-
-    fn from_persisted(
-        cache: PersistedTensorCache,
-        encoder: &FixedFeatureEncoder<B>,
-    ) -> Result<Self> {
-        if cache.channels != encoder.output_channels() {
-            anyhow::bail!(
-                "feature search tensor cache channel count {} does not match encoder output {}",
-                cache.channels,
-                encoder.output_channels()
-            );
-        }
-
-        let features = Tensor::<B, 4>::from_data(
-            TensorData::new(
-                cache.primary,
-                [
-                    1,
-                    cache.channels,
-                    cache.height as usize,
-                    cache.width as usize,
-                ],
-            ),
-            &encoder.device,
-        );
-        let squared = Tensor::<B, 4>::from_data(
-            TensorData::new(
-                cache.secondary,
-                [
-                    1,
-                    cache.channels,
-                    cache.height as usize,
-                    cache.width as usize,
-                ],
-            ),
-            &encoder.device,
-        );
-        Ok(Self {
-            features,
-            squared,
-            width: cache.width,
-            height: cache.height,
-            channels: cache.channels,
-        })
-    }
-
-    fn to_persisted(&self) -> Result<PersistedTensorCache> {
-        let features = tensor4_to_flat_f32(self.features.clone())?;
-        let squared = tensor4_to_flat_f32(self.squared.clone())?;
-        PersistedTensorCache::from_parts(self.width, self.height, self.channels, features, squared)
-    }
-}
-
-fn load_or_build_feature_search<B>(
-    workspace: &WorkspaceSnapshot,
-    prefix: &str,
-    map_cache_key: &str,
-    image: &RgbaImage,
-    encoder: &FixedFeatureEncoder<B>,
-) -> Result<SearchTensorCache<B>>
-where
-    B: Backend<FloatElem = f32>,
-    B::Device: Clone + Send + Sync + 'static,
-{
-    let cache_key = format!("{map_cache_key}-{}", encoder.cache_key()?);
-    let cache_path = tracker_tensor_cache_path(workspace, prefix, &cache_key);
-    if let Ok(Some(cache)) = load_tensor_cache(&cache_path) {
-        if let Ok(search) = SearchTensorCache::<B>::from_persisted(cache, encoder) {
-            return Ok(search);
-        }
-    }
-
-    let search = SearchTensorCache::<B>::from_rgba_image(image, encoder)?;
-    if let Ok(persisted) = search.to_persisted() {
-        let _ = save_tensor_cache(&cache_path, &persisted);
-    }
-    Ok(search)
 }
 
 fn mask_tensor<B>(mask: &GrayImage, channels: usize, device: &B::Device) -> Tensor<B, 4>
@@ -2220,9 +2047,7 @@ fn locate_cached_in_chunks<B>(
     search: &SearchTensorCache<B>,
     weighted_template: &Tensor<B, 4>,
     mask: &Tensor<B, 4>,
-    precomputed_patch_energy: Option<Tensor<B, 4>>,
     template_energy: f32,
-    capture_score_map: bool,
     threshold: f32,
     origin_x: u32,
     origin_y: u32,
@@ -2236,9 +2061,6 @@ where
 {
     let score_width = search.width - template_width + 1;
     let score_height = search.height - template_height + 1;
-    let capture_score_map = capture_score_map || burn_score_map_capture_enabled();
-    let mut score_map =
-        capture_score_map.then(|| Vec::with_capacity(score_width as usize * score_height as usize));
     let mut output_row = 0u32;
     let mut best_score = f32::MIN;
     let mut best_left = 0u32;
@@ -2263,17 +2085,12 @@ where
             None::<Tensor<B, 1>>,
             ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
         );
-        let search_patch_energy = match precomputed_patch_energy.as_ref() {
-            Some(cached) => (*cached)
-                .clone()
-                .narrow(2, output_row as usize, rows as usize),
-            None => conv2d(
-                squared_chunk,
-                mask.clone(),
-                None::<Tensor<B, 1>>,
-                ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
-            ),
-        };
+        let search_patch_energy = conv2d(
+            squared_chunk,
+            mask.clone(),
+            None::<Tensor<B, 1>>,
+            ConvOptions::new([1, 1], [0, 0], [1, 1], 1),
+        );
         let normalized = numerator / (search_patch_energy * template_energy + 1e-6).sqrt();
         let chunk_scores = tensor4_to_flat_f32(normalized)?;
         if let Some((chunk_best_score, chunk_best_left, chunk_best_top)) =
@@ -2286,9 +2103,6 @@ where
             }
         }
         let produced_rows = (chunk_scores.len() / score_width.max(1) as usize) as u32;
-        if let Some(score_map) = score_map.as_mut() {
-            score_map.extend(chunk_scores);
-        }
         output_row += produced_rows.max(1);
     }
 
@@ -2296,15 +2110,12 @@ where
         best_score,
         best_left,
         best_top,
-        score_width,
-        score_height,
         threshold,
         origin_x,
         origin_y,
         scale,
         template_width,
         template_height,
-        score_map,
     ))
 }
 
@@ -2315,7 +2126,7 @@ where
     tensor
         .into_data()
         .to_vec::<f32>()
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .map_err(|error| crate::app_error!(error.to_string()))
 }
 
 fn tensor_best_match<B>(
@@ -2363,56 +2174,20 @@ fn best_match_in_flat_scores(score_map: &[f32], score_width: u32) -> Option<(f32
 fn empty_locate_result() -> LocateResult {
     LocateResult {
         best_score: f32::MIN,
-        score_width: 0,
-        score_height: 0,
-        score_map: None,
         accepted: None,
     }
-}
-
-fn locate_result_from_flat_scores(
-    score_map: Vec<f32>,
-    score_width: u32,
-    score_height: u32,
-    threshold: f32,
-    origin_x: u32,
-    origin_y: u32,
-    scale: u32,
-    template_width: u32,
-    template_height: u32,
-) -> LocateResult {
-    let (best_score, best_left, best_top) =
-        best_match_in_flat_scores(&score_map, score_width).unwrap_or((f32::MIN, 0, 0));
-
-    locate_result_from_best(
-        best_score,
-        best_left,
-        best_top,
-        score_width,
-        score_height,
-        threshold,
-        origin_x,
-        origin_y,
-        scale,
-        template_width,
-        template_height,
-        Some(score_map),
-    )
 }
 
 fn locate_result_from_best(
     best_score: f32,
     best_left: u32,
     best_top: u32,
-    score_width: u32,
-    score_height: u32,
     threshold: f32,
     origin_x: u32,
     origin_y: u32,
     scale: u32,
     template_width: u32,
     template_height: u32,
-    score_map: Option<Vec<f32>>,
 ) -> LocateResult {
     let accepted = if best_score >= threshold {
         Some(MatchCandidate {
@@ -2428,9 +2203,6 @@ fn locate_result_from_best(
 
     LocateResult {
         best_score,
-        score_width,
-        score_height,
-        score_map,
         accepted,
     }
 }
@@ -2566,9 +2338,6 @@ impl BurnTrackerInner {
             if let Some(candidate) = template_candidate.clone() {
                 global_result = Some(LocateResult {
                     best_score: candidate.score,
-                    score_width: 0,
-                    score_height: 0,
-                    score_map: None,
                     accepted: Some(candidate.clone()),
                 });
                 refine_result = global_result.clone();
@@ -2583,9 +2352,6 @@ impl BurnTrackerInner {
             } else {
                 global_result = Some(LocateResult {
                     best_score: f32::MIN,
-                    score_width: 0,
-                    score_height: 0,
-                    score_map: None,
                     accepted: None,
                 });
             }
@@ -2867,6 +2633,7 @@ mod tests {
     use std::sync::OnceLock;
 
     use super::*;
+    use crate::error::Result;
     use crate::{
         config::{AiDevicePreference, AppConfig},
         domain::tracker::TrackingSource,
@@ -2880,7 +2647,6 @@ mod tests {
             stress_env_u32, stress_env_usize, timed, write_stress_report,
         },
     };
-    use anyhow::{Result, bail};
     use image::{GrayImage, RgbaImage};
 
     const MAX_ROUNDS: usize = 6;
@@ -2984,14 +2750,8 @@ mod tests {
         let mut config = fixture.config.ai.clone();
         config.device = AiDevicePreference::Vulkan;
         config.device_index = ordinal;
-        BurnFeatureMatcher::new(
-            &fixture.workspace,
-            &config,
-            &fixture.color_pyramid,
-            &fixture.masks,
-            &fixture.map_cache_key,
-        )
-        .expect("failed to create Vulkan feature matcher")
+        BurnFeatureMatcher::new(&fixture.workspace, &config, &fixture.masks)
+            .expect("failed to create Vulkan feature matcher")
     }
 
     fn template_global_locator_for_vulkan(
@@ -3173,13 +2933,8 @@ mod tests {
                     &fixture.config,
                     target,
                 );
-                let frame = simulate_runtime_frame(
-                    fixture,
-                    matcher,
-                    global_locator,
-                    &capture,
-                    &mut state,
-                )?;
+                let frame =
+                    simulate_runtime_frame(fixture, matcher, global_locator, &capture, &mut state)?;
                 stats.local_total += 1;
                 if within_tolerance(frame.world, target, LOCAL_TOLERANCE) {
                     stats.local_success += 1;
@@ -3212,11 +2967,7 @@ mod tests {
         print_perf_ms("ai/vulkan", "matcher_init", init_elapsed);
         let (global_locator, global_init_elapsed) =
             timed(|| template_global_locator_for_vulkan(fixture, ordinal));
-        print_perf_ms(
-            "ai/vulkan",
-            "template_global_init",
-            global_init_elapsed,
-        );
+        print_perf_ms("ai/vulkan", "template_global_init", global_init_elapsed);
 
         let mut best_global = 0.0f32;
         let mut best_local = 0.0f32;
@@ -3273,7 +3024,7 @@ mod tests {
         let aggregate_global = aggregate.global_accuracy();
         let aggregate_local = aggregate.local_accuracy();
         let aggregate_overall = aggregate.overall_accuracy();
-        bail!(
+        crate::bail!(
             "AI Vulkan global accuracy stayed below target after {} rounds (required minimum rounds before success: {}); target global >= {:.0}%, aggregate global/local/overall {:.2}%/{:.2}%/{:.2}%, best global {:.2}%, best local {:.2}%, best overall {:.2}%",
             max_rounds,
             min_rounds,

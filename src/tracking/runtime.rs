@@ -4,7 +4,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use derive_more::Display;
 use serde::{Deserialize, Serialize};
@@ -12,6 +11,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     domain::tracker::{PositionEstimate, TrackerEngineKind, TrackerLifecycle, TrackingSource},
+    error::Result,
     resources::WorkspaceSnapshot,
     tracking::{
         ai::BurnTrackerWorker, debug::TrackingDebugSnapshot, template::TemplateTrackerWorker,

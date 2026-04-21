@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use tracing::info;
 
 use crate::config::{TemplateInputMode, TemplateTrackingConfig};
+use crate::error::Result;
 use crate::{
     config::AppConfig,
     domain::{
@@ -33,7 +34,6 @@ use crate::{
         },
     },
 };
-use anyhow::Result;
 use burn::{
     backend::ndarray::NdArrayDevice,
     tensor::{
@@ -208,7 +208,7 @@ impl TemplateTrackerWorker {
         );
         let config = workspace.config.clone();
         if !config.minimap.is_configured() {
-            anyhow::bail!("小地图区域尚未配置，请先完成小地图取区");
+            crate::bail!("小地图区域尚未配置，请先完成小地图取区");
         }
         let capture = DesktopCapture::from_absolute_region(&config.minimap)?;
         let presence_detector = MinimapPresenceDetector::new(workspace.as_ref())?;
@@ -1053,10 +1053,6 @@ impl TemplateGlobalLocator {
         )?;
         Ok(result.accepted)
     }
-
-    pub(crate) fn device_label(&self) -> String {
-        self.matcher.device_label()
-    }
 }
 
 pub fn rebuild_template_engine_cache(workspace: &WorkspaceSnapshot) -> Result<()> {
@@ -1544,7 +1540,7 @@ impl TemplateMatcher {
             (Self::Metal(matcher), PreparedTemplate::Metal(template)) => {
                 matcher.locate_coarse_prepared(template, threshold, origin_x, origin_y, scale)
             }
-            _ => anyhow::bail!("prepared template backend does not match matcher backend"),
+            _ => crate::bail!("prepared template backend does not match matcher backend"),
         }
     }
 
@@ -1572,7 +1568,7 @@ impl TemplateMatcher {
             (Self::Metal(matcher), PreparedTemplate::Metal(template)) => {
                 matcher.locate_global_region_prepared(region, template, threshold, scale)
             }
-            _ => anyhow::bail!("prepared template backend does not match matcher backend"),
+            _ => crate::bail!("prepared template backend does not match matcher backend"),
         }
     }
 
@@ -1599,7 +1595,7 @@ impl TemplateMatcher {
             #[cfg(burn_metal_backend)]
             (Self::Metal(matcher), PreparedTemplate::Metal(template)) => matcher
                 .locate_global_crop_prepared(image, template, threshold, origin_x, origin_y, scale),
-            _ => anyhow::bail!("prepared template backend does not match matcher backend"),
+            _ => crate::bail!("prepared template backend does not match matcher backend"),
         }
     }
 
@@ -1627,7 +1623,7 @@ impl TemplateMatcher {
             (Self::Metal(matcher), PreparedTemplate::Metal(template)) => {
                 matcher.locate_local_region_prepared(region, template, threshold, scale)
             }
-            _ => anyhow::bail!("prepared template backend does not match matcher backend"),
+            _ => crate::bail!("prepared template backend does not match matcher backend"),
         }
     }
 
@@ -1658,7 +1654,7 @@ impl TemplateMatcher {
             (Self::Metal(matcher), PreparedTemplate::Metal(template)) => {
                 matcher.locate_local_prepared(image, template, threshold, origin_x, origin_y, scale)
             }
-            _ => anyhow::bail!("prepared template backend does not match matcher backend"),
+            _ => crate::bail!("prepared template backend does not match matcher backend"),
         }
     }
 }
@@ -2088,7 +2084,7 @@ where
 
     fn from_persisted(cache: PersistedTensorCache, device: &B::Device) -> Result<Self> {
         if cache.channels != 3 {
-            anyhow::bail!(
+            crate::bail!(
                 "template search tensor cache channel count {} is invalid",
                 cache.channels
             );
@@ -2126,7 +2122,7 @@ where
         let right = region.origin_x.saturating_add(region.width);
         let bottom = region.origin_y.saturating_add(region.height);
         if right > self.width || bottom > self.height {
-            anyhow::bail!(
+            crate::bail!(
                 "template search crop {}x{} @ {}, {} exceeds search bounds {}x{}",
                 region.width,
                 region.height,
@@ -2389,7 +2385,7 @@ where
     tensor
         .into_data()
         .to_vec::<f32>()
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .map_err(|error| crate::app_error!(error.to_string()))
 }
 
 fn tensor_best_match<B>(
@@ -2518,6 +2514,7 @@ mod tests {
     use std::sync::OnceLock;
 
     use super::*;
+    use crate::error::Result;
     use crate::{
         config::{AiDevicePreference, AppConfig},
         domain::tracker::TrackingSource,
@@ -2532,7 +2529,6 @@ mod tests {
             write_stress_report,
         },
     };
-    use anyhow::{Result, bail};
     use image::{GrayImage, RgbaImage};
 
     const MAX_ROUNDS: usize = 6;
@@ -3295,7 +3291,7 @@ mod tests {
         let aggregate_global = aggregate.global_accuracy();
         let aggregate_local = aggregate.local_accuracy();
         let aggregate_overall = aggregate.overall_accuracy();
-        bail!(
+        crate::bail!(
             "template Vulkan stress accuracy stayed below target after {} rounds (required minimum rounds before success: {}); target global/local/overall >= {:.0}%/{:.0}%/{:.0}%, aggregate global/local/overall {:.2}%/{:.2}%/{:.2}%, best global {:.2}%, best local {:.2}%, best overall {:.2}%",
             max_rounds,
             min_rounds,

@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
 use tracing::info;
 
 use crate::{
     config::{AppConfig, CONFIG_FILE_NAME, load_existing_config},
     domain::{geometry::MapDimensions, route::RouteDocument},
+    error::Result,
     resources::{BwikiCachePaths, RouteRepository, default_map_dimensions},
 };
 

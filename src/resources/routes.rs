@@ -4,11 +4,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context as _, Result};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::domain::route::{RouteDocument, RouteId, RouteMetadata, RoutePointId};
+use crate::{
+    domain::route::{RouteDocument, RouteId, RouteMetadata, RoutePointId},
+    error::{ContextExt as _, Result},
+};
 
 #[derive(Debug, Default, Clone)]
 pub struct RouteImportReport {

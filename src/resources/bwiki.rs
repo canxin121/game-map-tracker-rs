@@ -10,7 +10,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context as _, Result, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use image::{
     GrayImage, Luma, RgbaImage,
@@ -22,7 +21,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 use ureq::Agent;
 
-use crate::domain::geometry::{MapDimensions, WorldPoint};
+use crate::{
+    domain::geometry::{MapDimensions, WorldPoint},
+    error::{ContextExt as _, Result},
+};
 
 const USER_AGENT: &str = "game-map-tracker-rs-bwiki-runtime/1.0";
 const DATASET_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -350,7 +352,9 @@ impl BwikiResourceManager {
             thread::Builder::new()
                 .name(format!("bwiki-cache-{index}"))
                 .spawn(move || run_bwiki_worker(worker_inner, worker_rx))
-                .map_err(|error| anyhow!("failed to spawn BWiki cache worker: {error}"))?;
+                .map_err(|error| {
+                    crate::app_error!("failed to spawn BWiki cache worker: {error}")
+                })?;
         }
 
         info!(cache_root = %inner.cache.root.display(), worker_count = 4, "BWiki resource manager ready");
@@ -659,7 +663,7 @@ fn overlay_tracking_poi_icons(
 
     for mark_type in TRACKING_POI_MARK_TYPES {
         let Some(definition) = dataset.type_by_mark_type(mark_type).cloned() else {
-            bail!("missing BWiki tracking POI definition for mark type {mark_type}");
+            crate::bail!("missing BWiki tracking POI definition for mark type {mark_type}");
         };
         let Some(points) = dataset.points_by_type.get(&mark_type) else {
             continue;
@@ -706,7 +710,7 @@ fn overlay_tracking_poi_icons_rgba(
 
     for mark_type in TRACKING_POI_MARK_TYPES {
         let Some(definition) = dataset.type_by_mark_type(mark_type).cloned() else {
-            bail!("missing BWiki tracking POI definition for mark type {mark_type}");
+            crate::bail!("missing BWiki tracking POI definition for mark type {mark_type}");
         };
         let Some(points) = dataset.points_by_type.get(&mark_type) else {
             continue;
@@ -747,7 +751,7 @@ fn wait_for_tracking_dataset(manager: &BwikiResourceManager) -> Result<Arc<Bwiki
             let last_error = manager
                 .last_error()
                 .unwrap_or_else(|| "no bwiki worker error reported".to_owned());
-            bail!("timed out waiting for BWiki dataset; last_error={last_error}");
+            crate::bail!("timed out waiting for BWiki dataset; last_error={last_error}");
         }
         thread::sleep(TRACKING_POI_ICON_POLL_INTERVAL);
     }
@@ -769,7 +773,7 @@ fn wait_for_tracking_icon_path(
             let last_error = manager
                 .last_error()
                 .unwrap_or_else(|| "no bwiki worker error reported".to_owned());
-            bail!(
+            crate::bail!(
                 "timed out waiting for cached tracking POI icon {} ({}) at mark type {}; last_error={last_error}",
                 definition.name,
                 definition.icon_url,
@@ -1112,7 +1116,7 @@ fn tile_is_inside_bounds(zoom: u8, x: i32, y: i32) -> bool {
 
 fn download_tile(cache: &BwikiCachePaths, zoom: u8, x: i32, y: i32) -> Result<PathBuf> {
     if !tile_is_inside_bounds(zoom, x, y) {
-        bail!("requested tile z={zoom} x={x} y={y} is outside configured bounds");
+        crate::bail!("requested tile z={zoom} x={x} y={y} is outside configured bounds");
     }
 
     let target = tile_cache_path(cache, zoom, x, y);
@@ -1157,7 +1161,7 @@ fn download_tile(cache: &BwikiCachePaths, zoom: u8, x: i32, y: i32) -> Result<Pa
 
 fn download_icon(cache: &BwikiCachePaths, mark_type: u32, icon_url: &str) -> Result<PathBuf> {
     if icon_url.trim().is_empty() {
-        bail!("icon URL is empty for mark type {mark_type}");
+        crate::bail!("icon URL is empty for mark type {mark_type}");
     }
 
     let target = icon_cache_path(cache, mark_type, icon_url);

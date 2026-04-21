@@ -3586,7 +3586,6 @@ dependencies = [
 name = "game-map-tracker-rs"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "burn",
  "crossbeam-channel",
  "cubecl-cuda",

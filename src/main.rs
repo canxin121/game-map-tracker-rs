@@ -1,7 +1,7 @@
 #[cfg(debug_assertions)]
 use std::ffi::OsStr;
 
-fn main() -> anyhow::Result<()> {
+fn main() -> game_map_tracker_rs::error::Result<()> {
     #[cfg(debug_assertions)]
     {
         let mut args = std::env::args_os();

@@ -1,9 +1,12 @@
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
 use image::RgbaImage;
 
-use crate::{config::CaptureRegion, tracking::capture::DesktopCapture};
+use crate::{
+    config::CaptureRegion,
+    error::{ContextExt as _, Result},
+    tracking::capture::DesktopCapture,
+};
 
 pub(super) fn capture_region_rgba(region: &CaptureRegion) -> Result<RgbaImage> {
     DesktopCapture::from_absolute_region(region)?.capture_rgba()

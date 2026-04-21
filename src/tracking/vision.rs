@@ -1,6 +1,5 @@
 use std::cmp;
 
-use anyhow::{Context as _, Result, bail};
 use image::{
     GrayImage, ImageBuffer, Luma, Rgba, RgbaImage,
     imageops::{FilterType, crop_imm, resize},
@@ -16,6 +15,7 @@ use strum::Display;
 use crate::{
     config::AppConfig,
     domain::{geometry::WorldPoint, tracker::TrackerEngineKind},
+    error::{ContextExt as _, Result},
     resources::{
         WorkspaceSnapshot, load_logic_map_with_tracking_poi_scaled_image,
         load_logic_map_with_tracking_poi_scaled_rgba_image,
@@ -816,7 +816,7 @@ pub fn search_region_around_center(
     template_height: u32,
 ) -> Result<SearchRegion> {
     if image_width <= template_width || image_height <= template_height {
-        bail!("search image is smaller than template");
+        crate::bail!("search image is smaller than template");
     }
 
     let half_w = template_width / 2;
@@ -903,7 +903,7 @@ pub fn crop_search_region(image: &GrayImage, region: SearchRegion) -> Result<Sea
     if image.width() < region.origin_x.saturating_add(region.width)
         || image.height() < region.origin_y.saturating_add(region.height)
     {
-        bail!("search region is outside image bounds");
+        crate::bail!("search region is outside image bounds");
     }
 
     let image = crop_imm(
@@ -925,7 +925,7 @@ pub fn crop_search_region_rgba(image: &RgbaImage, region: SearchRegion) -> Resul
     if image.width() < region.origin_x.saturating_add(region.width)
         || image.height() < region.origin_y.saturating_add(region.height)
     {
-        bail!("search region is outside image bounds");
+        crate::bail!("search region is outside image bounds");
     }
 
     let image = crop_imm(
@@ -1193,7 +1193,7 @@ fn centered_crop_origin(
     height: u32,
 ) -> Result<(u32, u32)> {
     if image.width() < width || image.height() < height {
-        bail!("color image is smaller than requested crop");
+        crate::bail!("color image is smaller than requested crop");
     }
 
     let left = center

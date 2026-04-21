@@ -1,8 +1,9 @@
 use std::{fmt, fs, path::Path, str::FromStr};
 
-use anyhow::{Context as _, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use crate::error::{ContextExt as _, Result};
 
 pub const CONFIG_FILE_NAME: &str = "config.toml";
 const DEFAULT_TELEPORT_LINK_DISTANCE: f32 = 450.0;

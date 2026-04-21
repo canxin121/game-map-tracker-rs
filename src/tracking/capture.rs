@@ -1,10 +1,12 @@
-use anyhow::{Context as _, Result, anyhow, bail};
 use image::{DynamicImage, GrayImage, RgbaImage};
 use imageproc::contrast::equalize_histogram;
 use screenshots::{Screen, display_info::DisplayInfo};
 use serde::{Deserialize, Serialize};
 
-use crate::config::CaptureRegion;
+use crate::{
+    config::CaptureRegion,
+    error::{ContextExt as _, Result},
+};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScreenCaptureRegion {
@@ -42,11 +44,12 @@ pub struct DesktopCapture {
 
 impl DesktopCapture {
     pub fn from_absolute_region(region: &CaptureRegion) -> Result<Self> {
-        let screen = Screen::all()?
+        let screen = Screen::all()
+            .map_err(|error| crate::app_error!(error.to_string()))?
             .into_iter()
             .find(|screen| contains_point(screen.display_info, region.left, region.top))
             .ok_or_else(|| {
-                anyhow!(
+                crate::app_error!(
                     "no display contains capture point ({}, {})",
                     region.left,
                     region.top
@@ -71,6 +74,7 @@ impl DesktopCapture {
                 self.region.width,
                 self.region.height,
             )
+            .map_err(|error| crate::app_error!(error.to_string()))
             .context("failed to capture raw minimap region")?;
 
         let (width, height) = rgba.dimensions();
@@ -92,7 +96,7 @@ fn contains_point(display: DisplayInfo, x: i32, y: i32) -> bool {
 
 fn validate_region(region: ScreenCaptureRegion, display: DisplayInfo) -> Result<()> {
     if region.relative_left < 0 || region.relative_top < 0 {
-        bail!(
+        crate::bail!(
             "capture region ({}, {}) falls outside the selected display origin ({}, {})",
             region.relative_left,
             region.relative_top,
@@ -104,7 +108,7 @@ fn validate_region(region: ScreenCaptureRegion, display: DisplayInfo) -> Result<
     let right = region.relative_left + region.width as i32;
     let bottom = region.relative_top + region.height as i32;
     if right > display.width as i32 || bottom > display.height as i32 {
-        bail!(
+        crate::bail!(
             "capture region {}x{} exceeds display bounds {}x{}",
             region.width,
             region.height,
