@@ -8,14 +8,19 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));
     let generated_path = out_dir.join("embedded_assets.rs");
     let icon_assets_root = manifest_dir.join("assets").join("icons");
+    let branding_assets_root = manifest_dir.join("assets").join("branding");
     let tracker_encoder_path = manifest_dir
         .join("models")
         .join("tracker_encoder.safetensors");
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    for root in [&icon_assets_root] {
+    for root in [&icon_assets_root, &branding_assets_root] {
         println!("cargo:rerun-if-changed={}", root.display());
     }
     println!("cargo:rerun-if-changed={}", tracker_encoder_path.display());
+
+    if target_os == "windows" {
+        let _ = embed_resource::compile(branding_assets_root.join("app.rc"), embed_resource::NONE);
+    }
 
     println!("cargo:rustc-check-cfg=cfg(burn_cuda_backend)");
     println!("cargo:rustc-check-cfg=cfg(burn_vulkan_backend)");
