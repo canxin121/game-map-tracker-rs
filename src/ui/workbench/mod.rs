@@ -13,7 +13,7 @@ mod theme;
 mod tracker_pip;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env, fs,
     path::PathBuf,
     sync::Arc,
@@ -404,9 +404,26 @@ impl AsyncTaskStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ToastLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ToastMessage {
+    pub(super) id: u64,
+    pub(super) level: ToastLevel,
+    pub(super) text: SharedString,
+}
+
 const BWIKI_TILE_CACHE_MAX_ITEMS: usize = 192;
 const BWIKI_TILE_CACHE_MAX_BYTES: usize = 96 * 1024 * 1024;
 const MAP_CLICK_DRAG_THRESHOLD: f32 = 4.0;
+const TOAST_MAX_ITEMS: usize = 4;
+const TOAST_TTL: Duration = Duration::from_secs(5);
 const BWIKI_PLANNER_EXACT_LIMIT: usize = 15;
 const BWIKI_PLANNER_HIERARCHICAL_LIMIT: usize = 768;
 const BWIKI_PLANNER_CLUSTER_TARGET_SIZE: usize = 96;
@@ -476,6 +493,8 @@ pub struct TrackerWorkbench {
     pub(super) tracker_point_popup_enabled: bool,
     pub(super) debug_mode_enabled: bool,
     pub(super) test_case_capture_enabled: bool,
+    pub(super) toast_queue: VecDeque<ToastMessage>,
+    next_toast_id: u64,
     tracker_pending_action: Option<TrackerPendingAction>,
     tracker_status_text: SharedString,
     route_import_status: AsyncTaskStatus,
@@ -750,6 +769,8 @@ impl TrackerWorkbench {
                     tracker_point_popup_enabled,
                     debug_mode_enabled,
                     test_case_capture_enabled,
+                    toast_queue: VecDeque::new(),
+                    next_toast_id: 0,
                     tracker_pending_action: None,
                     tracker_status_text: "追踪未启动。".into(),
                     route_import_status: AsyncTaskStatus::idle("尚未导入路线文件。"),
@@ -889,6 +910,8 @@ impl TrackerWorkbench {
                     tracker_point_popup_enabled,
                     debug_mode_enabled,
                     test_case_capture_enabled,
+                    toast_queue: VecDeque::new(),
+                    next_toast_id: 0,
                     tracker_pending_action: None,
                     tracker_status_text: "追踪未启动。".into(),
                     route_import_status: AsyncTaskStatus::idle("尚未导入路线文件。"),
@@ -1670,6 +1693,7 @@ impl TrackerWorkbench {
 
     pub(super) fn is_tracking_active(&self) -> bool {
         self.tracker_session.is_some()
+            || matches!(self.tracker_pending_action, Some(TrackerPendingAction::Stopping))
     }
 
     fn tracking_debug_enabled(&self) -> bool {
@@ -1696,6 +1720,63 @@ impl TrackerWorkbench {
     ) {
         self.tracker_pip_probe_summary = probe_summary.into();
         self.tracker_pip_locate_summary = locate_summary.into();
+    }
+
+    fn push_toast(
+        &mut self,
+        level: ToastLevel,
+        message: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let text = message.into();
+        self.toast_queue
+            .retain(|toast| !(toast.level == level && toast.text == text));
+
+        self.next_toast_id += 1;
+        let toast_id = self.next_toast_id;
+        self.toast_queue.push_back(ToastMessage {
+            id: toast_id,
+            level,
+            text,
+        });
+        while self.toast_queue.len() > TOAST_MAX_ITEMS {
+            self.toast_queue.pop_front();
+        }
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOAST_TTL).await;
+            this.update(cx, |this, cx| {
+                if this.dismiss_toast(toast_id) {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+
+        cx.notify();
+    }
+
+    fn dismiss_toast(&mut self, toast_id: u64) -> bool {
+        let previous_len = self.toast_queue.len();
+        self.toast_queue.retain(|toast| toast.id != toast_id);
+        self.toast_queue.len() != previous_len
+    }
+
+    fn push_info_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.push_toast(ToastLevel::Info, message, cx);
+    }
+
+    fn push_success_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.push_toast(ToastLevel::Success, message, cx);
+    }
+
+    fn push_warning_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.push_toast(ToastLevel::Warning, message, cx);
+    }
+
+    fn push_error_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.push_toast(ToastLevel::Error, message, cx);
     }
 
     pub(super) fn is_tracker_transition_pending(&self) -> bool {
@@ -2555,7 +2636,7 @@ impl TrackerWorkbench {
         if !self.is_tracking_active() {
             self.rebuild_preview();
         }
-        if self.persist_group(&group_id, "连线编辑已保存") {
+        if self.persist_group(&group_id, "连线编辑已保存", cx) {
             self.sync_editor_from_selection(window, cx);
         }
     }
@@ -3084,7 +3165,7 @@ impl TrackerWorkbench {
         set_input_value(&self.marker_form.y, format!("{:.0}", world.y), window, cx);
         self.suspend_point_autosave = false;
 
-        if self.persist_group(&group_id, &format!("节点「{label}」位置已更新")) {
+        if self.persist_group(&group_id, &format!("节点「{label}」位置已更新"), cx) {
             self.sync_editor_from_selection(window, cx);
         }
         true
@@ -3621,7 +3702,7 @@ impl TrackerWorkbench {
         let created_point_count = route.points.len();
         self.route_groups.push(route);
         self.sync_workspace_routes_snapshot();
-        if !self.persist_group(&group_id, "规划路线已保存") {
+        if !self.persist_group(&group_id, "规划路线已保存", cx) {
             self.route_groups.retain(|group| group.id != group_id);
             self.sync_workspace_routes_snapshot();
             return;
@@ -3967,7 +4048,7 @@ impl TrackerWorkbench {
             }
         }
 
-        if self.persist_group(&group_id, "路线已保存") {
+        if self.persist_group(&group_id, "路线已保存", cx) {
             self.editing_group_id = None;
             if self.pending_new_group_id.as_ref() == Some(&group_id) {
                 self.pending_new_group_id = None;
@@ -4433,6 +4514,7 @@ impl TrackerWorkbench {
         if self.persist_group(
             &group_id,
             &format!("已在第 {} 位插入节点「{}」", bounded_index + 1, label),
+            cx,
         ) {
             self.sync_editor_from_selection(window, cx);
         }
@@ -4575,7 +4657,7 @@ impl TrackerWorkbench {
             self.rebuild_preview();
         }
 
-        if self.persist_group(&group_id, &format!("节点「{label}」{action}")) {
+        if self.persist_group(&group_id, &format!("节点「{label}」{action}"), cx) {
             self.sync_editor_from_selection(window, cx);
         }
     }
@@ -4674,7 +4756,7 @@ impl TrackerWorkbench {
             self.rebuild_preview();
         }
 
-        if self.persist_group(&group_id, &format!("节点「{label}」{action}")) {
+        if self.persist_group(&group_id, &format!("节点「{label}」{action}"), cx) {
             self.sync_editor_from_selection(window, cx);
         }
     }
@@ -4762,6 +4844,7 @@ impl TrackerWorkbench {
 
         if !self.workspace.config.minimap.is_configured() {
             self.status_text = "小地图区域尚未配置。请先完成“小地图取区”后再启动追踪。".into();
+            self.push_warning_toast(self.status_text.clone(), cx);
             cx.notify();
             return;
         }
@@ -4770,6 +4853,7 @@ impl TrackerWorkbench {
         if !probe.enabled || !probe.is_configured() {
             self.status_text =
                 "F1-P 标签探针尚未完成配置。请先通过“标签取区”完成建模并确认保存。".into();
+            self.push_warning_toast(self.status_text.clone(), cx);
             cx.notify();
             return;
         }
@@ -4779,6 +4863,7 @@ impl TrackerWorkbench {
                 "F1-P 标签模型尚未就绪：{error:#}。请重新执行“标签取区”，完成建模预览后再保存。"
             )
             .into();
+            self.push_warning_toast(self.status_text.clone(), cx);
             cx.notify();
             return;
         }
@@ -4808,6 +4893,7 @@ impl TrackerWorkbench {
                 self.tracker_status_text =
                     format!("正在启动 {} 追踪线程。", self.selected_engine).into();
                 self.status_text = self.tracker_status_text.clone();
+                self.push_info_toast(self.tracker_status_text.clone(), cx);
             }
             Err(error) => {
                 error!(
@@ -4820,6 +4906,7 @@ impl TrackerWorkbench {
                 self.reset_tracker_pip_debug_summaries();
                 self.tracker_status_text = format!("启动追踪失败：{error:#}").into();
                 self.status_text = self.tracker_status_text.clone();
+                self.push_error_toast(self.tracker_status_text.clone(), cx);
             }
         }
     }
@@ -4828,16 +4915,46 @@ impl TrackerWorkbench {
         info!(preserve_preview, "stopping tracker session from workbench");
         self.tracker_pending_action = Some(TrackerPendingAction::Stopping);
         self.tracker_status_text = "正在停止追踪线程。".into();
-        self.release_tracker_session();
-        self.clear_debug_snapshot(cx);
-        self.tracker_pending_action = None;
-        self.tracker_lifecycle = TrackerLifecycle::Idle;
-        self.reset_tracker_pip_debug_summaries();
-        self.tracker_status_text = "追踪线程已停止。".into();
         self.status_text = self.tracker_status_text.clone();
-        if !preserve_preview {
-            self.rebuild_preview();
-        }
+        self.clear_debug_snapshot(cx);
+        self.reset_tracker_pip_debug_summaries();
+        self.push_info_toast(self.tracker_status_text.clone(), cx);
+
+        let Some(mut session) = self.tracker_session.take() else {
+            self.tracker_pending_action = None;
+            self.tracker_lifecycle = TrackerLifecycle::Idle;
+            self.tracker_status_text = "追踪线程已停止。".into();
+            self.status_text = self.tracker_status_text.clone();
+            self.push_info_toast(self.tracker_status_text.clone(), cx);
+            if !preserve_preview {
+                self.rebuild_preview();
+            }
+            return;
+        };
+
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    debug!("releasing tracker session");
+                    session.stop();
+                })
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.tracker_pending_action = None;
+                this.tracker_lifecycle = TrackerLifecycle::Idle;
+                this.tracker_status_text = "追踪线程已停止。".into();
+                this.status_text = this.tracker_status_text.clone();
+                this.push_info_toast(this.tracker_status_text.clone(), cx);
+                if !preserve_preview {
+                    this.rebuild_preview();
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn release_tracker_session(&mut self) {
@@ -4898,6 +5015,7 @@ impl TrackerWorkbench {
                     self.reset_tracker_pip_debug_summaries();
                     self.tracker_status_text = format!("追踪线程异常：{message}").into();
                     self.status_text = self.tracker_status_text.clone();
+                    self.push_error_toast(self.tracker_status_text.clone(), cx);
                     should_release_session = true;
                 }
             }
@@ -5243,7 +5361,7 @@ impl TrackerWorkbench {
         };
 
         let persisted = if announce {
-            self.persist_group(&target_group_id, "路线已保存")
+            self.persist_group(&target_group_id, "路线已保存", cx)
         } else {
             self.persist_group_silently(&target_group_id)
         };
@@ -5297,7 +5415,7 @@ impl TrackerWorkbench {
         }
 
         let persisted = if announce {
-            self.persist_group(&group_id, "节点已保存")
+            self.persist_group(&group_id, "节点已保存", cx)
         } else {
             self.persist_group_silently(&group_id)
         };
@@ -5539,7 +5657,7 @@ impl TrackerWorkbench {
         self.confirming_delete_point_id = None;
         self.clear_selected_point_move_state();
 
-        if self.persist_group(&group_id, &format!("节点「{label}」已删除")) {
+        if self.persist_group(&group_id, &format!("节点「{label}」已删除"), cx) {
             self.sync_editor_from_selection(window, cx);
         }
     }
@@ -5901,6 +6019,7 @@ impl TrackerWorkbench {
             let message = format!("请先停止当前追踪，再重建{}缓存。", kind.label());
             *self.cache_rebuild_status_mut(kind) = AsyncTaskStatus::failed(message.clone());
             self.status_text = message.into();
+            self.push_warning_toast(self.status_text.clone(), cx);
             return;
         }
 
@@ -5910,6 +6029,7 @@ impl TrackerWorkbench {
                 let detailed = format!("无法重建{}缓存：{message}", kind.label());
                 *self.cache_rebuild_status_mut(kind) = AsyncTaskStatus::failed(detailed.clone());
                 self.status_text = detailed.into();
+                self.push_error_toast(self.status_text.clone(), cx);
                 return;
             }
         };
@@ -5921,6 +6041,7 @@ impl TrackerWorkbench {
         info!(kind = ?kind, "starting tracker cache rebuild");
         *self.cache_rebuild_status_mut(kind) = AsyncTaskStatus::working(started.clone());
         self.status_text = started.into();
+        self.push_info_toast(self.status_text.clone(), cx);
 
         cx.spawn_in(window, async move |this, cx| {
             let result = cx.background_executor().spawn(async move {
@@ -5938,14 +6059,16 @@ impl TrackerWorkbench {
                         let message = format!("{}缓存已按当前表单参数重建完成。", kind.label());
                         *this.cache_rebuild_status_mut(kind) =
                             AsyncTaskStatus::succeeded(message.clone());
-                        this.status_text = message.into();
+                        this.status_text = message.clone().into();
+                        this.push_success_toast(message, cx);
                     }
                     Err(error) => {
                         error!(kind = ?kind, error = %error, "tracker cache rebuild failed");
                         let message = format!("重建{}缓存失败：{error:#}", kind.label());
                         *this.cache_rebuild_status_mut(kind) =
                             AsyncTaskStatus::failed(message.clone());
-                        this.status_text = message.into();
+                        this.status_text = message.clone().into();
+                        this.push_error_toast(message, cx);
                     }
                 }
                 cx.notify();
@@ -6016,12 +6139,11 @@ impl TrackerWorkbench {
                 self.sync_config_form_from_workspace(window, cx);
                 self.refresh_tracker_pip_window(cx);
                 self.refresh_tracker_pip_capture_panel_window(cx);
-                self.status_text = if let Some(error) = model_clear_error {
+                let message = if let Some(error) = model_clear_error.as_ref() {
                     format!(
                         "配置已保存到 {}，但清理旧 F1-P 模型失败：{error:#}。请先重新执行“标签取区”，确认模型与当前区域一致后再启动追踪。",
                         path.display()
                     )
-                    .into()
                 } else if probe_region_changed {
                     format!(
                         "配置已保存到 {}。F1-P 区域已改动{}，请重新执行“标签取区”完成建模确认后再启动追踪。",
@@ -6038,14 +6160,20 @@ impl TrackerWorkbench {
                         "配置已保存到 {}。当前追踪需重启后才会完全应用新参数。",
                         path.display()
                     )
-                    .into()
                 } else {
-                    format!("配置已保存到 {}。", path.display()).into()
+                    format!("配置已保存到 {}。", path.display())
                 };
+                self.status_text = message.clone().into();
+                if model_clear_error.is_some() || probe_region_changed {
+                    self.push_warning_toast(message, cx);
+                } else {
+                    self.push_success_toast(message, cx);
+                }
             }
             Err(error) => {
                 error!(error = %error, "failed to save application config");
                 self.status_text = format!("保存配置失败：{error:#}").into();
+                self.push_error_toast(self.status_text.clone(), cx);
             }
         }
     }
@@ -7357,15 +7485,25 @@ impl TrackerWorkbench {
         self.set_paged_list_page(PagedListKind::Points, point_page, window, cx);
     }
 
-    fn persist_group(&mut self, group_id: &RouteId, action_label: &str) -> bool {
-        self.persist_group_inner(group_id, Some(action_label))
+    fn persist_group(
+        &mut self,
+        group_id: &RouteId,
+        action_label: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.persist_group_inner(group_id, Some(action_label), Some(cx))
     }
 
     fn persist_group_silently(&mut self, group_id: &RouteId) -> bool {
-        self.persist_group_inner(group_id, None)
+        self.persist_group_inner(group_id, None, None)
     }
 
-    fn persist_group_inner(&mut self, group_id: &RouteId, action_label: Option<&str>) -> bool {
+    fn persist_group_inner(
+        &mut self,
+        group_id: &RouteId,
+        action_label: Option<&str>,
+        cx: Option<&mut Context<Self>>,
+    ) -> bool {
         let Some(index) = self
             .route_groups
             .iter()
@@ -7410,13 +7548,19 @@ impl TrackerWorkbench {
                 }
                 self.sync_workspace_routes_snapshot();
                 if let Some(action_label) = action_label {
-                    self.status_text =
-                        format!("{action_label}，已保存到 {}。", path.display()).into();
+                    let message = format!("{action_label}，已保存到 {}。", path.display());
+                    self.status_text = message.clone().into();
+                    if let Some(cx) = cx {
+                        self.push_success_toast(message, cx);
+                    }
                 }
                 true
             }
             Err(error) => {
                 self.status_text = format!("保存路线失败：{error:#}").into();
+                if let Some(cx) = cx {
+                    self.push_error_toast(self.status_text.clone(), cx);
+                }
                 false
             }
         }

@@ -34,6 +34,10 @@ pub(super) struct WorkbenchThemeTokens {
     pub(super) preview_inertial: Hsla,
     pub(super) preview_ring: Hsla,
     pub(super) selected_marker_border: Hsla,
+    pub(super) toast_info_accent: Hsla,
+    pub(super) toast_success_accent: Hsla,
+    pub(super) toast_warning_accent: Hsla,
+    pub(super) toast_error_accent: Hsla,
 }
 
 impl WorkbenchThemeTokens {
@@ -112,6 +116,12 @@ impl WorkbenchThemeTokens {
                 .background
                 .mix(theme.foreground, if is_dark { 0.12 } else { 0.45 }),
             selected_marker_border: theme.danger,
+            toast_info_accent: theme
+                .foreground
+                .mix(theme.muted_foreground, if is_dark { 0.76 } else { 0.52 }),
+            toast_success_accent: theme.accent,
+            toast_warning_accent: theme.warning,
+            toast_error_accent: theme.danger,
         }
     }
 }

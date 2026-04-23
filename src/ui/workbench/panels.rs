@@ -33,7 +33,8 @@ use crate::{
 };
 
 use super::{
-    MapCanvasKind, TestCaseLabel, TrackerCacheKind, TrackerMapRenderSnapshot, TrackerWorkbench,
+    MapCanvasKind, TestCaseLabel, ToastLevel, ToastMessage, TrackerCacheKind,
+    TrackerMapRenderSnapshot, TrackerWorkbench,
     debug_images::contained_image_bounds,
     forms::read_input_value,
     page::{MapPage, SettingsPage, WorkbenchPage},
@@ -56,6 +57,7 @@ pub(super) fn render_workbench(
 
     div()
         .size_full()
+        .relative()
         .bg(tokens.app_bg)
         .text_color(tokens.app_fg)
         .p_5()
@@ -78,6 +80,9 @@ pub(super) fn render_workbench(
                         .child(page_content),
                 ),
         )
+        .when_some(render_toast_stack(this, cx, tokens), |root, overlay| {
+            root.child(overlay)
+        })
 }
 
 fn navigation_sidebar(
@@ -1446,6 +1451,159 @@ fn page_header(
                 .child(div().flex_1())
                 .children(controls),
         )
+}
+
+fn render_toast_stack(
+    this: &TrackerWorkbench,
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+) -> Option<AnyElement> {
+    if this.toast_queue.is_empty() {
+        return None;
+    }
+
+    let toasts = this.toast_queue.iter().rev().cloned().collect::<Vec<_>>();
+    Some(
+        div()
+            .absolute()
+            .top(px(24.0))
+            .right(px(24.0))
+            .w(px(360.0))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .children(
+                toasts
+                    .into_iter()
+                    .map(|toast| render_toast_card(toast, cx, tokens).into_any_element()),
+            )
+            .into_any_element(),
+    )
+}
+
+fn render_toast_card(
+    toast: ToastMessage,
+    cx: &mut Context<TrackerWorkbench>,
+    tokens: WorkbenchThemeTokens,
+) -> impl IntoElement {
+    let (accent, level_label, icon) = toast_presentation(toast.level, tokens);
+    let close_id = toast.id;
+
+    div()
+        .id(("toast", close_id))
+        .w_full()
+        .rounded_xl()
+        .bg(tokens.panel_bg)
+        .border_1()
+        .border_color(tokens.border_strong)
+        .shadow_xs()
+        .overflow_hidden()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_mouse_up(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .child(
+            div()
+                .w_full()
+                .px_3()
+                .py_3()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .flex()
+                        .items_start()
+                        .gap_3()
+                        .child(
+                            div()
+                                .mt(px(1.0))
+                                .w(px(28.0))
+                                .h(px(28.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(accent.opacity(0.16))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(accent)
+                                        .child(icon),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(accent)
+                                        .child(level_label),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .line_height(px(20.0))
+                                        .text_color(tokens.app_fg)
+                                        .child(toast.text),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(("toast-close", close_id))
+                        .w(px(24.0))
+                        .h(px(24.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .bg(tokens.nav_item_bg)
+                        .border_1()
+                        .border_color(tokens.border)
+                        .tooltip(|window, cx| Tooltip::new("关闭提示").build(window, cx))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(tokens.nav_item_hover_bg))
+                        .active(|style| style.opacity(0.92))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if this.dismiss_toast(close_id) {
+                                cx.notify();
+                            }
+                        }))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(tokens.text_muted)
+                                .child("×"),
+                        ),
+                ),
+        )
+}
+
+fn toast_presentation(
+    level: ToastLevel,
+    tokens: WorkbenchThemeTokens,
+) -> (gpui::Hsla, &'static str, &'static str) {
+    match level {
+        ToastLevel::Info => (tokens.toast_info_accent, "提示", "i"),
+        ToastLevel::Success => (tokens.toast_success_accent, "完成", "✓"),
+        ToastLevel::Warning => (tokens.toast_warning_accent, "注意", "!"),
+        ToastLevel::Error => (tokens.toast_error_accent, "错误", "×"),
+    }
 }
 
 fn map_page(
