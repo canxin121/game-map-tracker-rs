@@ -3580,44 +3580,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "game-map-tracker-rs"
-version = "0.1.0"
-dependencies = [
- "burn",
- "crossbeam-channel",
- "cubecl-cuda",
- "cubecl-runtime",
- "cubecl-wgpu",
- "derive_more 2.1.1",
- "directories",
- "futures-util",
- "gpui",
- "gpui-component",
- "image 0.25.10",
- "imageproc",
- "libmimalloc-sys",
- "mimalloc",
- "parking_lot",
- "raw-window-handle",
- "rayon",
- "regex",
- "rfd",
- "safetensors 0.7.0",
- "schemars",
- "screenshots",
- "serde",
- "serde_json",
- "strum 0.28.0",
- "thiserror 2.0.18",
- "toml 1.1.2+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
- "ureq 3.3.0",
- "uuid",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "gemm"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7381,6 +7343,44 @@ checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
 dependencies = [
  "rmp",
  "serde",
+]
+
+[[package]]
+name = "rocom-compass"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "crossbeam-channel",
+ "cubecl-cuda",
+ "cubecl-runtime",
+ "cubecl-wgpu",
+ "derive_more 2.1.1",
+ "directories",
+ "futures-util",
+ "gpui",
+ "gpui-component",
+ "image 0.25.10",
+ "imageproc",
+ "libmimalloc-sys",
+ "mimalloc",
+ "parking_lot",
+ "raw-window-handle",
+ "rayon",
+ "regex",
+ "rfd",
+ "safetensors 0.7.0",
+ "schemars",
+ "screenshots",
+ "serde",
+ "serde_json",
+ "strum 0.28.0",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "ureq 3.3.0",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

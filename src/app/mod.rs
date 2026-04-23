@@ -37,7 +37,7 @@ pub fn launch() -> Result<()> {
             cx.open_window(
                 WindowOptions {
                     titlebar: Some(gpui::TitlebarOptions {
-                        title: Some("Game Map Tracker RS".into()),
+                        title: Some("rocom-compass".into()),
                         appears_transparent: false,
                         ..Default::default()
                     }),
@@ -68,11 +68,11 @@ pub fn launch() -> Result<()> {
 fn configure_windows_capture_compatibility() {
     #[cfg(target_os = "windows")]
     {
-        const GAME_MAP_TRACKER_CAPTURE_COMPAT: &str = "GAME_MAP_TRACKER_CAPTURE_COMPAT";
+        const ROCOM_COMPASS_CAPTURE_COMPAT: &str = "ROCOM_COMPASS_CAPTURE_COMPAT";
         const GPUI_DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
 
         if std::env::var_os(GPUI_DISABLE_DIRECT_COMPOSITION).is_none()
-            && std::env::var_os(GAME_MAP_TRACKER_CAPTURE_COMPAT).is_some()
+            && std::env::var_os(ROCOM_COMPASS_CAPTURE_COMPAT).is_some()
         {
             // Transparent picker overlays require DirectComposition on Windows.
             // Keep the older capture-compatibility path as an explicit opt-in.
@@ -87,7 +87,7 @@ pub fn init_tracing() {
     let debug_log_store = install_debug_log_store(2_000);
     let fmt_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,gpui_component=warn"));
-    let debug_filter = EnvFilter::new("game_map_tracker_rs=debug,info,gpui_component=warn");
+    let debug_filter = EnvFilter::new("rocom_compass=debug,info,gpui_component=warn");
 
     let _ = tracing_subscriber::registry()
         .with(

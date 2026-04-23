@@ -80,7 +80,7 @@ pub(crate) fn burn_score_map_capture_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
 
     *ENABLED.get_or_init(|| {
-        env::var("GAME_MAP_TRACKER_DEBUG_HEATMAP")
+        env::var("ROCOM_COMPASS_DEBUG_HEATMAP")
             .ok()
             .map(|value| {
                 let value = value.trim().to_ascii_lowercase();

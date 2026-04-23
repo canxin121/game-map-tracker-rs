@@ -26,7 +26,7 @@ use crate::{
     error::{ContextExt as _, Result},
 };
 
-const USER_AGENT: &str = "game-map-tracker-rs-bwiki-runtime/1.0";
+const USER_AGENT: &str = "rocom-compass-bwiki-runtime/1.0";
 const DATASET_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const TILE_SIZE: u32 = 256;
 pub const BWIKI_WORLD_ZOOM: u8 = 8;

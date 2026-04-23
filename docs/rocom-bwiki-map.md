@@ -89,48 +89,6 @@ BWiki 点位里的 `point.lat/lng` 则是 Leaflet 地图使用的原始坐标，
 - 直接复用页面当前已经展开好的结果
 - 图标 URL 已经是最终 CDN 地址
 
-## 仓库里的同步脚本
-
-已提供：
-
-- `scripts/sync-bwiki-rocom.mjs`
-- `scripts/sync-bwiki-rocom-tiles.mjs`
-
-默认输出目录：
-
-- `.tmp-bwiki-rocom/`
-
-运行方式：
-
-```powershell
-node scripts/sync-bwiki-rocom.mjs
-node scripts/sync-bwiki-rocom.mjs --skip-icons
-node scripts/sync-bwiki-rocom.mjs --out-dir D:\tmp\rocom-bwiki
-```
-
-脚本会生成：
-
-- `types.json`
-- `points-by-type.json`
-- `flat-points.json`
-- `summary.json`
-- `manifest.json`
-- `icons/`
-
-瓦片脚本用途：
-
-- 自动探测 `z=4..8` 的有效瓦片范围
-- 下载各个 zoom 的原始瓦片 PNG
-- 可选把每个 zoom 拼成一张完整底图
-
-运行方式：
-
-```powershell
-node scripts/sync-bwiki-rocom-tiles.mjs
-node scripts/sync-bwiki-rocom-tiles.mjs --probe-only
-node scripts/sync-bwiki-rocom-tiles.mjs --min-zoom 8 --max-zoom 8 --skip-stitch
-```
-
 目前已确认的有效范围是：
 
 - `z=4` -> `x=-2..1`, `y=-2..1`
@@ -149,4 +107,4 @@ node scripts/sync-bwiki-rocom-tiles.mjs --min-zoom 8 --max-zoom 8 --skip-stitch
 - 其中非空类型约 `139` 个
 - 其中有 `804/805/806` 三个 `markType` 在点位总表里存在，但当前 `type/json` 目录里没有对应定义
 
-这些数字会随 Wiki 更新变化，脚本每次运行都会重新拉最新数据。
+这些数字会随 Wiki 更新变化，后续重新抓取时也会随之变化。

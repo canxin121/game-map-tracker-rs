@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use directories::ProjectDirs;
+use directories::BaseDirs;
 use tracing::{debug, info};
 
 use crate::{
@@ -12,10 +12,8 @@ use crate::{
     resources::{BwikiCachePaths, RouteRepository},
 };
 
-const DATA_DIR_ENV: &str = "GAME_MAP_TRACKER_RS_DATA_DIR";
-const APP_QUALIFIER: &str = "io";
-const APP_ORGANIZATION: &str = "rocom";
-const APP_NAME: &str = "game-map-tracker-rs";
+const DATA_DIR_ENV: &str = "ROCOM_COMPASS_DATA_DIR";
+const APP_NAME: &str = "rocom-compass";
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceBootstrap {
@@ -55,9 +53,9 @@ fn data_dir_override_path() -> Result<Option<PathBuf>> {
 }
 
 fn default_workspace_root() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from(APP_QUALIFIER, APP_ORGANIZATION, APP_NAME)
-        .ok_or_else(|| crate::app_error!("failed to resolve project directories"))?;
-    Ok(dirs.data_local_dir().to_path_buf())
+    let dirs =
+        BaseDirs::new().ok_or_else(|| crate::app_error!("failed to resolve base directories"))?;
+    Ok(dirs.data_local_dir().join(APP_NAME))
 }
 
 fn ensure_default_config(root: &Path) -> Result<()> {
@@ -89,7 +87,11 @@ fn ensure_workspace_layout(root: &Path) -> Result<()> {
 }
 
 fn remove_obsolete_workspace_paths(root: &Path) -> Result<()> {
-    for file in ["config.json", ".game-map-tracker-rs.json"] {
+    for file in [
+        "config.json",
+        ".game-map-tracker-rs.json",
+        ".rocom-compass.json",
+    ] {
         let path = root.join(file);
         if path.is_file() {
             fs::remove_file(&path)

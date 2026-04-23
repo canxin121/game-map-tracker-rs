@@ -1111,8 +1111,7 @@ mod tests {
 
     #[test]
     fn tensor_cache_roundtrip_preserves_shape_and_values() -> Result<()> {
-        let root =
-            env::temp_dir().join(format!("game-map-tracker-rs-precompute-{}", Uuid::new_v4()));
+        let root = env::temp_dir().join(format!("rocom-compass-precompute-{}", Uuid::new_v4()));
         let path = root.join("tensor-cache.bin");
         let cache = PersistedTensorCache::from_parts(
             3,
@@ -1134,7 +1133,7 @@ mod tests {
     #[test]
     fn tensor_cache_loads_legacy_v1_layout() -> Result<()> {
         let root = env::temp_dir().join(format!(
-            "game-map-tracker-rs-precompute-legacy-{}",
+            "rocom-compass-precompute-legacy-{}",
             Uuid::new_v4()
         ));
         let path = root.join("tensor-cache-v1.bin");
@@ -1182,10 +1181,7 @@ mod tests {
 
     #[test]
     fn tracker_source_hash_cache_roundtrip_preserves_values() -> Result<()> {
-        let root = env::temp_dir().join(format!(
-            "game-map-tracker-rs-source-hash-{}",
-            Uuid::new_v4()
-        ));
+        let root = env::temp_dir().join(format!("rocom-compass-source-hash-{}", Uuid::new_v4()));
         let path = root.join("source-hashes").join("z8-sv1.json");
         let hashes = TrackerSourceHashes {
             fast_fingerprint: "fast-fingerprint".to_owned(),

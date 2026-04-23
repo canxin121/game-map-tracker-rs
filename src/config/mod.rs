@@ -343,7 +343,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("game-map-tracker-rs-{test_name}-{unique}"));
+        let path = std::env::temp_dir().join(format!("rocom-compass-{test_name}-{unique}"));
         fs::create_dir_all(&path).expect("failed to create temp config root");
         path
     }

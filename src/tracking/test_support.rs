@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use directories::ProjectDirs;
+use directories::BaseDirs;
 use image::{GrayImage, RgbaImage};
 
 #[cfg(burn_vulkan_backend)]
@@ -22,10 +22,8 @@ use crate::{
     tracking::vision::synthesize_runtime_capture_rgba_from_map,
 };
 
-const APP_QUALIFIER: &str = "io";
-const APP_ORGANIZATION: &str = "rocom";
-const APP_NAME: &str = "game-map-tracker-rs";
-const DATA_DIR_ENV: &str = "GAME_MAP_TRACKER_RS_DATA_DIR";
+const APP_NAME: &str = "rocom-compass";
+const DATA_DIR_ENV: &str = "ROCOM_COMPASS_DATA_DIR";
 const GLOBAL_SIGNATURE_GRID: usize = 12;
 const GLOBAL_SIGNATURE_LEN: usize = GLOBAL_SIGNATURE_GRID * GLOBAL_SIGNATURE_GRID * 2;
 const GLOBAL_SIGNATURE_BANK_SIZE: usize = 192;
@@ -33,7 +31,7 @@ const GLOBAL_SIGNATURE_PROBE_SIZE: usize = 96;
 
 pub(crate) fn build_test_workspace(config: AppConfig, namespace: &str) -> WorkspaceSnapshot {
     let project_root = env::temp_dir()
-        .join("game-map-tracker-rs-test-workspace")
+        .join("rocom-compass-test-workspace")
         .join(namespace);
     let bwiki_cache_dir = runtime_workspace_root().join("cache").join("bwiki");
     let tracking_cache_dir = project_root.join("cache").join("tracking");
@@ -275,9 +273,7 @@ pub(crate) fn write_stress_report(
     stats: &StressRoundStats,
     note: &str,
 ) -> PathBuf {
-    let root = env::temp_dir()
-        .join("game-map-tracker-rs-stress")
-        .join(engine);
+    let root = env::temp_dir().join("rocom-compass-stress").join(engine);
     fs::create_dir_all(&root).expect("failed to create stress report directory");
     let path = root.join(format!("round-{round:02}.txt"));
     let mut report = String::new();
@@ -352,10 +348,10 @@ fn runtime_workspace_root() -> PathBuf {
         }
     }
 
-    ProjectDirs::from(APP_QUALIFIER, APP_ORGANIZATION, APP_NAME)
+    BaseDirs::new()
         .unwrap_or_else(|| panic!("failed to resolve runtime workspace root"))
         .data_local_dir()
-        .to_path_buf()
+        .join(APP_NAME)
 }
 
 fn align_to(value: u32, step: u32) -> u32 {

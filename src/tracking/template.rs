@@ -2715,34 +2715,31 @@ mod tests {
     static FIXTURE: OnceLock<TestFixture> = OnceLock::new();
 
     fn max_rounds() -> usize {
-        stress_env_usize("GAME_MAP_TRACKER_STRESS_ROUNDS", MAX_ROUNDS)
+        stress_env_usize("ROCOM_COMPASS_STRESS_ROUNDS", MAX_ROUNDS)
     }
 
     fn min_rounds_before_success(max_rounds: usize) -> usize {
-        stress_env_usize("GAME_MAP_TRACKER_STRESS_MIN_ROUNDS", 1).min(max_rounds.max(1))
+        stress_env_usize("ROCOM_COMPASS_STRESS_MIN_ROUNDS", 1).min(max_rounds.max(1))
     }
 
     fn global_cases_per_round() -> usize {
-        stress_env_usize(
-            "GAME_MAP_TRACKER_STRESS_GLOBAL_CASES",
-            GLOBAL_CASES_PER_ROUND,
-        )
+        stress_env_usize("ROCOM_COMPASS_STRESS_GLOBAL_CASES", GLOBAL_CASES_PER_ROUND)
     }
 
     fn local_steps_per_case() -> usize {
-        stress_env_usize("GAME_MAP_TRACKER_STRESS_LOCAL_STEPS", LOCAL_STEPS_PER_CASE)
+        stress_env_usize("ROCOM_COMPASS_STRESS_LOCAL_STEPS", LOCAL_STEPS_PER_CASE)
     }
 
     fn local_step_min() -> u32 {
-        stress_env_u32("GAME_MAP_TRACKER_STRESS_LOCAL_STEP_MIN", LOCAL_STEP_MIN)
+        stress_env_u32("ROCOM_COMPASS_STRESS_LOCAL_STEP_MIN", LOCAL_STEP_MIN)
     }
 
     fn local_step_max() -> u32 {
-        stress_env_u32("GAME_MAP_TRACKER_STRESS_LOCAL_STEP_MAX", LOCAL_STEP_MAX)
+        stress_env_u32("ROCOM_COMPASS_STRESS_LOCAL_STEP_MAX", LOCAL_STEP_MAX)
     }
 
     fn perf_iterations() -> usize {
-        stress_env_usize("GAME_MAP_TRACKER_TEMPLATE_PERF_ITERS", 48)
+        stress_env_usize("ROCOM_COMPASS_TEMPLATE_PERF_ITERS", 48)
     }
 
     fn template_env_f32(name: &str, default: f32) -> f32 {
@@ -2758,19 +2755,19 @@ mod tests {
             let (fixture, elapsed) = timed(|| {
                 let mut config = runtime_config_or_default();
                 config.template.global_match_threshold = template_env_f32(
-                    "GAME_MAP_TRACKER_TEMPLATE_GLOBAL_THRESHOLD",
+                    "ROCOM_COMPASS_TEMPLATE_GLOBAL_THRESHOLD",
                     config.template.global_match_threshold,
                 );
                 config.template.local_match_threshold = template_env_f32(
-                    "GAME_MAP_TRACKER_TEMPLATE_LOCAL_THRESHOLD",
+                    "ROCOM_COMPASS_TEMPLATE_LOCAL_THRESHOLD",
                     config.template.local_match_threshold,
                 );
                 config.template.global_downscale = stress_env_u32(
-                    "GAME_MAP_TRACKER_TEMPLATE_GLOBAL_DOWNSCALE",
+                    "ROCOM_COMPASS_TEMPLATE_GLOBAL_DOWNSCALE",
                     config.template.global_downscale,
                 );
                 config.template.local_downscale = stress_env_u32(
-                    "GAME_MAP_TRACKER_TEMPLATE_LOCAL_DOWNSCALE",
+                    "ROCOM_COMPASS_TEMPLATE_LOCAL_DOWNSCALE",
                     config.template.local_downscale,
                 );
                 let workspace = build_test_workspace(config.clone(), "template-vulkan");

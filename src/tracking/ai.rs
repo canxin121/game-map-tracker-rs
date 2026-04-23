@@ -736,7 +736,7 @@ pub fn run_encoder_training_cli(args: Vec<OsString>) -> Result<()> {
 
 fn print_encoder_training_usage() {
     println!(
-        "用法: game-map-tracker-rs train-encoder [workspace_root] [选项]\n\
+        "用法: rocom-compass train-encoder [workspace_root] [选项]\n\
          选项:\n\
          \t--workspace <path>                指定训练数据工作区根目录，默认使用 app 运行目录\n\
          \t--output <path>                   最终/持续导出的 safetensors，默认写入仓库 models/tracker_encoder.safetensors\n\
@@ -2769,30 +2769,27 @@ mod tests {
     static FIXTURE: OnceLock<TestFixture> = OnceLock::new();
 
     fn max_rounds() -> usize {
-        stress_env_usize("GAME_MAP_TRACKER_STRESS_ROUNDS", MAX_ROUNDS)
+        stress_env_usize("ROCOM_COMPASS_STRESS_ROUNDS", MAX_ROUNDS)
     }
 
     fn min_rounds_before_success(max_rounds: usize) -> usize {
-        stress_env_usize("GAME_MAP_TRACKER_STRESS_MIN_ROUNDS", 1).min(max_rounds.max(1))
+        stress_env_usize("ROCOM_COMPASS_STRESS_MIN_ROUNDS", 1).min(max_rounds.max(1))
     }
 
     fn global_cases_per_round() -> usize {
-        stress_env_usize(
-            "GAME_MAP_TRACKER_STRESS_GLOBAL_CASES",
-            GLOBAL_CASES_PER_ROUND,
-        )
+        stress_env_usize("ROCOM_COMPASS_STRESS_GLOBAL_CASES", GLOBAL_CASES_PER_ROUND)
     }
 
     fn local_steps_per_case() -> usize {
-        stress_env_usize("GAME_MAP_TRACKER_STRESS_LOCAL_STEPS", LOCAL_STEPS_PER_CASE)
+        stress_env_usize("ROCOM_COMPASS_STRESS_LOCAL_STEPS", LOCAL_STEPS_PER_CASE)
     }
 
     fn local_step_min() -> u32 {
-        stress_env_u32("GAME_MAP_TRACKER_STRESS_LOCAL_STEP_MIN", LOCAL_STEP_MIN)
+        stress_env_u32("ROCOM_COMPASS_STRESS_LOCAL_STEP_MIN", LOCAL_STEP_MIN)
     }
 
     fn local_step_max() -> u32 {
-        stress_env_u32("GAME_MAP_TRACKER_STRESS_LOCAL_STEP_MAX", LOCAL_STEP_MAX)
+        stress_env_u32("ROCOM_COMPASS_STRESS_LOCAL_STEP_MAX", LOCAL_STEP_MAX)
     }
 
     fn fixture() -> &'static TestFixture {

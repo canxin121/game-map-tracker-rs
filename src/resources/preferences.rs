@@ -12,7 +12,7 @@ use crate::{
     error::{ContextExt as _, Result},
 };
 
-const UI_PREFERENCES_FILE_NAME: &str = ".game-map-tracker-rs.toml";
+const UI_PREFERENCES_FILE_NAME: &str = ".rocom-compass.toml";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(default)]

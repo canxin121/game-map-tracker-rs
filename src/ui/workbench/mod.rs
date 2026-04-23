@@ -1427,9 +1427,7 @@ impl TrackerWorkbench {
                     error = %error,
                     "failed to initialize BWiki resource manager, trying fallback cache"
                 );
-                let fallback = env::temp_dir()
-                    .join("game-map-tracker-rs")
-                    .join("bwiki-cache");
+                let fallback = env::temp_dir().join("rocom-compass").join("bwiki-cache");
                 let manager = BwikiResourceManager::new(fallback.clone())
                     .unwrap_or_else(|fallback_error| {
                         error!(

@@ -1,180 +1,160 @@
-# Game Map Tracker RS
+# rocom-compass
 
-完全独立的纯 Rust / GPUI 桌面版 Game Map Tracker。
+`rocom-compass` 是一个面向《洛克王国》的桌面工具。
 
-这个 repo 不再依赖上级 `Game-Map-Tracker` 仓库，也不再依赖本机相邻目录里的 `gpui-component` 源码。运行时地图瓦片、Wiki 图标和点位目录全部由 Rust 直接从 Bilibili Wiki 拉取并缓存；默认配置不再来自模板文件，而是由 Rust `Default` 直接生成并写入用户数据目录，标记组 routes 完全由用户自行导入或创建。
+它会实时解析游戏小地图，推断角色在大地图中的位置，并把当前位置与自定义路线叠加显示，方便玩家按路线跑图，持续收集材料、宝箱和其他地图资源。
 
-## Standalone 设计
+## 是什么
 
-- `gpui` 使用 crates.io 依赖。
-- `gpui-component` 使用 crates.io 依赖，不再读取本机 `gpui-component` 子目录。
-- BWiki 是运行时真实数据源：
-  - 点位类型目录：`Data:Mapnew/type/json`
-  - 点位总表：`Data:Mapnew/point.json`
-  - 瓦片底图：`map-3.0/{z}/tile-{x}_{y}.png`
-- `build.rs` 现在只内置 UI SVG 图标，不再把地图瓦片和点位 PNG 编译进二进制。
-- `src/resources/bootstrap.rs` 在本地缺失 `config.toml` 时，用 `AppConfig::default()` 直接生成默认配置。
-- `src/resources/bwiki.rs` 负责 Rust 侧数据抓取、瓦片/图标缓存和点位坐标转换。
-- `src/resources/bootstrap.rs` 不再写出地图、图标和默认 routes，只创建数据目录与缓存目录。
-- JS 脚本不是产品运行链路。应用本身只走 Rust 代码路径。
-- 运行时默认数据目录在系统用户数据目录下，不会读写父级旧仓库。
-- 唯一支持的运行时环境变量是 `GAME_MAP_TRACKER_RS_DATA_DIR`，仅用于覆盖数据目录。
+`rocom-compass` 的核心目标很简单：
 
-## 快速启动
+- 自动读取小地图画面，尽量稳定地判断人物当前所在位置
+- 支持导入、创建和编辑路线
+- 在跑图过程中把人物位置和路线同时显示出来
+- 让“跟着路线走”这件事足够直观，减少反复开网页、切地图、手动对点的成本
+
+它面向桌面直接运行，发布后可以单二进制形式分发，不需要额外安装 Python、Node.js 或其他运行时环境。
+
+## 功能
+
+- 实时追踪人物位置
+  - 从桌面截图中抓取小地图区域
+  - 结合模板匹配和卷积特征匹配推断人物坐标
+- 路线管理
+  - 支持导入已有路线
+  - 支持按分组管理路线
+  - 支持在地图上查看路线节点和折线
+- 节点图鉴
+  - 支持查看节点图鉴中的分类、类型、图标和点位
+  - 支持从节点图鉴中筛选需要的采集节点
+  - 支持把选中的节点作为规划输入
+- 地图浏览
+  - 支持查看 BWiki 全图
+  - 支持按分类显示和筛选 Wiki 点位
+- 自动路线规划
+  - 支持在节点图鉴中选点后自动生成路线预览
+  - 支持把传送点纳入规划过程，尽量减少不必要的绕路
+  - 支持在确认预览后直接创建并保存为路线
+- 追踪辅助
+  - 实时显示当前位置与移动轨迹
+  - 丢失定位后自动尝试重定位
+  - 支持缓存地图与追踪预计算结果，减少重复准备开销
+- 配置与持久化
+  - 首次启动自动生成默认配置
+  - 自动保存 UI 偏好和本地数据缓存
+
+## 特点
+
+### 性能相关特点
+
+- 单二进制，易部署
+  - 发布后可直接运行，不需要额外安装 Python、Node.js 或其他运行时依赖
+  - 对普通用户更省事，迁移和分发成本也更低
+- GPU 友好
+  - 默认构建会按平台带上可用的 GPU 后端
+  - Windows 默认支持 `CPU / CUDA / Vulkan`
+  - macOS 默认支持 `CPU / Metal`
+  - 其他平台默认支持 `CPU / Vulkan`
+- 双追踪引擎
+  - `MultiScaleTemplateMatch` 适合稳定、直接的模板匹配追踪
+  - `ConvolutionFeatureMatch` 适合使用卷积特征和张量相似度做更强的搜索匹配
+- 节点图鉴直接驱动路线生成
+  - 不是只做“看点位”，而是可以从节点图鉴里直接选节点、规划顺序并落成路线
+  - 规划过程会结合点位之间的步行距离和传送点连接成本生成路线预览
+- 预计算与持久化缓存
+  - 会把逻辑地图金字塔、搜索张量等结果缓存到本地
+  - 首次启动或地图数据变化后准备时间会更长，后续启动会明显减少重复计算
+- 局部跟踪优先
+  - 已锁定位置时优先在局部区域搜索，减少全图扫描成本
+  - 丢失后再退回全局低分辨率重定位，再做局部精修
+- UI 与追踪分离
+  - 追踪在后台线程运行，状态和调试信息通过 channel 回传界面
+  - 地图瓦片按需加载，避免一次性把全部可视资源压进前台界面
+
+## 怎么用
+
+### 启动
 
 ```powershell
 cargo run
 ```
 
-默认启用 `ai-burn`，并会按当前平台自动编进对应的 GPU 后端：
-
-- Windows 默认构建包含 `CPU / CUDA / Vulkan`
-- macOS 默认构建包含 `CPU / Metal`
-- 其他平台默认构建包含 `CPU / Vulkan`
-
-如果需要显式覆盖默认行为，仍然可以手动指定特性：
+如需把数据目录改到其他位置，可以先设置环境变量：
 
 ```powershell
-cargo run --no-default-features
-cargo run --features ai-burn
-```
-
-## 当前结构
-
-```text
-build.rs                编译期扫描 UI 静态资源并生成 include_bytes! 表
-src/app/                GPUI 启动、窗口初始化、资产加载源
-src/config/             config.toml 的强类型映射与默认值
-src/domain/             地图几何、路线、标记点、主题、追踪状态等领域模型
-src/resources/          数据目录引导、BWiki 抓取缓存、标记点与 UI 偏好持久化
-src/tracking/           截图、模板匹配、卷积特征后端、运行时线程、调试快照
-src/ui/                 GPUI 工作台、分页导航、双地图子页、标记点编辑界面
-```
-
-## 已实现能力
-
-- 独立数据目录引导
-  - 首次启动自动生成默认 `config.toml`
-- 自动创建 `cache/bwiki/` 目录用于缓存点位、图标和瓦片
-- 自动创建 `cache/tracking/` 目录用于缓存追踪预计算结果
-  - 不再内置任何默认 routes，标记组完全由用户导入或创建
-
-- GPUI 工作台
-  - 多页面导航：地图、标记、设置
-  - 地图二级导航：路线追踪 / BWiki 全图
-  - 设置页二级导航：配置、调试信息、资源
-- 地图页会按视口和缩放级别按需加载 BWiki 瓦片
-  - BWiki 全图页支持按分类展示全部 Wiki 类型，并支持多选开关显示
-  - 缩放 / 拖拽相机
-  - 路线节点与折线绘制
-  - 实时追踪点与轨迹回显
-  - 分组标记点 CRUD
-  - 支持多选文件导入和整目录导入 routes
-  - 分组多选显示开关
-  - 标记点图标、颜色、尺寸样式
-  - Follow System / Light / Dark 主题切换和持久化
-
-- 纯 Rust 追踪运行时
-  - 使用 `screenshots` 抓取桌面小地图
-  - 使用 `image` / `imageproc` 进行灰度化、缩放、直方图均衡和搜索裁剪
-  - 使用 `burn` 进行模板匹配张量计算、固定卷积特征编码和 F1-P 标签探针 GPU/CPU 推理
-  - 预计算并持久化逻辑地图金字塔与全局搜索张量，减少追踪器再次启动时的初始化开销
-  - 统一状态机：`LocalTrack`、`GlobalRelocate`、`InertialHold`
-  - 后台线程通过 channel 把状态、坐标和调试图送回 GPUI
-
-## 追踪方案
-
-当前有两个可运行引擎：
-
-- `MultiScaleTemplateMatch`
-- `ConvolutionFeatureMatch`
-
-`MultiScaleTemplateMatch` 使用多尺度模板匹配金字塔：
-
-- 本地锁定时，在上次坐标附近做局部匹配。
-- 丢失时，切回全局低分辨率重定位，再局部精修。
-- 连续失败时，进入惯性保位，超过阈值后重新全局搜。
-- 匹配打分使用 Burn 张量后端实现的 masked normalized cross-correlation，可在 `cpu / cuda / vulkan / metal` 间按运行时配置切换。
-
-`ConvolutionFeatureMatch` 使用卷积特征 + 张量相似度后端：
-
-- 固定 3x3 卷积核提取边缘、Laplacian、对角纹理和平滑特征。
-- 把 minimap 与地图搜索区域编码成多通道特征图。
-- 用张量运算计算 masked cosine-style score map。
-- 复用局部锁定、全局重定位、惯性保位状态机。
-
-## 运行时数据目录
-
-默认数据目录位置由 `directories` crate 按平台解析，例如 Windows 下会落到本机用户数据目录。程序会在 `config.toml` 缺失时用 Rust 默认值生成一份新的配置，不会覆盖已有的用户编辑结果；`routes/`、`config.toml`、`.game-map-tracker-rs.toml` 和 `cache/bwiki/` 都固定从该数据目录读取。追踪器额外会在 `cache/tracking/` 下缓存预处理地图金字塔和全局搜索张量；当 BWiki 瓦片、模板缩放配置或特征编码器权重发生变化时，会自动失效并重新生成。
-
-覆盖数据目录路径：
-
-```powershell
-$env:GAME_MAP_TRACKER_RS_DATA_DIR = "D:\path\to\data"
+$env:ROCOM_COMPASS_DATA_DIR = "D:\path\to\data"
 cargo run
 ```
 
-数据目录结构：
+Windows 默认数据目录会落在：
 
 ```text
-data/
+%LOCALAPPDATA%\rocom-compass
+```
+
+### 首次使用
+
+1. 启动程序。
+2. 首次启动时，程序会自动创建数据目录、默认 `config.toml`、`routes/`、`cache/bwiki/` 和 `cache/tracking/`。
+3. 程序会在运行时从 BWiki 拉取并缓存地图瓦片、图标、类型目录和点位数据。
+4. 打开设置页，先把游戏小地图捕获区域配置好。
+5. 根据需要导入已有路线，或者在地图中创建自己的路线。
+6. 进入路线追踪页，开启追踪后开始跑图。
+
+### 典型使用流程
+
+1. 以窗口化或无边框窗口方式打开《洛克王国》，保证小地图稳定可见。
+2. 在 `rocom-compass` 中完成小地图区域配置。
+3. 导入一条或一组采集路线。
+4. 进入地图页开始追踪。
+5. 一边移动角色，一边参考地图上的当前位置、轨迹和路线折线进行跟路线采集。
+
+### 节点图鉴规划路线
+
+1. 打开节点图鉴页，等待节点图鉴数据同步完成。
+2. 按分类或类型筛选出你要采集的节点。
+3. 进入规划模式，选择本次要跑的节点。
+4. 点击“规划路线”，让程序在后台生成路线预览。
+5. 确认预览结果后，直接创建并保存为路线。
+6. 回到路线追踪页，按生成后的路线开始跑图。
+
+### 本地数据内容
+
+数据目录中通常会包含这些内容：
+
+```text
+rocom-compass/
   config.toml
-  .game-map-tracker-rs.toml
+  .rocom-compass.toml
   cache/
     bwiki/
-      data/
-      icons/
-      tiles/
     tracking/
-      pyramids/
-      tensors/
   routes/
-    *.json
 ```
 
-## 配置字段
+其中：
 
-多尺度模板匹配引擎支持以下扩展字段。`config.toml` 不写也能跑，会使用默认值：
+- `config.toml` 是主要配置文件
+- `routes/` 用来存放路线文件
+- `cache/bwiki/` 用来缓存地图瓦片、图标和点位数据
+- `cache/tracking/` 用来缓存追踪预计算结果
 
-- `TEMPLATE_REFRESH_RATE`
-- `TEMPLATE_LOCAL_DOWNSCALE`
-- `TEMPLATE_GLOBAL_DOWNSCALE`
-- `TEMPLATE_GLOBAL_REFINE_RADIUS`
-- `TEMPLATE_LOCAL_MATCH_THRESHOLD`
-- `TEMPLATE_GLOBAL_MATCH_THRESHOLD`
-- `TEMPLATE_MASK_OUTER_RADIUS`
-- `TEMPLATE_MASK_INNER_RADIUS`
-- `TEMPLATE_DEVICE`
-- `TEMPLATE_DEVICE_INDEX`
+## 致谢
 
-卷积特征匹配后端支持：
+感谢 Bilibili Game 的《洛克王国》Wiki。
 
-- `AI_REFRESH_RATE`
-- `AI_CONFIDENCE_THRESHOLD`
-- `AI_MIN_MATCH_COUNT`
-- `AI_RANSAC_THRESHOLD`
-- `AI_SCAN_SIZE`
-- `AI_SCAN_STEP`
-- `AI_TRACK_RADIUS`
-- `AI_DEVICE`
-- `AI_DEVICE_INDEX`
-- `AI_WEIGHTS_PATH`
+`rocom-compass` 的节点图鉴、地图浏览和部分路线规划能力，依赖洛克王国 Wiki 提供的公开地图数据。
 
-`AI_DEVICE` 支持 `cpu`、`cuda`、`vulkan`、`metal`，但运行时只能切换到当前二进制里实际编进来的后端。默认构建会按平台自动包含对应 GPU 后端，因此：
+运行时主要会拉取并缓存这些数据：
 
-- Windows 默认构建可切换 `cpu / cuda / vulkan`
-- macOS 默认构建可切换 `cpu / metal`
-- 其他平台默认构建可切换 `cpu / vulkan`
+- 地图类型目录：`Data:Mapnew/type/json`
+- 点位总表：`Data:Mapnew/point.json`
+- 地图瓦片：`map-3.0/{z}/tile-{x}_{y}.png`
 
-`TEMPLATE_DEVICE` 也支持 `cpu`、`cuda`、`vulkan`、`metal`，遵循同样的构建约束：
+这些数据为节点图鉴展示、点位图标、地图浏览、节点选点和自动路线规划提供了重要基础。
 
-- Windows 默认构建可切换 `cpu / cuda / vulkan`
-- macOS 默认构建可切换 `cpu / metal`
-- 其他平台默认构建可切换 `cpu / vulkan`
+## 许可证
 
-## 验证
+本项目使用 MIT License 发布。
 
-```powershell
-cargo fmt
-cargo check
-```
+完整许可证文本见 [LICENSE](LICENSE)。
