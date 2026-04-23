@@ -7347,7 +7347,7 @@ dependencies = [
 
 [[package]]
 name = "rocom-compass"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "burn",
  "crossbeam-channel",
